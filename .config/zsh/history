@@ -1,0 +1,13 @@
+lsblk
+sudo mount /dev/sdf /media
+cd /media
+cd new_format
+cd new
+cd Pictures
+ls
+ranger
+clipcopy
+sudo pacman -S clipcopy
+clear
+cd
+czsh

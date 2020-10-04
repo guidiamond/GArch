@@ -1,0 +1,52 @@
+{
+  "suggest.noselect": false,
+  "diagnostic.displayByAle": false,
+  "coc.preferences.rootPatterns": [
+    ".git",
+    ".hg",
+    ".projections.json",
+    "package.json",
+    ".atsln",
+    ".cproj",
+    ".env"
+  ],
+  "coc.preferences.formatOnSaveFiletypes": [
+    "javascript",
+    "c",
+    "c++",
+    "scss",
+    "css",
+    "typescript",
+    "typescriptreact",
+    "json",
+    "javascriptreact",
+    "javascript.tsx",
+    "typescript.tsx"
+  ],
+  "clangd.path": "/home/damndiamond/.config/coc/extensions/coc-clangd-data/install/10.0.0/clangd_10.0.0/bin/clangd",
+  "coc.preferences.colorSupport": true,
+  "diagnostic.errorSign": " ",
+  "diagnostic.warningSign": " ",
+  "diagnostic.hintSign": " ",
+  "eslint.autoFixOnSave": true,
+  "stylelintplus.enable": true,
+  "stylelintplus.autoFixOnSave": true,
+  "css.validate": false,
+  "scss.validate": false,
+  "wxss.validate": false,
+  "less.validate": false,
+  "yank.highlight.enable": false,
+  "python.jediEnabled": false,
+  "emmet.preferences": {
+    "typescriptreact": "scss",
+    "jsx.classAttributeName": "scss",
+    "typescript.tsx.classAttributeName": "scss"
+  },
+  "languageserver": {
+    "hdlChecker": {
+      "command": "hdl_checker",
+      "args": ["--lsp"],
+      "filetypes": ["vhdl", "verilog", "systemverilog"]
+    }
+  }
+}

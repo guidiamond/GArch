@@ -1,0 +1,6 @@
+rofi.theme: android_notification
+rofi.terminal: rxvt-unicode-256color
+rofi.location: 0
+rofi.ssh-client: ssh
+rofi.ssh-command: {terminal} -- {ssh-client} {host}
+rofi.theme: /home/damndiamond/.local/share/rofi/themes/slate.rasi
