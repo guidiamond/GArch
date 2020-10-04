@@ -1,0 +1,29 @@
+alias ls=lsd
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias l='ls -l'
+alias la='ls -a'
+alias lla='ls -la'
+alias lt='ls --tree'
+
+alias weather="curl http://wttr.in/"
+alias pdfer="bash $HOME/.scripts/pdfdownload.sh"
+alias diropen="xdg-open . & &>/dev/null"
+alias count="ls -A ${1}| wc -l";
+
+alias cdinsper="cd $HOME/Documents/insper"
+alias cddoc="cd $HOME/Documents"
+alias cddown="cd $HOME/Downloads"
+alias cdprog="cd $HOME/Documents/programming"
+alias cdcondaenv="cd $HOME/.conda/envs/"
+alias cdenv="cd $HOME/.virtualenv/"
+alias cdbadukf="cd $HOME/Documents/baduk/baduk-frontend"
+alias resolution="xrandr | grep '*'"
+changedirectory="cd $HOME/.virtualenv"
+
+# alias cdcondaenv="cd $HOME/anaconda3/envs/"
+
+#createenv="virtualenv -p ${@} ${@}"
+createenv="virtualenv ${@}"
+alias makenv="${changedirectory} && ${createenv}"
