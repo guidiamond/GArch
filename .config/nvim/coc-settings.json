@@ -17,6 +17,7 @@
     "scss",
     "css",
     "typescript",
+    "python",
     "typescriptreact",
     "json",
     "javascriptreact",
@@ -27,6 +28,7 @@
   "coc.preferences.colorSupport": true,
   "diagnostic.errorSign": " ",
   "diagnostic.warningSign": " ",
+  "python.formatting.provider": "black",
   "diagnostic.hintSign": " ",
   "eslint.autoFixOnSave": true,
   "stylelintplus.enable": true,
@@ -35,8 +37,10 @@
   "scss.validate": false,
   "wxss.validate": false,
   "less.validate": false,
-  "yank.highlight.enable": false,
   "python.jediEnabled": false,
+  "eslint.options": {
+    "configFile": "/home/damndiamond/.config/nvim/eslintrc.json"
+  },
   "emmet.preferences": {
     "typescriptreact": "scss",
     "jsx.classAttributeName": "scss",

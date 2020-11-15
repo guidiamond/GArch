@@ -32,6 +32,7 @@ Plug 'junegunn/fzf.vim'
 Plug 'ryanoasis/vim-devicons' " Icons for filetypes
 Plug 'scrooloose/nerdcommenter' " Multi-line commenter
 Plug 'mlaursen/vim-react-snippets'
+Plug 'suoto/vim-hdl'
 " Extra functionality
 "Plug 'https://github.com/ctrlpvim/ctrlp.vim' " Quick file finder
 " Status bar
