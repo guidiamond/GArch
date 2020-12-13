@@ -227,12 +227,27 @@ endif
 
 "autocmd FileType json syntax match Comment +\/\/.\+$+
 autocmd BufRead,BufNewFile tsconfig.json set filetype=jsonc
-autocmd BufRead,BufNewFile tsconfig.json set syntax=json
+" autocmd BufRead,BufNewFile tsconfig.json set syntax=json
 autocmd syntax json syntax match Comment +\/\/.\+$+
 
+function MyNerdToggle()
+    if &filetype == 'nerdtree'
+        :NERDTreeToggle
+    else
+        :NERDTreeFind
+    endif
+endfunction
 map ge :b #<CR>
-map <C-n> :NERDTreeToggle<CR>
+map <C-n> :call MyNerdToggle()<CR>
 let NERDTreeMouseMode=2
+let NERDTreeMinimalUI = 1
+let NERDTreeDirArrows = 1
+let g:NERDTreeHighlightCursorline = 1
+let g:NERDTreeQuitOnOpen=1
+let NERDTreeShowHidden=1
+let NERDTreeAutoDeleteBuffer = 1
+
+
 
 "augroup MouseInNERDTreeOnly
     "autocmd!
@@ -240,7 +255,6 @@ let NERDTreeMouseMode=2
     "autocmd BufLeave NERD_tree_* set mouse=
 "augroup END
 "set mouse=
-let NERDTreeShowHidden=1
 
 "let g:AutoPairs= {'(':')', '[':']', '{':'}',"'":"'",'"':'"', '`':'`'}
 "set ttymouse=sgr
