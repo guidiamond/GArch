@@ -1,6 +1,5 @@
+let g:polyglot_disabled = ['css', 'scss', 'typescript']
 source ~/.config/nvim/cfgs/plugins.vim
-source ~/.config/nvim/cfgs/general.vim
-source ~/.config/nvim/cfgs/airline.vim
 source ~/.config/nvim/cfgs/floatterm.vim
 source ~/.config/nvim/cfgs/fzf.vim
 source ~/.config/nvim/cfgs/vimspector.vim
@@ -203,7 +202,6 @@ augroup filetypes
     au BufNewFile,BufRead *.jsx setlocal filetype=javascript.jsx
     au BufNewFile,BufRead *.scss,*.css setlocal filetype=scss
 augroup end
-let g:polyglot_disabled = ['css', 'scss', 'typescript']
 
 augroup mygroup
   autocmd!

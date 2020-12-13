@@ -1,40 +1,57 @@
 call plug#begin()
-" Colorschemes
-Plug 'challenger-deep-theme/vim', { 'as': 'challenger-deep' } " Colorscheme
-Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  }
-Plug 'brooth/far.vim'
-Plug 'preservim/nerdtree'
-Plug 'tiagofumo/vim-nerdtree-syntax-highlight'
 
-Plug 'dracula/vim', { 'as': 'dracula' } " Colorscheme (used in lightline)
-Plug 'styled-components/vim-styled-components', { 'branch': 'main' },
+" Colorscheme
+Plug 'challenger-deep-theme/vim', { 'as': 'challenger-deep' }
+Plug 'dracula/vim', { 'as': 'dracula' } " Vim airline theme
 Plug 'joshdick/onedark.vim'
+Plug 'ryanoasis/vim-devicons' " filetype icons
+
+" Vim Bar
 Plug 'vim-airline/vim-airline'
-Plug 'puremourning/vimspector'
-Plug 'unblevable/quick-scope'
 Plug 'vim-airline/vim-airline-themes'
-Plug 'luochen1990/rainbow'
-Plug 'rrethy/vim-hexokinase', { 'do': 'make hexokinase' }
-Plug 'christoomey/vim-tmux-navigator'
-Plug 'justinmk/vim-sneak'
-Plug 'HerringtonDarkholme/yats.vim'
-Plug 'DougBeney/pickachu'
-" Programming
-Plug 'sheerun/vim-polyglot'
-Plug 'neoclide/coc.nvim', {'branch': 'release'} " Linter
-Plug 'tpope/vim-surround'
-Plug 'jiangmiao/auto-pairs'
-Plug 'https://github.com/mhinz/vim-signify'
-" File manager
-Plug 'liuchengxu/vim-which-key'
-Plug 'junegunn/fzf', { 'do': { -> fzf#install() } }
-Plug 'voldikss/vim-floaterm'
-Plug 'junegunn/fzf.vim'
-Plug 'ryanoasis/vim-devicons' " Icons for filetypes
-"Plug 'scrooloose/nerdcommenter' " Multi-line commenter
+
+" Debug
+Plug 'puremourning/vimspector'
+
+" Bulk rename
+Plug 'brooth/far.vim'
+
+" Vim movement
+Plug 'junegunn/fzf', { 'do': { -> fzf#install() } } " fuzzy finder update checker
+Plug 'junegunn/fzf.vim' " fuzzy finder vim plugin
+Plug 'unblevable/quick-scope' " Colors for faster movement with (t or f)
+Plug 'justinmk/vim-sneak' " Two key movement
+
+" Color
+Plug 'DougBeney/pickachu' " Color picker
+Plug 'rrethy/vim-hexokinase', { 'do': 'make hexokinase' } " Color visualizer
+Plug 'luochen1990/rainbow' " Diff level of parentheses with multiple colors
+
+" Git integration
+Plug 'mhinz/vim-signify' " Uses signs to indicate modified files
+Plug 'tpope/vim-fugitive'
+
+" Language specific
+Plug 'sheerun/vim-polyglot' " Generic language package
+Plug 'neoclide/coc.nvim', {'branch': 'release'} " Language server
+Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
+Plug 'HerringtonDarkholme/yats.vim' " Typescript
+Plug 'styled-components/vim-styled-components', { 'branch': 'main' } " Javascript Styled components
+Plug 'mlaursen/vim-react-snippets' " Snippets for react
+
+" Tmux integration
+Plug 'christoomey/vim-tmux-navigator' " Tmux integration
+
+" Extra functionality
+Plug 'tpope/vim-surround' " Mappings to easily delete, change and add such surroundings in pairs
+Plug 'jiangmiao/auto-pairs' " Insert or delete brackets, parens, quotes in pair.
 Plug 'tomtom/tcomment_vim' " Line commenter
-Plug 'mlaursen/vim-react-snippets'
-Plug 'suoto/vim-hdl'
+Plug 'liuchengxu/vim-which-key' " Displays available keybindings in popup.
+Plug 'voldikss/vim-floaterm' " Terminal in popup
+
+
+
+
 " Extra functionality
 "Plug 'https://github.com/ctrlpvim/ctrlp.vim' " Quick file finder
 " Status bar
@@ -45,4 +62,9 @@ Plug 'suoto/vim-hdl'
 "Plug 'dense-analysis/ale' " Linter
 "Plug 'airblade/vim-gitgutter' " Git integration
 "Plug 'airblade/vim-rooter'
+"Plug 'scrooloose/nerdcommenter' " Multi-line commenter
+" File explorer
+" Plug 'preservim/nerdtree'
+" Plug 'tiagofumo/vim-nerdtree-syntax-highlight' " Coloring for nerdtree (dependency: 'ryanoasis/vim-devicons')
+
 call plug#end()
