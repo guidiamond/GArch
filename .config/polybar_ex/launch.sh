@@ -1,19 +1,24 @@
 #!/usr/bin/env sh
 
-## Add this to your wm startup file.
+export POLYBAR_FOLDER=$HOME/.config/polybar_ex
+BAR_CFG=$HOME/.config/polybar_ex/config.ini
+declare -a BAR_NAMES=("top" "bottom")
+
+PRIMARY_MONITOR=$(polybar -m | grep 'primary' | cut -d ':' -f1)
+OTHER_MONITORS=$(polybar -m | grep -v 'primary' | cut -d ':' -f1)
 
 # Terminate already running bar instances
 killall -q polybar
-
 # Wait until the processes have been shut down
 while pgrep -u $UID -x polybar >/dev/null; do sleep 1; done
 
-# Launch Polybar
-if type "xrandr"; then
-  for m in $(polybar -m | cut -d ":" -f1); do
-    MONITOR=$m polybar -c $HOME/.config/polybar_ex/config.ini top &
-  done
-else
-    polybar -c $HOME/.config/polybar_ex/config.ini top &
-fi
+for bar_name in "${BAR_NAMES[@]}"; do
+  MONITOR=$PRIMARY_MONITOR polybar -c $BAR_CFG $bar_name &
+done
+sleep 1
 
+for bar_name in "${BAR_NAMES[@]}"; do
+  for other_monitor_name in $OTHER_MONITORS; do
+    MONITOR=$other_monitor_name polybar -c $BAR_CFG $bar_name &
+  done
+done
