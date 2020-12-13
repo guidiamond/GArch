@@ -16,7 +16,7 @@ nmap <leader>gJ 9999<leader>gJ
 nmap <leader>gK 9999<leader>gk
 
 
-" If you like colors instead
-highlight SignifySignAdd    ctermfg=green
-highlight SignifySignDelete ctermfg=red 
-highlight SignifySignChange ctermfg=yellow 
+" Styling
+highlight SignifySignAdd    guifg=green ctermfg=green
+highlight SignifySignDelete guifg=red ctermfg=red 
+highlight SignifySignChange guifg=yellow ctermfg=yellow 

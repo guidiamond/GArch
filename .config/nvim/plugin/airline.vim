@@ -2,6 +2,7 @@ autocmd User CocStatusChange,CocDiagnosticChange AirlineRefresh
 autocmd VimEnter * call AirlineInit()
 
 "" Theme
+let g:Powerline_symbols = 'fancy'
 let g:airline_powerline_fonts = 1
 let g:airline_theme='dracula'
 
