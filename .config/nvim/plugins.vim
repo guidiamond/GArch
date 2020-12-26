@@ -35,9 +35,8 @@ Plug 'tpope/vim-fugitive'
 Plug 'sheerun/vim-polyglot' " Generic language package
 Plug 'neoclide/coc.nvim', {'branch': 'release'} " Language server
 Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
-Plug 'HerringtonDarkholme/yats.vim' " Typescript
 Plug 'neoclide/jsonc.vim' " Jsonc
-Plug 'styled-components/vim-styled-components', { 'branch': 'main' } " Javascript Styled components
+" Plug 'styled-components/vim-styled-components', { 'branch': 'main' } " Javascript Styled components
 Plug 'mlaursen/vim-react-snippets' " Snippets for react
 
 " Tmux integration

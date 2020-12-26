@@ -1,5 +1,7 @@
 let g:netrw_dirhistmax  =10
-let g:netrw_dirhistcnt =2
+let g:netrw_dirhistcnt =4
+let g:netrw_dirhist_4='/home/damndiamond/Documents/work/baduk/backend/autonomoAPI/src'
+let g:netrw_dirhist_3='/home/damndiamond/Documents/work/baduk/backend/autonomoAPI'
 let g:netrw_dirhist_2='/home/damndiamond/Documents/work/baduk/frontend-admin'
 let g:netrw_dirhist_1='/home/damndiamond'
 let g:netrw_dirhist_0='/home/damndiamond/.config/nvim'
@@ -8,5 +10,3 @@ let g:netrw_dirhist_8='/home/damndiamond/Documents/work/baduk/backend/autonomoAP
 let g:netrw_dirhist_7='/home/damndiamond/Documents/work/baduk/backend/gatewayAPI'
 let g:netrw_dirhist_6='/home/damndiamond/.config/nvim'
 let g:netrw_dirhist_5='/home/damndiamond/Documents/work/baduk/frontend/src/modules/dev_component'
-let g:netrw_dirhist_4='/home/damndiamond/Documents/work/baduk/frontend/src/modules'
-let g:netrw_dirhist_3='/home/damndiamond/Documents/work/baduk/frontend/src'

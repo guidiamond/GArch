@@ -1,6 +1,5 @@
-let g:polyglot_disabled = ['css', 'scss', 'typescript']
+" let g:polyglot_disabled = ['css', 'scss']
 source ~/.config/nvim/plugins.vim
-
 " function MyNerdToggle()
 "     if &filetype == 'nerdtree'
 "         :NERDTreeToggle

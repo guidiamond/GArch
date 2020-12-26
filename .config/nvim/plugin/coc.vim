@@ -1,4 +1,5 @@
 " Config{{{
+
 " Make a backup before overwriting a file.  Leave it around after the
 " file has been successfully written.
 set nobackup 
@@ -11,26 +12,28 @@ set cmdheight=1 " Message spacing
 set updatetime=300 " Coc update time
 set shortmess+=c " Avoid hit-enter prompts
 set signcolumn=yes
+
 "}}}
 
 " Cmds{{{
 autocmd CursorHold * silent call CocActionAsync('highlight')
 autocmd BufWritePost *.tsx silent! execute CocAction('runCommand', 'eslint.executeAutofix')
 
-augroup mygroup
-  autocmd!
-  " Setup formatexpr specified filetype(s).
-  au FileType typescript,json setl formatexpr=CocAction('formatSelected')
-  " Update signature help on jump placeholder.
-  au User CocJumpPlaceholder call CocActionAsync('showSignatureHelp')
-augroup end
+" augroup mygroup
+"   autocmd!
+"   " Setup formatexpr specified filetype(s).
+"   au FileType typescript,json setl formatexpr=CocAction('formatSelected')
+"   " Update signature help on jump placeholder.
+"   au User CocJumpPlaceholder call CocActionAsync('showSignatureHelp')
+" augroup end
 
 command! -nargs=0 Tsc      :call     CocAction('runCommand', 'tsserver.watchBuild')
 command! -nargs=0 Rename   :call     CocAction('runCommand', 'workspace.renameCurrentFile')
 command! -nargs=0 Format   :call     CocAction('format')
 command! -nargs=? Fold     :call     CocAction('fold', <f-args>)
 command! -nargs=0 OR       :call     CocAction('runCommand', 'editor.action.organizeImport')
-command! -nargs=0 Prettier :         CocCommand prettier.formatFile
+command! -nargs=0 Prettier :CocCommand prettier.formatFile
+
 "}}}
 
 " Functions{{{
@@ -53,7 +56,12 @@ inoremap <silent><expr> <TAB>
       \ coc#refresh()
 inoremap <expr><S-TAB> pumvisible() ? "\<C-p>" : "\<C-h>"
 " Use <c-space> to trigger completion.
-inoremap <silent><expr> <c-space> coc#refresh()
+"Use <cr> to confirm completion
+ if exists('*complete_info')
+  inoremap <expr> <cr> complete_info()["selected"] != "-1" ? "\<C-y>" : "\<C-g>u\<CR>"
+else
+  imap <expr> <cr> pumvisible() ? "\<C-y>" : "\<C-g>u\<CR>"
+endif
 
 nmap <silent> K :call <SID>show_documentation()<CR>
 "}}}

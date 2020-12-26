@@ -38,19 +38,12 @@
   "wxss.validate": false,
   "less.validate": false,
   "python.jediEnabled": false,
-  "eslint.options": {
-    "configFile": "/home/damndiamond/.config/nvim/eslintrc.json"
-  },
+  /* "eslint.options": { */
+  /*   "configFile": "/home/damndiamond/.config/nvim/eslintrc.json" */
+  /* }, */
   "emmet.preferences": {
     "typescriptreact": "scss",
     "jsx.classAttributeName": "scss",
     "typescript.tsx.classAttributeName": "scss"
   },
-  "languageserver": {
-    "hdlChecker": {
-      "command": "hdl_checker",
-      "args": ["--lsp"],
-      "filetypes": ["vhdl", "verilog", "systemverilog"]
-    }
-  }
 }
