@@ -1,7 +1,7 @@
 #!/bin/sh
 # Simple script to toggle a node to fullscreen mode in bspwm
 MAIN_MONITOR="DVI-I-1"
-SECONDARY_MONITOR="DVI-D-1"
+SECONDARY_MONITOR="DVI-D-0"
 OLD_NODE=$(bspc query -N -n focused.local)
 bspc node -f ${1}
 NEW_NODE=$(bspc query -N -n focused.local)

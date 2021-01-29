@@ -1,5 +1,5 @@
 SCRIPTS_DIR="$HOME/.config/scripts"
-
+alias grepi="grep -i "
 # DEFAULT ALIASES
 alias ls="lsd"
 alias vim="nvim"
@@ -31,7 +31,7 @@ alias -s tar="tar tf"
 alias -s tar.gz="echo "
 alias -s ace="unace l"
 
-alias fd='fd . -type d -name'
+#alias fd='fd . -type d -name'
 alias ff='fd . -type f -name'
 
 function copydir {
@@ -71,3 +71,4 @@ createenv="virtualenv ${@}"
 alias makenv="${changedirectory} && ${createenv}"
 alias dotfiles="/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME"
 
+alias lg="lazygit"

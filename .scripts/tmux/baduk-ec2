@@ -3,7 +3,7 @@
 # start session
 SESSION="baduk-ec2"
 IS_RUNNING=` ! tmux has-session -t ${SESSION} > /dev/null 2>&1 && echo "false"`
-baseDIR="$HOME/Documents/work/baduk/aws"
+baseDIR="$HOME/Documents/work/aws"
 PEM_FILE="baduk-ec2.pem";
 OS="ubuntu"
 DNS_ADMIN="ec2-54-94-118-200.sa-east-1.compute.amazonaws.com"

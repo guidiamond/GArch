@@ -1,10 +1,10 @@
 #!/bin/bash
 
 # start session
-SESSION="baduk-admin-start"
+SESSION="baduk-backend-admin-start"
 IS_RUNNING=` ! tmux has-session -t ${SESSION} > /dev/null 2>&1 && echo "false"`
 baseDIR="$HOME/Documents/work/baduk/backend/admin"
-DIRS=( "adminAuthAPI" "adminGatewayAPI" "adminAutonomoAPI" "adminLoanAPI" )
+DIRS=( "adminAuthAPI" "adminAutonomoAPI" "adminDocsAPI" "adminGatewayAPI" "adminLoanAPI" )
 SESSION_SIZE=${#DIRS[@]}
 DOCKER_RABBITMQ='rabbitmq'
 
@@ -16,7 +16,7 @@ start_postman() {
 }
 
 start_mongo() {
-  ! systemctl is-active --quiet mongod && systemctl start mongod && 
+  ! systemctl is-active --quiet mongodb.service && systemctl start mongodb.service && 
     sleep 1
   }
 
@@ -28,6 +28,8 @@ start_rabbitmq() {
 }
 
 
+#start_postman
+#start_rabbitmq
 start_mongo
 
 if [ "${IS_RUNNING}" == "false" ]; then
@@ -39,6 +41,7 @@ if [ "${IS_RUNNING}" == "false" ]; then
     tmux new-window -t "$SESSION:$idx" -n ${DIRS[$i]}
     tmux rename-window -t "$SESSION:$idx" ${DIRS[$i]}
     tmux send-keys -t ${DIRS[$i]} "cd ${DIRS[$i]} && clear" C-m
+    tmux send-keys -t ${DIRS[$i]} "yarn dev" C-m
   done
   MONGOIDX=$(($SESSION_SIZE+1))
   tmux new-window -t "$SESSION:$MONGOIDX" -n "MONGO"
