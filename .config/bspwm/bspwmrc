@@ -3,17 +3,18 @@
 sxhkd &
 setxkbmap -model abnt -layout us -variant intl &&
   xmodmap .Xmodmap &
+  /home/damndiamond/.config/polybar_ex/launch.sh &
 /home/damndiamond/.config/screenlayout/home-monitor.sh &&
   feh --bg-scale --randomize ~/Pictures/Backgrounds &
-/home/damndiamond/.config/polybar/launch.sh &
 killall picom && picom --config /home/damndiamond/.config/picom/picom.conf & 
 #}}}
+# /home/damndiamond/.config/polybar/launch.sh &
 
 # Monitor #{{{
 # Monitor principal
 bspc monitor DVI-I-1 -d 1 2 3 4 5 6 7 8 9
 # Monitor secundario
-bspc monitor DVI-D-1 -d 1 2 3 4 5 6 7 8 9
+bspc monitor DVI-D-0 -d 1 2 3 4 5 6 7 8 9
 #}}}
 
 # Sizing #{{{
@@ -65,7 +66,7 @@ bspc config urgent_border_color 	      "#dd2727"
 # Rules #{{{
 #polybar hidden when fullscreen for vlc, youtube, mpv ...
 #find out the name of your monitor with xrandr
-xdo below -t $(xdo id -n root) $(xdo id -a /home/damndiamond/.config/polybar/launch.sh)
+xdo below -t $(xdo id -n root) $(xdo id -a /home/damndiamond/.config/polybar_ex/launch.sh)
 
 #bspc rule -a Gimp desktop='^8' state=floating follow=on
 #bspc rule -a Chromium desktop='^2'

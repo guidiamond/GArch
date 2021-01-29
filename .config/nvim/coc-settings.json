@@ -3,13 +3,35 @@
   "diagnostic.displayByAle": false,
   "coc.preferences.rootPatterns": [
     ".git",
+    ".root",
     ".hg",
     ".projections.json",
     "package.json",
+    "__pycache__",
     ".atsln",
     ".cproj",
     ".env"
   ],
+  "languageserver": {
+    "ccls": {
+      "command": "ccls",
+      "args": ["--log-file=/tmp/ccls.log", "-v=1"],
+      "filetypes": ["c", "cc", "cpp", "c++", "objc", "objcpp"],
+      "rootPatterns": [".ccls", "compile_commands.json"],
+      "initializationOptions": {
+        "cache": {
+          "directory": "/tmp/ccls"
+        },
+        "client": {
+          "snippetSupport": true
+        },
+        "index": {
+          "onChange": true
+        },
+        "highlight": { "lsRanges": true }
+      }
+    }
+  },
   "coc.preferences.formatOnSaveFiletypes": [
     "javascript",
     "c",
@@ -20,15 +42,18 @@
     "python",
     "typescriptreact",
     "json",
+    "jsonc",
     "javascriptreact",
     "javascript.tsx",
     "typescript.tsx"
   ],
-  "clangd.path": "/home/damndiamond/.config/coc/extensions/coc-clangd-data/install/10.0.0/clangd_10.0.0/bin/clangd",
+  "clangd.path": "/home/damndiamond/.config/coc/extensions/coc-clangd-data/install/11.0.0/clangd_11.0.0/bin/clangd",
   "coc.preferences.colorSupport": true,
   "diagnostic.errorSign": " ",
   "diagnostic.warningSign": " ",
   "python.formatting.provider": "black",
+  "python.linting.enabled": true,
+  "python.linting.pylintEnabled": true,
   "diagnostic.hintSign": " ",
   "eslint.autoFixOnSave": true,
   "stylelintplus.enable": true,
@@ -45,5 +70,5 @@
     "typescriptreact": "scss",
     "jsx.classAttributeName": "scss",
     "typescript.tsx.classAttributeName": "scss"
-  },
+  }
 }

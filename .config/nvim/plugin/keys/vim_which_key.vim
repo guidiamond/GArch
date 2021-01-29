@@ -55,7 +55,7 @@ autocmd! FileType which_key
 autocmd  FileType which_key set laststatus=0 noshowmode noruler
       \| autocmd BufLeave <buffer> set laststatus=2 noshowmode ruler
 
-let g:which_key_map_leader['\']  = ['<Plug>AirlineSelectNextTab', 'Next Buffer']
+" let g:which_key_map_leader['\']  = ['<Plug>AirlineSelectNextTab', 'Next Buffer']
 let g:which_key_map_leader['|']  = ['<Plug>AirlineSelectPrevTab', 'Previous Buffer']
 let g:which_key_map_leader['<Tab>']  = [':b #', 'Toggle Buffers']
 let g:which_key_map_leader['s']  = ['<Plug>Sneak_s', 'Sneak next']

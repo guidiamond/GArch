@@ -7,10 +7,6 @@ map <C-h> <C-w>h
 map <C-j> <C-w>j
 map <C-k> <C-w>k
 map <C-l> <C-w>l
-"map <leader>s <Plug>Sneak_s
-"map <leader>S <Plug>Sneak_S
-map gS <Plug>Sneak_,
-map gs <Plug>Sneak_;
 map ge :b #<CR>
 "map <leader>cp :Pickachu<CR>
 let g:floaterm_keymap_toggle = '<F1>'
@@ -26,8 +22,8 @@ lnoremap <silent> <leader><F9> :call vimspector#ToggleBreakpoint()<CR>
 "}}}
 
 " Normal{{{
-"nnoremap <leader>ev : vsplit $MYVIMRC<CR>
-"nnoremap <leader>sv :source $MYVIMRC<CR>
+nnoremap <leader>ev : vsplit $MYVIMRC<CR>
+nnoremap <leader>sv :source $MYVIMRC<CR>
 nnoremap <space><space> za
 nnoremap <silent> <C-w>> :exe "vertical resize " . (winwidth(0) * 3/2)<CR>
 "nnoremap <leader><leader>   :bnext<CR>

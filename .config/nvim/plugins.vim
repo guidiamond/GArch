@@ -20,7 +20,8 @@ Plug 'brooth/far.vim'
 Plug 'junegunn/fzf', { 'do': { -> fzf#install() } } " fuzzy finder update checker
 Plug 'junegunn/fzf.vim' " fuzzy finder vim plugin
 Plug 'unblevable/quick-scope' " Colors for faster movement with (t or f)
-Plug 'justinmk/vim-sneak' " Two key movement
+" Plug 'justinmk/vim-sneak' " Two key movement
+Plug 'easymotion/vim-easymotion'
 
 " Color
 Plug 'DougBeney/pickachu' " Color picker
@@ -33,6 +34,7 @@ Plug 'tpope/vim-fugitive'
 
 " Language specific
 Plug 'sheerun/vim-polyglot' " Generic language package
+Plug 'jackguo380/vim-lsp-cxx-highlight' " Syntax highlight for c++
 Plug 'neoclide/coc.nvim', {'branch': 'release'} " Language server
 Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
 Plug 'neoclide/jsonc.vim' " Jsonc
