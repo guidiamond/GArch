@@ -136,6 +136,8 @@ super + g
 	bspc node -s biggest
 # key H RESERVED
 # key I
+super + shift + i
+  pavucontrol
 # key J RERRSERVED
 # key K RESERVED
 # key L RESERVED
@@ -154,6 +156,8 @@ super + shift + o
 #	bspc node {older,newer} -f; \
 #	bspc wm -h on
 # key P
+super + shift + p
+  qr_generate
 # key Q
 super + shift + q
   bspc node -c
@@ -164,7 +168,7 @@ super + alt + {q,r}
 	bspc {quit,wm -r}
 # key R
 # key S
-super +s
+super + s
   bspc node -t floating
 # key T
 # Add focused window to a tabbed instance in given direction
@@ -180,7 +184,7 @@ super + t; r
 #	bspc node -t {tiled,pseudo_tiled,floating}
 # key U
 super + shift + u
-  google-chrome-stable
+  brave
 # key V
 # key W
 # close and kill

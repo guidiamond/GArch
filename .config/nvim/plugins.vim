@@ -20,8 +20,8 @@ Plug 'brooth/far.vim'
 Plug 'junegunn/fzf', { 'do': { -> fzf#install() } } " fuzzy finder update checker
 Plug 'junegunn/fzf.vim' " fuzzy finder vim plugin
 Plug 'unblevable/quick-scope' " Colors for faster movement with (t or f)
-" Plug 'justinmk/vim-sneak' " Two key movement
-Plug 'easymotion/vim-easymotion'
+Plug 'justinmk/vim-sneak' " Two key movement
+" Plug 'easymotion/vim-easymotion'
 
 " Color
 Plug 'DougBeney/pickachu' " Color picker

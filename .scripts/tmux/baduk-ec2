@@ -6,33 +6,41 @@ IS_RUNNING=` ! tmux has-session -t ${SESSION} > /dev/null 2>&1 && echo "false"`
 baseDIR="$HOME/Documents/work/aws"
 PEM_FILE="baduk-ec2.pem";
 OS="ubuntu"
-DNS_ADMIN="ec2-54-94-118-200.sa-east-1.compute.amazonaws.com"
-DNS_MONGO="ec2-177-71-137-187.sa-east-1.compute.amazonaws.com"
-DNS="ec2-177-71-145-71.sa-east-1.compute.amazonaws.com"
-DNS_BACK="ec2-177-71-233-249.sa-east-1.compute.amazonaws.com"
-DNS_BACK_ADMIN="ec2-177-71-174-181.sa-east-1.compute.amazonaws.com"
+
+# Windows (window-name, ec2 instance dns)
+AUTONOMO=("autonomo-front-ec2" "ec2-177-71-145-71.sa-east-1.compute.amazonaws.com")
+BACK_AUTONOMO=("autonomo-back-ec2" "ec2-177-71-233-249.sa-east-1.compute.amazonaws.com")
+BACK_ADMIN=("admin-back-ec2" "ec2-177-71-174-181.sa-east-1.compute.amazonaws.com")
+DB=("db-ec2" "ec2-177-71-137-187.sa-east-1.compute.amazonaws.com")
+
+WINDOW_NUMBER=1
+
+function openEc2Window() {
+  WINDOW_NAME=$1
+  DNS_NAME=$2
+
+  # If the window number is 1, it was already created by tmux new-session
+  if [ "${WINDOW_NUMBER}" == "1" ]; then
+    tmux rename-window -t "${WINDOW_NUMBER}" $WINDOW_NAME
+  else
+    tmux new-window -t "${WINDOW_NUMBER}" -n $WINDOW_NAME
+  fi
+  tmux send-keys -t $WINDOW_NAME "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS_NAME}" C-m
+
+  WINDOW_NUMBER=$(($WINDOW_NUMBER+1))
+}
 
 if [ "${IS_RUNNING}" == "false" ]; then
-  cd $baseDIR
+  # Create new tmux session
   tmux new-session -d -s $SESSION
-  tmux new-window -t "1" -n "ec2-admin"
-  tmux rename-window -t "1" "ec2-admin"
-  tmux send-keys -t "ec2-admin" "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS_ADMIN}" C-m
 
-  tmux new-window -t "2" -n "ec2-autonomo"
-  tmux rename-window -t "2" "ec2-autonomo"
-  tmux send-keys -t "ec2-autonomo" "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS}" C-m
+  # Create the respective ec2 connections
+  # Note: Array is converted to two params to be used in function
+  openEc2Window ${AUTONOMO[@]} 
+  openEc2Window ${BACK_AUTONOMO[@]}
+  openEc2Window ${BACK_ADMIN[@]}
+  openEc2Window ${DB[@]}
 
-  tmux new-window -t "3" -n "ec2-mongo"
-  tmux rename-window -t "3" "ec2-mongo"
-  tmux send-keys -t "ec2-mongo" "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS_MONGO}" C-m
-
-  tmux new-window -t "4" -n "ec2-back"
-  tmux rename-window -t "4" "ec2-back"
-  tmux send-keys -t "ec2-back" "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS_BACK}" C-m
-
-  tmux new-window -t "5" -n "ec2-back-admin"
-  tmux rename-window -t "5" "ec2-back-admin"
-  tmux send-keys -t "ec2-back-admin" "ssh -i ${baseDIR}/${PEM_FILE} ${OS}@${DNS_BACK_ADMIN}" C-m
 fi
+
 tmux attach-session -t $SESSION:1

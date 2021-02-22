@@ -3,6 +3,7 @@
 sxhkd &
 setxkbmap -model abnt -layout us -variant intl &&
   xmodmap .Xmodmap &
+  nm-applet &
   /home/damndiamond/.config/polybar_ex/launch.sh &
 /home/damndiamond/.config/screenlayout/home-monitor.sh &&
   feh --bg-scale --randomize ~/Pictures/Backgrounds &

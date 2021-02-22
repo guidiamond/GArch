@@ -4,9 +4,9 @@
 # Exports
 export _JAVA_AWT_WM_NONREPARENTING=1
 export CONFIG="$HOME/.config/"
-export PATH=$PATH:/home/damndiamond/.local/bin:
+export PATH=/home/damndiamond/.local/bin:$PATH
 export SCRIPTS="$HOME/.scripts/"
-export PYTHON_ENV="$HOME/.virtualenv/nvim"
+export PYTHON_ENV="/home/damndiamond/.virtualenv/cloud"
 export ZSH="$HOME/.zinit"
 export EDITOR="nvim"
 export UPDATE_ZSH_DAYS=7 # Auto update weekly

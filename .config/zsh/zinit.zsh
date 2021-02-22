@@ -21,8 +21,10 @@ zinit light trapd00r/LS_COLORS
 
 zinit ice depth=1; zinit light romkatv/powerlevel10k
 zinit snippet OMZ::plugins/colored-man-pages/colored-man-pages.plugin.zsh
+zinit snippet OMZ::plugins/aws/aws.plugin.zsh
 zinit snippet OMZ::lib/clipboard.zsh
 zinit snippet 'https://github.com/softmoth/zsh-vim-mode/blob/master/zsh-vim-mode.plugin.zsh'
+zinit snippet 'https://github.com/junegunn/fzf/blob/master/shell/completion.zsh'
 
 zinit ice svn 
 zinit snippet OMZ::plugins/z

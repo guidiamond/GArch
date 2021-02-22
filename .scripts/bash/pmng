@@ -5,7 +5,7 @@ function showPorts() {
   if [ "$result" == "" ];then
     result="No ports are being used"
   fi
-  echo $result
+  echo "$result"
 }
 
 function killPort() {
