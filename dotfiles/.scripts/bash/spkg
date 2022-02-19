@@ -1,0 +1,26 @@
+#!/bin/bash
+
+function helpParams() {
+  echo "Available Params:"
+  echo "-p: search with pacman (Official Repo)"
+  echo "-y: search with yay (AUR)"
+}
+
+function validateNoArgs() {
+  if [ "$1" == "" ];then
+    helpParams;exit 1
+  fi
+}
+
+function main(){
+  while getopts ":py" flag; do
+    case $flag in
+      p) pacman -Slq | fzf --multi --preview 'pacman -Si {1}' | xargs -ro sudo pacman -S;;
+      y) yay -Slq | fzf --multi --preview 'yay -Si {1}' | xargs -ro  yay -S;; 
+      h) helpParams;exit 1;;
+      \?) helpParams;exit 1;;
+    esac
+  done
+}
+
+validateNoArgs $1;main $@

@@ -1,0 +1,29 @@
+#!/bin/bash
+
+
+function helpParams() {
+  echo "Available Params:"
+  echo "-a: append to local gitignore"
+  echo "-c: clear local gitignore"
+  echo "-l: list local gitignore"
+}
+
+function validateNoArgs() {
+  if [ "$1" == "" ];then
+    helpParams;exit 1
+  fi
+}
+
+function main(){
+  while getopts ":acl" flag; do
+    case $flag in
+      a) echo "$2" >> ./.git/info/exclude;;
+      c) echo "" > ./.git/info/exclude;;
+      l) cat ./.git/info/exclude;;
+      \?) helpParams;exit 1;;
+    esac
+  done
+}
+
+
+validateNoArgs $1;main $@

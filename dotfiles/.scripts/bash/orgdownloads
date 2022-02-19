@@ -1,0 +1,56 @@
+#!/bin/bash
+
+BASE_DIR="$HOME/Downloads"
+
+#images
+declare -A EXTS
+declare -A FOLDERS
+# images
+imgs=( "png" "jpeg" "jpg" "gif" "tiff" "psd" "svg" )
+EXTS[imgs]=$imgs
+FOLDERS[imgs]="$BASE_DIR/images/"
+# docs
+docs=( "pdf" "xlsx" "doc" "docx" "txt" "json" )
+EXTS[docs]=$docs
+FOLDERS[docs]="$BASE_DIR/docs/"
+# compressed files
+compressed=( "zip" "rar" )
+EXTS[compressed]=$compressed
+FOLDERS[compressed]="$BASE_DIR/compressed/"
+
+
+
+
+# folder key file(with path)
+function moveFileToFolder() {
+  echo $2
+  #if [ -d "$FOLDERS[$1]" ]; then
+    #mv $2 $FOLDERS[$1]
+  #else
+    #mkdir $FOLDERS[$1] &&
+    #mv $2 $FOLDERS[$1]
+  #fi
+}
+
+#EXTS=()
+for d in $HOME/Downloads/*; do
+  filename=$(basename -- "$d")
+  extension="${filename##*.}"
+  filename="${filename%.*}"
+  for ext_type in "${!EXTS[@]}"; do
+    if [[ "${EXTS[$ext_type]}" = $extension ]]; then
+      moveFileToFolder $d $extension
+    fi
+  done
+  #for ext in $EXTS['docs'docs];do
+    #echo $ext
+  #done
+  #for key in "${EXT_OBJ[@]}"; do
+    #echo $key
+  #done
+  #if [[ ! " ${img_exts[@]} " =~ " ${value} " ]]; then
+    # whatever you want to do when array doesn't contain value
+#fi
+
+done
+

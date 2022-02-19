@@ -1,0 +1,218 @@
+# vim: filetype=i3config
+# Execs {{{
+exec --no-startup-id xss-lock -- $HOME/.config/i3/lock.sh
+exec --no-startup-id setxkbmap -model abnt -layout us -variant intl
+exec --no-startup-id xmodmap ~/.Xmodmap
+exec --no-startup-id nm-applet
+exec --no-startup-id nitrogen --restore 
+exec --no-startup-id $HOME/.config/screenlayout/home-monitor.sh
+
+exec_always --no-startup-id $HOME/.config/polybar/launch.sh &
+exec_always --no-startup-id picom --config $HOME/.config/picom/picom.conf & 
+# }}}
+# Basic Definitions #{{{
+set $mod Mod4
+floating_modifier $mod 
+font pango:Inconsolata-dz for Powerline 10
+
+
+mode "resize" {
+        bindsym j resize shrink width 10 px or 10 ppt
+        bindsym k resize grow height 10 px or 10 ppt
+        bindsym l resize shrink height 10 px or 10 ppt
+        bindsym semicolon resize grow width 10 px or 10 ppt
+
+        # same bindings, but for the arrow keys
+        bindsym Left resize shrink width 10 px or 10 ppt
+        bindsym Down resize grow height 10 px or 10 ppt
+        bindsym Up resize shrink height 10 px or 10 ppt
+        bindsym Right resize grow width 10 px or 10 ppt
+
+        # back to normal: Enter or Escape or $mod+r
+        bindsym Return mode "default"
+        bindsym Escape mode "default"
+        bindsym $mod+r mode "default"
+}
+# }}}
+
+# Workspace Names #{{{
+# }}}
+set $ws1 "1"
+set $ws2 "2"
+set $ws3 "3"
+set $ws4 "4"
+set $ws5 "5"
+set $ws6 "6"
+set $ws7 "7"
+set $ws8 "8"
+set $ws9 "9"
+set $ws10 "0"
+
+#set $ws10 "2:1"
+#set $ws11 "2:2"
+#set $ws12 "2:3"
+#set $ws13 "2:4"
+#set $ws14 "2:5"
+#set $ws15 "2:6"
+#set $ws16 "2:7"
+#set $ws17 "2:8"
+#set $ws18 "2:9"
+# Gaps #{{{
+set $inner_gaps 10
+set $outer_gaps 5
+
+for_window [class="^.*"] border pixel 2
+gaps inner $inner_gaps
+gaps outer $outer_gaps
+# }}}
+# Workspace Keys #{{{
+# }}}
+bindsym $mod+1 workspace number $ws1
+bindsym $mod+2 workspace number $ws2
+bindsym $mod+3 workspace number $ws3
+bindsym $mod+4 workspace number $ws4
+bindsym $mod+5 workspace number $ws5
+bindsym $mod+6 workspace number $ws6
+bindsym $mod+7 workspace number $ws7
+bindsym $mod+8 workspace number $ws8
+bindsym $mod+9 workspace number $ws9
+bindsym $mod+0 workspace number $ws0
+
+#bindsym $mod+21 workspace number $ws11
+#bindsym $mod+22 workspace number $ws12
+#bindsym $mod+23 workspace number $ws13
+#bindsym $mod+24 workspace number $ws14
+#bindsym $mod+25 workspace number $ws15
+#bindsym $mod+26 workspace number $ws16
+#bindsym $mod+27 workspace number $ws17
+#bindsym $mod+28 workspace number $ws18
+#bindsym $mod+29 workspace number $ws19
+
+bindsym $mod+Shift+1 move container to workspace number $ws1;workspace number $ws1
+bindsym $mod+Shift+2 move container to workspace number $ws2;workspace number $ws2
+bindsym $mod+Shift+3 move container to workspace number $ws3;workspace number $ws3
+bindsym $mod+Shift+4 move container to workspace number $ws4;workspace number $ws4
+bindsym $mod+Shift+5 move container to workspace number $ws5;workspace number $ws5
+bindsym $mod+Shift+6 move container to workspace number $ws6;workspace number $ws6
+bindsym $mod+Shift+7 move container to workspace number $ws7;workspace number $ws7
+bindsym $mod+Shift+8 move container to workspace number $ws8;workspace number $ws8
+bindsym $mod+Shift+9 move container to workspace number $ws9;workspace number $ws9
+bindsym $mod+Shift+0 move container to workspace number $ws10;workspace number $ws0
+
+# #--- VIM Keys---# #
+bindsym $mod+h focus left
+bindsym $mod+j focus down
+bindsym $mod+k focus up
+bindsym $mod+l focus right
+
+bindsym $mod+Shift+h move left
+bindsym $mod+Shift+j move down
+bindsym $mod+Shift+k move up
+bindsym $mod+Shift+l move right
+
+# #--- Arrow Keys ---# #
+bindsym $mod+Left focus left
+bindsym $mod+Down focus down
+bindsym $mod+Up focus up
+bindsym $mod+Right focus right
+
+bindsym $mod+Shift+Left move left
+bindsym $mod+Shift+Down move down
+bindsym $mod+Shift+Up move up
+bindsym $mod+Shift+Right move right
+# Special Keys #{{{
+set $refresh_i3status killall -SIGUSR1 i3status
+
+
+# Brightness
+bindsym XF86MonBrightnessUp exec xbacklight -inc 20 # increase screen brightness
+bindsym XF86MonBrightnessDown exec xbacklight -dec 20 # decrease screen brightness
+
+# Audio
+bindsym XF86AudioPlay exec playerctl play-pause
+bindsym XF86AudioNext exec playerctl next
+bindsym XF86AudioPrev exec playerctl previous
+
+bindsym XF86AudioRaiseVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ +10% && $refresh_i3status
+bindsym XF86AudioLowerVolume exec --no-startup-id pactl set-sink-volume @DEFAULT_SINK@ -10% && $refresh_i3status
+bindsym XF86AudioMute exec --no-startup-id pactl set-sink-mute @DEFAULT_SINK@ toggle && $refresh_i3status
+bindsym XF86AudioMicMute exec --no-startup-id pactl set-source-mute @DEFAULT_SOURCE@ toggle && $refresh_i3status
+# }}}
+# Function Keys #{{{
+set $netrefresh --no-startup-id sudo -A systemctl restart NetworkManager
+set $exitmsg 'Do you really want to exit i3?'
+
+bindsym $mod+F1 exec sleep 1 && xset dpms force suspend && exec playerctl pause
+bindsym $mod+F2 restart
+bindsym $mod+F3 exec --no-startup-id systemctl poweroff
+bindsym $mod+F4 exec --no-startup-id systemctl restart
+bindsym $mod+F5 exec --no-startup-id $netrefresh
+bindsym $mod+F6 exec "i3-nagbar -t warning -m $exitmsg -B 'Yes, exit i3' 'i3-msg exit'"
+# }}}
+# Basic Bindings #{{{
+
+# S_RESERVED => Shift in use
+# K_RESERVED => Key in use
+# RESERVED   => Shift and Key in use
+
+# key Return
+bindsym $mod+Return exec alacritty
+# key Space
+bindsym $mod+space focus mode_toggle
+bindsym $mod+Shift+space floating toggle
+# key Semicolon
+bindsym $mod+semicolon split h
+# key Delete
+bindsym $mod+Delete exec "alacritty -e htop"
+
+# key A
+#bindsym $mod+a focus parent
+# key B
+# key C
+bindsym $mod+Shift+c reload
+bindsym $mod+c exec "rofi -show calc -modi calc -no-show-match -no-sort"
+# key D
+#bindsym $mod+d focus child
+bindsym $mod+shift+d exec "rofi -combi-modi window,drun -show combi -modi combi" 
+# key E
+bindsym $mod+e layout toggle split
+# key F
+bindsym $mod+f fullscreen toggle
+# key G
+# key H RESERVED
+# key I
+# key J RERRSERVED
+# key K RESERVED
+# key L RESERVED
+# key M
+# key N
+# key O
+bindsym $mod+Shift+o exec "$~/.config/i3/qr_generate.sh"
+# key P
+bindsym $mod+p move to output right
+bindsym $mod+shift+p move workspace to output right
+# key Q
+bindsym $mod+Shift+q kill
+#bindsym $mod+q --release exec --no-startup-id xkill
+# key R
+bindsym $mod+r mode "resize"
+bindsym $mod+shift+r exec "alacritty -e ranger -r ~/.config/ranger"
+# key S
+bindsym $mod+s layout stacking
+# key T
+bindsym $mod+Shift+t gaps inner current set $inner_gaps; gaps outer current set $outer_gaps
+# key U
+bindsym $mod+shift+u exec google-chrome-stable
+# key V
+bindsym $mod+v split v
+# key W
+bindsym $mod+w layout tabbed
+# key X
+bindsym $mod+x gaps inner current plus 5
+bindsym $mod+Shift+x gaps inner current minus 5
+# key Y
+# key Z
+bindsym $mod+z gaps outer current plus 5
+bindsym $mod+Shift+z gaps outer current minus 5
+# }}}
+# vim:foldmethod=marker:foldlevel=0
