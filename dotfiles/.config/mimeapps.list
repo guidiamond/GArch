@@ -1,0 +1,15 @@
+
+[Default Applications]
+text/html=brave-browser.desktop
+x-scheme-handler/http=brave-browser.desktop
+x-scheme-handler/https=brave-browser.desktop
+x-scheme-handler/about=brave-browser.desktop
+x-scheme-handler/unknown=brave-browser.desktop
+x-scheme-handler/webcal=brave-browser.desktop
+x-scheme-handler/notion=notion-app.desktop
+x-scheme-handler/msteams=teams.desktop
+image/png=okularApplication_kimgio.desktop;
+application/pdf=okularApplication_pdf.desktop;
+video/x-matroska=vlc.desktop;
+x-scheme-handler/postman=Postman.desktop
+text/csv=libreoffice-calc.desktop;
