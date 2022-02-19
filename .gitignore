@@ -1,4 +1,15 @@
+###########################################
+# Guidiamond personal gitignore additions #
+###########################################
+
 .netrc
+
+plugged/
+
+
+############################################
+#  Gitignore personal gitignore additions  #
+############################################
 
 # Created by https://www.toptal.com/developers/gitignore/api/dotenv,zsh,vim,lua,git
 # Edit at https://www.toptal.com/developers/gitignore?templates=dotenv,zsh,vim,lua,git
