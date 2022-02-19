@@ -1,0 +1,59 @@
+#!/usr/bin/sh
+
+BUCKET_NAME="baduk-envs"
+
+function validateNoArgs() {
+  if [ "$1" == "" ];then
+    helpParams;exit 1
+  fi
+}
+
+function listEnvs() {
+  aws_objects_list=$(aws s3api list-objects --bucket $BUCKET_NAME | grep "env" | cut -d '"' -f 4)
+  echo "$aws_objects_list"
+}
+
+function getEnv() {
+  filename="$2"
+  if [ "$filename" == "" ];then
+    filename=".env"
+  fi
+  aws s3api get-object --bucket $BUCKET_NAME --key $1 $filename
+}
+
+function saveEnv() {
+  aws s3api put-object --bucket $BUCKET_NAME --key $1 --body $2
+}
+
+function helpParams() {
+  echo "Available Params:"
+  echo "-l: (list available envs)"
+  echo "-g: <s3_object_path> <optional_filename_to_save (default: .env)>(get env in S3)"
+  echo "-s: <s3_new_path> <curr_file_location> (save env in S3)"
+  echo "-d: <s3_object_path> (delete env in S3)"
+}
+
+function deleteEnv() {
+  aws s3api delete-object --bucket $BUCKET_NAME --key $1
+}
+
+function main() {
+  while getopts ":lgsd" flag; do
+    case $flag in
+      l) listEnvs;;
+      g) getEnv $2 $3;; # $2 -> s3_object_path, $3 -> filename (opt)
+      s) saveEnv $2 $3;; #  $2 -> s3_new_path, $3 -> curr_file
+      d) deleteEnv $2;;
+      h) helpParams;exit 1;;
+      \?) helpParams;exit 1;;
+    esac
+  done
+}
+
+function validateNoArgs() {
+  if [ "$1" == "" ];then
+    helpParams;exit 1
+  fi
+}
+
+validateNoArgs $1;main $@

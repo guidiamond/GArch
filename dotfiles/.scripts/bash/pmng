@@ -1,0 +1,41 @@
+#!/bin/bash
+
+function showPorts() {
+  result=$(lsof -i -P -n | grep LISTEN)
+  if [ "$result" == "" ];then
+    result="No ports are being used"
+  fi
+  echo "$result"
+}
+
+function killPort() {
+  kill $(sudo lsof -t -i:${1})
+}
+
+function helpParams() {
+  echo "Available Params:"
+  echo "-a kill all ports"
+  echo "-s: list ports"
+  echo "-k <port_number>: kill specified port"
+}
+
+function validateNoArgs() {
+  if [ "$1" == "" ];then
+    helpParams;exit 1
+  fi
+}
+
+function main(){
+  while getopts ":sak:" flag; do
+    case $flag in
+      s) showPorts;exit 1;;
+      k) killPort ${OPTARG};exit 1;;
+      a) killall node;exit 1;;
+      :) echo "missing <port_number> for argument k";;
+      h) helpParams;exit 1;;
+      \?) helpParams;exit 1;;
+    esac
+  done
+}
+
+validateNoArgs $1;main $@

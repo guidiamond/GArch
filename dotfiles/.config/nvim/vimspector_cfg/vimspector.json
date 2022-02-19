@@ -1,0 +1,18 @@
+{
+  "configurations": {
+    "main: Launch": {
+      "adapter": "debugpy",
+      "configuration": {
+        "name": "main: Launch",
+        "type": "python",
+        "request": "launch",
+        "cwd": "${workspaceRoot}",
+        "python": "/home/damn/.virtualenv/main/bin/python",
+        "stopOnEntry": true,
+        "console": "externalTerminal",
+        "debugOptions": [],
+        "program": "${workspaceRoot}/main.py"
+      }
+    }
+  }
+}
