@@ -1,5 +1,0 @@
-#!/bin/bash
-cd ~/.cache/zsh
-mv history .history_bad
-strings .history_bad > history
-fc -r history

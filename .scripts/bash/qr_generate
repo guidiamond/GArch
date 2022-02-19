@@ -1,6 +1,0 @@
-#!/bin/bash
-
-pic_dir=$HOME/Pictures/qrcodes
-clipboard_value=`xclip -o`
-qrencode -o ${pic_dir}/temp_qr.png "$clipboard_value" 
-mimeopen ${pic_dir}/temp_qr.png

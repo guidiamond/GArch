@@ -1,1 +1,0 @@
-ssh -i /home/damndiamond/Documents/insper/6/cloud/maas.pem cloud@10.103.0.38
