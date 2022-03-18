@@ -1,3 +1,5 @@
+export _JAVA_AWT_WM_NONREPARENTING=1
+export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export LANG=en_US.UTF8 cabal build
 export SAM_CLI_TELEMETRY=0
 export EDITOR=/usr/bin/nvim
