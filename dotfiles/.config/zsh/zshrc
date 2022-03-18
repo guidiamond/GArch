@@ -5,7 +5,6 @@ export LANG="en_US.UTF-8"
   && source "${XDG_CACHE_HOME:-$HOME/.cache}/p10k-instant-prompt-${(%):-%n}.zsh"
 [[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh # To customize prompt, run `p10k configure` or edit ~/.p10k.zsh.
 # Exports
-export _JAVA_AWT_WM_NONREPARENTING=1
 export CONFIG="$HOME/.config/"
 export PATH=$HOME/.local/bin:$PATH
 export PATH=/opt/cuda/include:$PATH
