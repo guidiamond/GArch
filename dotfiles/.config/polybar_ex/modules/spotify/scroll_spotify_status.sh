@@ -6,6 +6,6 @@ zscroll -l 30 \
         --match-command "playerctl --player=playerctld status" \
         --match-text "Playing" "--scroll 1" \
         --match-text "Paused" "--scroll 0" \
-        --update-check true '/home/damn/.config/polybar_ex/polybar-spotify/scroll_spotify_status.sh' &
+        --update-check true '~/.config/polybar_ex/polybar-spotify/scroll_spotify_status.sh' &
 
 wait

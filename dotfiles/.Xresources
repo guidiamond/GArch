@@ -1,4 +1,4 @@
-#include "/home/damn/.Xcolors"
+#include "/home/diamond/.Xcolors"
 
 !! styles
 !URxvt.background:       [90]#000

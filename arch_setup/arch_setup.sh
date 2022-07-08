@@ -37,8 +37,8 @@ function setup_yay() {
     sudo git clone https://aur.archlinux.org/yay-git.git
     user=$(whoami)
     group=$(groups | cut -d " " -f1)
-    sudo chown -R user:group ./yay-git
-    cd yay
+    sudo chown -R $user:$group ./yay-git
+    cd yay-git
     makepkg -si
 }
 
@@ -48,7 +48,7 @@ function setup_vim() {
 }
 
 
-setup_yay
+#setup_yay
+#setup_vim
 install_yay_deps
-setup_vim
-setup_dotenv
+# setup_dotenv

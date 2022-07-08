@@ -1,7 +1,8 @@
 #!/bin/sh
 
+USERNAME=$(echo $USER)
 # xmonad
-CONFIG_FOLDER=/home/damn/.config
+CONFIG_FOLDER="/home/${USERNAME}/.config"
 xrandr --setprovideroutputsource modesetting NVIDIA-0
 xrandr --auto
 

@@ -1,9 +1,8 @@
 [ -f $HOME/.zinit/bin/zinit.zsh ] && source "$HOME/.zinit/bin/zinit.zsh" && autoload -Uz _zinit
 zinit light-mode wait lucid for \
-    zinit-zsh/z-a-patch-dl \
-    zinit-zsh/z-a-as-monitor \
-    zinit-zsh/z-a-bin-gem-node \
-    zdharma/fast-syntax-highlighting \
+    zdharma-continuum/zinit-annex-patch-dl \
+    zdharma-continuum/zinit-annex-bin-gem-node \
+    zdharma-continuum/fast-syntax-highlighting \
     zsh-users/zsh-autosuggestions \
 
 zinit wait lucid light-mode for \

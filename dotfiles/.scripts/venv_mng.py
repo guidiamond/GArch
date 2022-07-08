@@ -1,14 +1,15 @@
-from os import walk, path, listdir
+from os import walk, path, listdir, getlogin
 from os.path import isfile, join
 import subprocess
 
 
+USER = getlogin()
 # onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
 class VenvManager:
     def __init__(self):
         self.selected_option = "0"
-        self.venv_path = path.abspath("/home/damn/.virtualenv")
-        self.zshrc_file = path.abspath("/home/damn/.config/zsh/zshrc")
+        self.venv_path = path.abspath(f"/home/{USER}/.virtualenv")
+        self.zshrc_file = path.abspath(f"/home/{USER}/.config/zsh/zshrc")
         self.select_menu()
         print("============================")
         self.run_option()
