@@ -1,11 +1,12 @@
 #! /bin/sh 
+USERNAME=$(echo $USER)
 # Startup #{{{
-"/home/damn/.config/polybar_ex/launch.sh" & \
-/home/damn/.config/bspwm/bsp_configure_monitors.sh & \
+"/home/${USERNAME}/.config/polybar_ex/launch.sh" & \
+"/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
   sxhkd & \
-  xmodmap /home/damn/.Xmodmap
+  xmodmap "/home/${USERNAME}/.Xmodmap"
 #}}}
-# /home/damn/.config/polybar/launch.sh &
+# /home/diamond/.config/polybar/launch.sh &
 
 # Sizing #{{{
 bspc config window_gap                    10
@@ -60,7 +61,7 @@ bspc config urgent_border_color 	      "#dd2727"
 # Rules #{{{
 #polybar hidden when fullscreen for vlc, youtube, mpv ...
 #find out the name of your monitor with xrandr
-xdo below -t $(xdo id -n root) $(xdo id -a /home/damn/.config/polybar_ex/launch.sh)
+xdo below -t $(xdo id -n root) $(xdo id -a /home/diamond/.config/polybar_ex/launch.sh)
 
 #bspc rule -a Gimp desktop='^8' state=floating follow=on
 #bspc rule -a Chromium desktop='^2'

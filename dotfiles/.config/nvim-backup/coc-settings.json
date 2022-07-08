@@ -48,7 +48,7 @@
   "less.validate": false,
   "python.jediEnabled": false,
   /* "eslint.options": { */
-  /*   "configFile": "/home/damn/.config/nvim/eslintrc.json" */
+  /*   "configFile": "/home/diamond/.config/nvim/eslintrc.json" */
   /* }, */
   "emmet.preferences": {
     "typescriptreact": "scss",
