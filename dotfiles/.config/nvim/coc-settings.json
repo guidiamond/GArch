@@ -35,6 +35,7 @@
   "diagnostic.hintSign": "",
   "python.formatting.provider": "black",
   "python.linting.enabled": true,
+  // "python.linting.flake8Enabled": true,
   "python.linting.pylintEnabled": true,
   "eslint.autoFixOnSave": true,
   "stylelintplus.autoFixOnFormat": true,
@@ -46,7 +47,6 @@
   "scss.validate": false,
   "wxss.validate": false,
   "less.validate": false,
-  "python.jediEnabled": false,
   /* "eslint.options": { */
   /*   "configFile": "~/.config/nvim/eslintrc.json" */
   /* }, */

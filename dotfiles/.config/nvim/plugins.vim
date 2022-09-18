@@ -70,6 +70,25 @@ Plug 'voldikss/vim-floaterm' " Terminal in popup
 
 
 
+" Snippets
+" Plug 'L3MON4D3/LuaSnip'
+" Plug 'rafamadriz/friendly-snippets'
+"
+" Plug 'hrsh7th/nvim-cmp' " Completion Plugin
+" Plug 'hrsh7th/cmp-buffer' " Buffer completions
+" Plug 'hrsh7th/cmp-path' " Path completions
+" Plug 'hrsh7th/cmp-nvim-lsp' " Lsp completions
+" Plug 'hrsh7th/cmp-nvim-lua' " Lua cfg completions
+" Plug 'hrsh7th/cmp-cmdline' " Cmdline completions
+" Plug 'hrsh7th/nvim-cmp' " Nvim completions
+" Plug 'saadparwaiz1/cmp_luasnip' " Snippet completions
+"
+" Plug 'neovim/nvim-lspconfig' " enable LSP
+" Plug 'williamboman/nvim-lsp-installer' " LSP installer
+" Plug 'jose-elias-alvarez/null-ls.nvim' " Formatters and linters
+
+
+
 
 " Extra functionality
 "Plug 'https://github.com/ctrlpvim/ctrlp.vim' " Quick file finder

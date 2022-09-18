@@ -120,9 +120,10 @@ let g:which_key_map_leader.v = {
       \ 's' : [':source $MYVIMRC'    , 'source'] ,
       \ }
 
+" \ 'a' : [':CocAction'    , 'Action']                   ,
 let g:which_key_map_local.c = {
       \ 'name' : '+Coc' ,
-      \ 'a' : [':CocAction'    , 'Action']                   ,
+      \ 'a' : ['<Plug>(coc-codeaction)'    , 'Action']                   ,
       \ 'c' : [':CocList commands'    , 'Commands']                  ,
       \ 'd' : [':CocList diagnostics'    , 'Diagnostics']               ,
       \ 'l' : [':CocList'    , 'List']                      ,
