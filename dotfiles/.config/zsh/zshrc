@@ -11,8 +11,8 @@ export PATH=/opt/cuda/include:$PATH
 fpath+=( ~/func )
 autoload -Uz myfunc
 export SCRIPTS="$HOME/.scripts/"
-export PYTHON_ENV="$HOME/.virtualenv/machine-learning"
-export ZSH="$HOME/.zinit"
+export PYTHON_ENV="/home/damn/.virtualenv/amazon-ads"
+# export ZSH="$HOME/.local/share/zinit/zinit.git"
 export EDITOR="nvim"
 export UPDATE_ZSH_DAYS=7 # Auto update weekly
 
