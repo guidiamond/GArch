@@ -9,6 +9,8 @@ lua require('plugins.lualine')
 lua require('plugins.nvim-tree')
 lua require('plugins.telescope')
 lua require('plugins.gitsigns')
+" lua require('plugins.cmp')
+" lua require('plugins.lsp')
 " lua require('plugins.treesitter')
 
 " let g:polyglot_disabled = ['css', 'scss']
