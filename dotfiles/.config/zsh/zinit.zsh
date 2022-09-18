@@ -1,4 +1,3 @@
-[ -f $HOME/.zinit/bin/zinit.zsh ] && source "$HOME/.zinit/bin/zinit.zsh" && autoload -Uz _zinit
 zinit light-mode wait lucid for \
     zdharma-continuum/zinit-annex-patch-dl \
     zdharma-continuum/zinit-annex-bin-gem-node \
