@@ -25,8 +25,6 @@ lnoremap <silent> <leader><F9> :call vimspector#ToggleBreakpoint()<CR>
 "}}}
 
 " Normal{{{
-nnoremap <leader>ev : vsplit $MYVIMRC<CR>
-nnoremap <leader>sv :source $MYVIMRC<CR>
 nnoremap <space><space> za
 nnoremap <silent> <C-w>> :exe "vertical resize " . (winwidth(0) * 3/2)<CR>
 nnoremap <silent> <C-w>> :exe "vertical resize " . (winwidth(0) * 3/2)<CR>
@@ -61,48 +59,49 @@ nnoremap <c-c> :noh <CR>
 "}}}
 
 " WhichKey{{{
-nnoremap <silent> <space>  :<c-u>WhichKey       '<space>' <CR>
-vnoremap <silent> <space>  :<c-u>WhichKeyVisual  '<space>' <CR>
-nnoremap <silent> <leader> :call GetBuffers() <bar> WhichKey '\' <CR>
-vnoremap <silent> <leader> :<c-u>WhichKeyVisual  '\'<CR>
+" nnoremap <silent> <space>  :<c-u>WhichKey       '<space>' <CR>
+" vnoremap <silent> <space>  :<c-u>WhichKeyVisual  '<space>' <CR>
+" " nnoremap <silent> <leader> :call GetBuffers() <bar> WhichKey '\' <CR>
+" nnoremap <silent> <leader> :<c-u> WhichKey '\' <CR>
+" vnoremap <silent> <leader> :<c-u>WhichKeyVisual  '\'<CR>
 "}}}
 
 " Coc{{{
 " Normal{{{
 " Goto
-nmap <silent> gd <Plug>(coc-definition)
-nmap <silent> gr <Plug>(coc-references)
-nmap <silent> gy <Plug>(coc-type-definition)
-nmap <silent> gi <Plug>(coc-implementation)
-nmap <silent> gr <Plug>(coc-references)
-nmap <silent> <TAB> <Plug>(coc-range-select)
-"nmap <leader>rn <Plug>(coc-rename)
+" nmap <silent> gd <Plug>(coc-definition)
+" nmap <silent> gr <Plug>(coc-references)
+" nmap <silent> gy <Plug>(coc-type-definition)
+" nmap <silent> gi <Plug>(coc-implementation)
+" nmap <silent> gr <Plug>(coc-references)
+" nmap <silent> <TAB> <Plug>(coc-range-select)
+" nmap <leader>rn <Plug>(coc-rename)
 " Navigate diagnostics
-"nnoremap <silent> <space>a  :<C-u>CocList diagnostics<cr>
-"nnoremap <silent> <space>e  :<C-u>CocList extensions<cr>
-"nnoremap <silent> <space>c  :<C-u>CocList commands<cr>
-"nnoremap <silent> <space>o  :<C-u>CocList outline<cr>
-"nnoremap <silent> <space>s  :<C-u>CocList -I symbols<cr>
-"nnoremap <silent> <space>j  :<C-u>CocNext<CR>
-"nnoremap <silent> <space>k  :<C-u>CocPrev<CR>
-"nnoremap <silent> <space>p  :<C-u>CocListResume<CR>
-"nnoremap <silent> <space>S  :<C-u>OR<CR>
-nnoremap <silent> [g <Plug>(coc-diagnostic-prev)
-nnoremap <silent> ]g <Plug>(coc-diagnostic-next)
-"}}}
-
+" nnoremap <silent> <space>a  :<C-u>CocList diagnostics<cr>
+" nnoremap <silent> <space>e  :<C-u>CocList extensions<cr>
+" nnoremap <silent> <space>c  :<C-u>CocList commands<cr>
+" nnoremap <silent> <space>o  :<C-u>CocList outline<cr>
+" nnoremap <silent> <space>s  :<C-u>CocList -I symbols<cr>
+" nnoremap <silent> <space>j  :<C-u>CocNext<CR>
+" nnoremap <silent> <space>k  :<C-u>CocPrev<CR>
+" nnoremap <silent> <space>p  :<C-u>CocListResume<CR>
+" nnoremap <silent> <space>S  :<C-u>OR<CR>
+" nnoremap <silent> [g <Plug>(coc-diagnostic-prev)
+" nnoremap <silent> ]g <Plug>(coc-diagnostic-next)
+" }}}
+"
 " Visual{{{
-xmap af             <Plug>(coc-funcobj-a)
-xmap if             <Plug>(coc-funcobj-i)
-xmap af             <Plug>(coc-funcobj-a)
-
-xmap <silent> <TAB> <Plug>(coc-range-select)
-"xmap <leader>a  <Plug>(coc-codeaction-selected)
-"}}}
-
+" xmap af             <Plug>(coc-funcobj-a)
+" xmap if             <Plug>(coc-funcobj-i)
+" xmap af             <Plug>(coc-funcobj-a)
+"
+" xmap <silent> <TAB> <Plug>(coc-range-select)
+" xmap <leader>a  <Plug>(coc-codeaction-selected)
+" }}}
+"
 " Omap {{{
-omap if <Plug>(coc-funcobj-i)
-omap af <Plug>(coc-funcobj-a)"}}}
-"}}}}}}
+" omap if <Plug>(coc-funcobj-i)
+" omap af <Plug>(coc-funcobj-a)"}}}
+" }}}}}}
 
 " vim:foldmethod=marker:foldlevel=0

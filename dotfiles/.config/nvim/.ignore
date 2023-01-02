@@ -8,3 +8,5 @@ tmp/
 .dat
 .so
 .DS_STORE
+vimspector_cfg/gadgets/
+plugin/packer_compiled.lua

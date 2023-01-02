@@ -7,6 +7,7 @@ Plug 'dracula/vim', { 'as': 'dracula' } " Vim airline theme
 Plug 'tomasr/molokai'  
 Plug 'sonph/onehalf', {'rtp': 'vim/'}
 Plug 'joshdick/onedark.vim'
+Plug 'folke/tokyonight.nvim', { 'branch': 'main' }
 " Plug 'ryanoasis/vim-devicons' " filetype icons (dep of: lightline)
 
 " Vim Bar
@@ -40,7 +41,7 @@ Plug 'ludovicchabant/vim-gutentags'
 " Color
 " Plug 'DougBeney/pickachu' " Color picker (disabled for performance issues)
 Plug 'rrethy/vim-hexokinase', { 'do': 'make hexokinase' } " Color visualizer
-Plug 'luochen1990/rainbow' " Diff level of parentheses with multiple colors
+" Plug 'luochen1990/rainbow' " Diff level of parentheses with multiple colors
 " Plug 'nvim-treesitter/nvim-treesitter', {'do': ':TSUpdate'}  " We recommend updating the parsers on update
 
 " Git integration
@@ -49,12 +50,12 @@ Plug 'lewis6991/gitsigns.nvim' " Uses signs to indicate modified files
 Plug 'tpope/vim-fugitive'
 
 " Language specific
-Plug 'sheerun/vim-polyglot' " Generic language package
-Plug 'jackguo380/vim-lsp-cxx-highlight' " Syntax highlight for c++
-Plug 'neoclide/coc.nvim', {'branch': 'release'} " Language server
+" Plug 'sheerun/vim-polyglot' " Generic language package
+" Plug 'jackguo380/vim-lsp-cxx-highlight' " Syntax highlight for c++
+" Plug 'neoclide/coc.nvim', {'branch': 'release'} " Language server
 
 Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
-Plug 'neoclide/jsonc.vim' " Jsonc
+" Plug 'neoclide/jsonc.vim' " Jsonc
 " Plug 'styled-components/vim-styled-components', { 'branch': 'main' } " Javascript Styled components
 Plug 'mlaursen/vim-react-snippets' " Snippets for react
 
@@ -65,27 +66,36 @@ Plug 'christoomey/vim-tmux-navigator' " Tmux integration
 Plug 'tpope/vim-surround' " Mappings to easily delete, change and add such surroundings in pairs
 Plug 'jiangmiao/auto-pairs' " Insert or delete brackets, parens, quotes in pair.
 Plug 'tomtom/tcomment_vim' " Line commenter
-Plug 'liuchengxu/vim-which-key' " Displays available keybindings in popup.
+Plug 'folke/which-key.nvim' " Displays available keybindings in popup. (lua)
+" Plug 'liuchengxu/vim-which-key' " Displays available keybindings in popup. (nvim)
 Plug 'voldikss/vim-floaterm' " Terminal in popup
 
 
 
 " Snippets
-" Plug 'L3MON4D3/LuaSnip'
-" Plug 'rafamadriz/friendly-snippets'
-"
-" Plug 'hrsh7th/nvim-cmp' " Completion Plugin
-" Plug 'hrsh7th/cmp-buffer' " Buffer completions
-" Plug 'hrsh7th/cmp-path' " Path completions
-" Plug 'hrsh7th/cmp-nvim-lsp' " Lsp completions
-" Plug 'hrsh7th/cmp-nvim-lua' " Lua cfg completions
-" Plug 'hrsh7th/cmp-cmdline' " Cmdline completions
-" Plug 'hrsh7th/nvim-cmp' " Nvim completions
-" Plug 'saadparwaiz1/cmp_luasnip' " Snippet completions
-"
-" Plug 'neovim/nvim-lspconfig' " enable LSP
-" Plug 'williamboman/nvim-lsp-installer' " LSP installer
-" Plug 'jose-elias-alvarez/null-ls.nvim' " Formatters and linters
+Plug 'L3MON4D3/LuaSnip'
+Plug 'rafamadriz/friendly-snippets'
+
+Plug 'hrsh7th/nvim-cmp' " Completion Plugin
+Plug 'hrsh7th/cmp-buffer' " Buffer completions
+Plug 'hrsh7th/cmp-path' " Path completions
+Plug 'hrsh7th/cmp-nvim-lsp' " Lsp completions
+Plug 'hrsh7th/cmp-nvim-lua' " Lua cfg completions
+Plug 'hrsh7th/cmp-cmdline' " Cmdline completions
+Plug 'hrsh7th/nvim-cmp' " Nvim completions
+Plug 'saadparwaiz1/cmp_luasnip' " Snippet completions
+
+" LSP
+Plug 'neovim/nvim-lspconfig' " Enable LSP (collection of lsp configs)
+Plug 'williamboman/mason.nvim' " Simple to use language server installer
+Plug 'williamboman/mason-lspconfig.nvim'
+Plug 'williamboman/nvim-lsp-installer' " LSP installer
+Plug 'RRethy/vim-illuminate' " Automatically highlighting other uses of the word under the cursor
+
+Plug 'jose-elias-alvarez/null-ls.nvim' " Formatters and linters
+Plug 'nvim-treesitter/nvim-treesitter'
+Plug 'p00f/nvim-ts-rainbow'
+Plug 'lewis6991/impatient.nvim'
 
 
 
@@ -104,7 +114,7 @@ Plug 'voldikss/vim-floaterm' " Terminal in popup
 " Plug 'vim-airline/vim-airline'
 " Plug 'vim-airline/vim-airline-themes'
 " Plug 'preservim/nerdtree'
-Plug 'tiagofumo/vim-nerdtree-syntax-highlight' " Coloring for nerdtree (dependency: 'ryanoasis/vim-devicons')
+" Plug 'tiagofumo/vim-nerdtree-syntax-highlight' " Coloring for nerdtree (dependency: 'ryanoasis/vim-devicons')
 Plug 'KabbAmine/vCoolor.vim'
 
 " Coc Plugins

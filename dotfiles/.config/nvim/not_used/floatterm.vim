@@ -19,3 +19,8 @@ let g:floaterm_wintitle=0
 " 2 - Always close floaterm window.
 let g:floaterm_autoclose=1
 let g:floaterm_opener  = 'edit'
+
+let g:floaterm_keymap_toggle = '<F1>'
+let g:floaterm_keymap_next   = '<F2>'
+let g:floaterm_keymap_prev   = '<F3>'
+let g:floaterm_keymap_new    = '<F4>'

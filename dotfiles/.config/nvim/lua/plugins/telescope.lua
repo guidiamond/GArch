@@ -26,7 +26,6 @@ telescope.setup{
             },
         -- other layout configuration here
       },
-    
     mappings = {
       i = {
         -- map actions.which_key to <C-h> (default: <C-/>)
@@ -49,13 +48,6 @@ telescope.setup{
     -- Now the picker_config_key will be applied every time you call this
     -- builtin picker
   },
-  extensions = {
-    -- Your extension configuration goes here:
-    -- extension_name = {
-    --   extension_config_key = value,
-    -- }
-    -- please take a look at the readme of the extension you want to configure
-  }
 }
 
 telescope.load_extension('fzf')

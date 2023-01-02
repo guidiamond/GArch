@@ -69,9 +69,9 @@ autocmd  FileType which_key set laststatus=0 noshowmode noruler
 
 " let g:which_key_map_leader['\']  = ['<Plug>AirlineSelectNextTab', 'Next Buffer']
 " let g:which_key_map_leader['|']  = ['<Plug>AirlineSelectPrevTab', 'Previous Buffer']
-let g:which_key_map_leader['\']  = ['bn', 'Next Buffer']
-let g:which_key_map_leader['|']  = ['bp', 'Previous Buffer']
-let g:which_key_map_leader['<Tab>']  = [':b #', 'Toggle Buffers']
+" let g:which_key_map_leader['\']  = ['bn', 'Next Buffer']
+" let g:which_key_map_leader['|']  = ['bp', 'Previous Buffer']
+" let g:which_key_map_leader['<Tab>']  = [':b #', 'Toggle Buffers']
 " let g:which_key_map_leader['s']  = ['<Plug>Sneak_s', 'Sneak next']
 " let g:which_key_map_leader['S']  = ['<Plug>Sneak_S', 'Sneak Previous']
 let g:which_key_map_local['y'] = ['\"+y', 'Yank2clipboard']
@@ -138,3 +138,4 @@ let g:which_key_map_local.c = {
 call GetBuffers()
 call which_key#register('\', "g:which_key_map_leader")
 call which_key#register('<space>', "g:which_key_map_local")
+
