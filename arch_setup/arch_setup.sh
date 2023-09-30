@@ -49,6 +49,6 @@ function setup_vim() {
 
 
 #setup_yay
-#setup_vim
-install_yay_deps
-# setup_dotenv
+#setup_dotenv
+setup_vim
+#install_yay_deps

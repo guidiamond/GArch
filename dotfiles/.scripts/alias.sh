@@ -22,7 +22,7 @@ alias ldot='ls -ld .*'
  
 # Config files
 alias czsh="${EDITOR} ~/.config/zsh/zshrc"
-alias cvim="cd ~/.config/nvim && ${EDITOR} ~/.config/nvim/init.vim"
+alias cvim="cd ~/.config/nvim && ${EDITOR} ~/.config/nvim/init.lua"
 alias calias="${EDITOR} ~/.scripts/alias.sh"
 alias cscripts="${EDITOR} ~/.scripts/"
 alias ci3="${EDITOR} ~/.config/i3/config"

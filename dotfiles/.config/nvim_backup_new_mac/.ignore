@@ -1,0 +1,12 @@
+node_modules/
+plugged/
+build/
+.git/
+.yardoc/
+log/
+tmp/
+.dat
+.so
+.DS_STORE
+vimspector_cfg/gadgets/
+plugin/packer_compiled.lua

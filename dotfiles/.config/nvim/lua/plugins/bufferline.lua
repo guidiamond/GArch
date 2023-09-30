@@ -36,7 +36,11 @@ bufferline.setup {
     max_name_length = 30,
     max_prefix_length = 30, -- prefix used when a buffer is de-duplicated
     tab_size = 21,
-    diagnostics = 'coc', -- false | "nvim_lsp" | "coc",
+    diagnostics = 'nvim_lsp', -- false | "nvim_lsp" | "coc",
+    diagnostics_indicator = function(count, level, diagnostics_dict, context)
+      local icon = level:match("error") and " " or " "
+      return " " .. icon .. count
+    end,
     diagnostics_update_in_insert = true,
 
     -- diagnostics_indicator = function(count, level, diagnostics_dict, context)
@@ -69,8 +73,8 @@ bufferline.setup {
     -- can also be a table containing 2 custom separators
     -- [focused and unfocused]. eg: { '|', '|' }
 
-    separator_style = "thin", -- "slant" | "thick" | "thin" | { 'any', 'any' },
-    enforce_regular_tabs = true,
+    separator_style = "thin", -- "slant" |"padded_slant" | "slope" | "thick" | "thin" | { 'any', 'any' },
+    enforce_regular_tabs = false, -- If true showing Unique Tab/Buffer names won't work
     always_show_bufferline = true,
     -- sort_by = 'id' | 'extension' | 'relative_directory' | 'directory' | 'tabs' | function(buffer_a, buffer_b)
     --   -- add custom logic

@@ -129,12 +129,21 @@ ins_left {
   'filename',
   cond = conditions.buffer_not_empty,
   color = { fg = colors.magenta, gui = 'bold' },
+  path = 1,                -- 0: Just the filename
+                           -- 1: Relative path
+                           -- 2: Absolute path
+                           -- 3: Absolute path, with tilde as the home directory
+                           -- 4: Filename and parent dir, with tilde as the home directory
 }
 
 
 ins_left {
   'diagnostics',
-  sources = { 'nvim_diagnostic', 'coc' },
+  -- Table of diagnostic sources, available sources are:
+  --   'nvim_lsp', 'nvim_diagnostic', 'nvim_workspace_diagnostic', 'coc', 'ale', 'vim_lsp'.
+  -- or a function that returns a table as such:
+  --   { error=error_cnt, warn=warn_cnt, info=info_cnt, hint=hint_cnt }
+  sources = { 'nvim_diagnostic', 'nvim_lsp', 'coc' },
   symbols = { error = ' ', warn = ' ', info = ' ' },
   diagnostics_color = {
     color_error = { fg = colors.red },
@@ -151,28 +160,28 @@ ins_left {
   end,
 }
 
--- ins_left {
---   -- Lsp server name .
---   function()
---     local msg = 'No Active Lsp'
---     local buf_ft = vim.api.nvim_buf_get_option(0, 'filetype')
---     local clients = vim.lsp.get_active_clients()
---     if next(clients) == nil then
---       return msg
---     end
---     for _, client in ipairs(clients) do
---       local filetypes = client.config.filetypes
---       if filetypes and vim.fn.index(filetypes, buf_ft) ~= -1 then
---         return client.name
---       end
---     end
---     return msg
---   end,
---   icon = ' LSP:',
---   color = { fg = '#ffffff', gui = 'bold' },
--- }
-
 -- Add components to right sections
+
+ins_right {
+  -- Lsp server name .
+  function()
+    local msg = 'No Active Lsp'
+    local buf_ft = vim.api.nvim_buf_get_option(0, 'filetype')
+    local clients = vim.lsp.get_active_clients()
+    if next(clients) == nil then
+      return msg
+    end
+    for _, client in ipairs(clients) do
+      local filetypes = client.config.filetypes
+      if filetypes and vim.fn.index(filetypes, buf_ft) ~= -1 then
+        return client.name
+      end
+    end
+    return msg
+  end,
+  icon = ' LSP:',
+  color = { fg = '#ffffff', gui = 'bold' },
+}
 
 ins_right { 'location' }
 

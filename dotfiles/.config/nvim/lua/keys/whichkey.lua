@@ -4,40 +4,6 @@ if not status_ok then
 end
 
 local setup = {
-	plugins = {
-		marks = true, -- shows a list of your marks on ' and `
-		registers = true, -- shows your registers on " in NORMAL or <C-r> in INSERT mode
-		spelling = {
-			enabled = true, -- enabling this will show WhichKey when pressing z= to select spelling suggestions
-			suggestions = 20, -- how many suggestions should be shown in the list?
-		},
-		-- the presets plugin, adds help for a bunch of default keybindings in Neovim
-		-- No actual key bindings are created
-		presets = {
-			operators = false, -- adds help for operators like d, y, ... and registers them for motion / text object completion
-			motions = true, -- adds help for motions
-			text_objects = true, -- help for text objects triggered after entering an operator
-			windows = true, -- default bindings on <c-w>
-			nav = true, -- misc bindings to work with windows
-			z = true, -- bindings for folds, spelling and others prefixed with z
-			g = true, -- bindings for prefixed with g
-		},
-	},
-	-- add operators that will trigger motion and text object completion
-	-- to enable all native operators, set the preset / operators plugin above
-	-- operators = { gc = "Comments" },
-	key_labels = {
-		-- override the label used to display some keys. It doesn't effect WK in any other way.
-		-- For example:
-		-- ["<space>"] = "SPC",
-		-- ["<cr>"] = "RET",
-		-- ["<tab>"] = "TAB",
-	},
-	icons = {
-		breadcrumb = "»", -- symbol used in the command line area that shows your active key combo
-		separator = "➜", -- symbol used between a key and it's label
-		group = "+", -- symbol prepended to a group
-	},
 	popup_mappings = {
 		scroll_down = "<c-d>", -- binding to scroll down inside the popup
 		scroll_up = "<c-u>", -- binding to scroll up inside the popup
@@ -47,7 +13,8 @@ local setup = {
 		position = "bottom", -- bottom, top
 		margin = { 1, 0, 1, 0 }, -- extra window margin [top, right, bottom, left]
 		padding = { 2, 2, 2, 2 }, -- extra window padding [top, right, bottom, left]
-		winblend = 0,
+		winblend = 0, -- value between 0-100 0 for fully opaque and 100 for fully transparent
+		zindex = 1000, -- positive value to position WhichKey above other floating windows.
 	},
 	layout = {
 		height = { min = 4, max = 25 }, -- min and max height of the columns
@@ -56,7 +23,7 @@ local setup = {
 		align = "left", -- align columns left, center or right
 	},
 	ignore_missing = true, -- enable this to hide mappings for which you didn't specify a label
-	hidden = { "<silent>", "<cmd>", "<Cmd>", "<CR>", "call", "lua", "^:", "^ " }, -- hide mapping boilerplate
+	hidden = { "<silent>", "<cmd>", "<Cmd>", "<CR>", "^:", "^ ", "^call ", "^lua " }, -- hide mapping boilerplate
 	show_help = true, -- show help message on the command line when the popup is visible
 	triggers = "auto", -- automatically setup triggers
 	-- triggers = {}, -- or specify a list manually
@@ -71,15 +38,15 @@ local setup = {
 
 local function get_opts(mode)
 	return {
-		mode = mode, -- NORMAL mode
+		mode = mode,
 		buffer = nil, -- Global mappings. Specify a buffer number for buffer local mappings
-		silent = true, -- use `silent` when creating keymaps
-		noremap = true, -- use `noremap` when creating keymaps
-		nowait = true, -- use `nowait` when creating keymaps
+		silent = true, -- Normal messages will not be given or added to the message history.
+		noremap = true, -- Non recursive mapping (safer than remap)
+		nowait = true, -- Lets your mapping trigger even if a longer mapping exists
 	}
 end
 
-function clean_buffers(mappings)
+local function clean_buffers(mappings)
 	for idx = 1, 9 do
 		mappings[tostring(idx)] = { "", "" }
 		mappings["d" .. tostring(idx)] = { "", "" }
@@ -87,7 +54,7 @@ function clean_buffers(mappings)
 	return mappings
 end
 
-function get_buffers()
+local function get_buffers()
 	local vim_fn = vim.fn
 	local mappings = {}
 	mappings = clean_buffers(mappings)
@@ -108,30 +75,31 @@ function get_buffers()
 	return mappings
 end
 
+local function nvim_tree_toggle_focus()
+	local tree_view = require("nvim-tree.view")
+	if tree_view.is_visible() then
+		local buf_name = vim.fn.expand("%")
+		if string.sub(buf_name, 1, 8) == "NvimTree" then
+			return vim.api.nvim_command("NvimTreeToggle")
+		end
+	end
+	return vim.api.nvim_command("NvimTreeFocus")
+end
+
 local mappings = {
 	["<leader>"] = {
-		c = {
-			-- Not running
-			name = "+NerdCommenter",
-			s = { "<Plug>NERDCommenterSexy", "Sexy" },
-			u = { "<Plug>NERDCommenterUncomment", "Uncomment" },
-			y = { "<Plug>NERDCommenterUncomment", "Yank && comment" },
-			c = { "<Plug>NERDCommenterComment", "Comment" },
-			["$"] = { "<Plug>NerdCommenterToEOL", "to EOL" },
-			A = { "<Plug>NerdCommenterAppend", "Append to the end" },
-		},
 		d = {
 			name = "+Delete Buffers",
 			d = { "<cmd>Bdelete %<CR>", "Current" },
 			r = { "<cmd>BufferLineCloseRight<CR>", "To the Right" },
 			l = { "<cmd>BufferLineCloseLeft<CR>", "To the Left" },
-			-- Missing
 		},
 		t = {
 			name = "+ToggleTerm",
 			g = { "<cmd>lua _LAZYGIT_TOGGLE()<CR>", "Lazygit" },
 			n = { "<cmd>lua _NODE_TOGGLE()<CR>", "Node" },
 			r = { "<cmd>lua _RANGER_TOGGLE()<CR>", "Ranger" },
+			t = { "<cmd>ToggleTerm<CR>", "Terminal" },
 		},
 		v = {
 			name = "+Vim",
@@ -159,7 +127,7 @@ local mappings = {
 			q = { "<cmd>lua require'dap'.close()<cr>", "Quit" },
 			U = { "<cmd>lua require'dapui'.toggle({reset = true})<cr>", "Toggle UI" },
 		},
-		e = { "<cmd>NvimTreeToggle<CR>", "Nvim tree Toggle" },
+		e = { nvim_tree_toggle_focus, "NvimTree Toggle & Focus" },
 		f = {
 			name = "+Find",
 			a = { "<cmd>Telescope buffers<CR>", "Buffers search" },

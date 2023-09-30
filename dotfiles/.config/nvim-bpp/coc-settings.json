@@ -1,0 +1,59 @@
+{
+  "suggest.noselect": false,
+  "coc.preferences.rootPatterns": [
+    "init.vim",
+    ".git",
+    ".root",
+    ".hg",
+    ".projections.json",
+    "package.json",
+    "__pycache__",
+    ".atsln",
+    ".cproj",
+    ".env"
+  ],
+  "coc.preferences.formatOnSaveFiletypes": [
+    "javascript",
+    "c",
+    "cuda",
+    "cpp",
+    "scss",
+    "css",
+    "typescript",
+    "python",
+    "typescriptreact",
+    "json",
+    "jsonc",
+    "javascriptreact",
+    "javascript.tsx",
+    "typescript.tsx"
+  ],
+  "coc.preferences.colorSupport": true,
+  "diagnostic.errorSign": "",
+  "diagnostic.warningSign": "",
+  "diagnostic.infoSign": "",
+  "diagnostic.hintSign": "",
+  "python.formatting.provider": "black",
+  "python.linting.enabled": true,
+  // "python.linting.flake8Enabled": true,
+  "python.linting.pylintEnabled": true,
+  "eslint.autoFixOnSave": true,
+  "stylelintplus.autoFixOnFormat": true,
+  "stylelintplus.autoFixOnSave": true,
+  "stylelintplus.validateOnType": false,
+  "stylelintplus.validateOnSave": true,
+  "cssmodules.camelCase": false,
+  "css.validate": false,
+  "scss.validate": false,
+  "wxss.validate": false,
+  "less.validate": false,
+  /* "eslint.options": { */
+  /*   "configFile": "~/.config/nvim/eslintrc.json" */
+  /* }, */
+  "emmet.preferences": {
+    "typescriptreact": "scss",
+    "jsx.classAttributeName": "scss",
+    "typescript.tsx.classAttributeName": "scss"
+  },
+  "clangd.path": "~/.config/coc/extensions/coc-clangd-data/install/13.0.0/clangd_13.0.0/bin/clangd"
+}

@@ -1,4 +1,5 @@
 #!/bin/sh
+xinput set-prop 'Logitech Gaming Mouse G502' 'libinput Accel Speed' 1
 
 USERNAME=$(echo $USER)
 # xmonad

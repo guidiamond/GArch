@@ -1,16 +1,16 @@
-#! /bin/sh 
+#! /bin/sh
 USERNAME=$(echo $USER)
 # Startup #{{{
 "/home/${USERNAME}/.config/polybar_ex/launch.sh" & \
-"/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
-  sxhkd & \
-  xmodmap "/home/${USERNAME}/.Xmodmap"
+    sxhkd & \
+    xmodmap "/home/${USERNAME}/.Xmodmap" & \
+    "/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
 #}}}
 # /home/diamond/.config/polybar/launch.sh &
 
 # Sizing #{{{
 bspc config window_gap                    10
-bspc config border_width                  3 
+bspc config border_width                  3
 
 bspc config top_padding                   40
 bspc config bottom_padding                10

@@ -21,12 +21,12 @@ M.setup = function()
 		vim.fn.sign_define(sign.name, { texthl = sign.name, text = sign.text, numhl = "" })
 	end
 
-	local config = {
-		-- virtual_text = false, -- disable virtual text
-    virtual_text = {
-      -- source = "always",  -- Or "if_many"
-      prefix = '●', -- Could be '■', '▎', 'x'
-    },
+	vim.diagnostic.config({
+		virtual_text = false, -- disable virtual text
+		-- virtual_text = {
+		-- 	-- source = "always",  -- Or "if_many"
+		-- 	prefix = "●", -- Could be '■', '▎', 'x'
+		-- },
 		signs = {
 			active = signs, -- show signs
 		},
@@ -41,9 +41,7 @@ M.setup = function()
 			header = "",
 			prefix = "",
 		},
-	}
-
-	vim.diagnostic.config(config)
+	})
 
 	vim.lsp.handlers["textDocument/hover"] = vim.lsp.with(vim.lsp.handlers.hover, {
 		border = "rounded",
@@ -75,14 +73,6 @@ local function lsp_keymaps(bufnr)
 end
 
 M.on_attach = function(client, bufnr)
-	if client.name == "tsserver" then
-		client.server_capabilities.documentFormattingProvider = false
-	end
-
-	if client.name == "sumneko_lua" then
-		client.server_capabilities.documentFormattingProvider = false
-	end
-
 	lsp_keymaps(bufnr)
 	local status_ok, illuminate = pcall(require, "illuminate")
 	if not status_ok then

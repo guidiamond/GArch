@@ -46,7 +46,7 @@ msmtp
 mtools
 mutt-wizard-git
 neomutt
-neovim
+neovim-git
 nerd-fonts-complete
 network-manager-applet
 networkmanager-openvpn

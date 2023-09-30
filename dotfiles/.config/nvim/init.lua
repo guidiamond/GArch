@@ -1,21 +1,5 @@
--- General Configs
-require('general.options')
-require('general.colorscheme')
--- Plugins
-require('plugins.plugins')
-require('plugins.dap')
-require('plugins.toggleterm')
-require('plugins.gutentags')
-require('plugins.quickscope')
-require('plugins.sneak')
-require('plugins.telescope')
-require('plugins.bufferline')
-require('plugins.lualine')
-require('plugins.nvim-tree')
-require('plugins.gitsigns')
-require('plugins.cmp')
-require('plugins.lsp')
-require('plugins.treesitter')
--- Key Maps
-require('keys.mappings')
-require('keys.whichkey')
+vim.loader.enable() -- Enables `lua-loader`, a builtin Lua module which byte-compiles and caches Lua files (speeds up load times).
+
+require("general.options")
+require("plugins.plugin_manager")
+require("keys.mappings")
