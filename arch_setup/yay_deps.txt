@@ -1,6 +1,6 @@
 alacritty
 arandr
-aws-cli-v2-bin
+aws-cli-v2
 brave-bin
 bsp
 bspwm
