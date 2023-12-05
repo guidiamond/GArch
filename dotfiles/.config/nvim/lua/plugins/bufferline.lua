@@ -5,18 +5,18 @@ end
 
 bufferline.setup {
   options = {
-    numbers = "ordinal", -- | "ordinal" | "buffer_id" | "both" | function({ ordinal, id, lower, raise }): string,
-    close_command = "Bdelete! %d", -- can be a string | function, see "Mouse actions"
+    numbers = "ordinal",                 -- | "ordinal" | "buffer_id" | "both" | function({ ordinal, id, lower, raise }): string,
+    close_command = "Bdelete! %d",       -- can be a string | function, see "Mouse actions"
     right_mouse_command = "Bdelete! %d", -- can be a string | function, see "Mouse actions"
-    left_mouse_command = "buffer %d", -- can be a string | function, see "Mouse actions"
-    middle_mouse_command = nil, -- can be a string | function, see "Mouse actions"
+    left_mouse_command = "buffer %d",    -- can be a string | function, see "Mouse actions"
+    middle_mouse_command = nil,          -- can be a string | function, see "Mouse actions"
 
     -- ICONS (NOTE: this plugin is designed with this icon in mind, changing is NOT recommended)
     indicator = {
       style = "icon",
       icon = "▎",
     },
-    buffer_close_icon = "", -- 
+    buffer_close_icon = "󰅙", --  (Nerd fonts)
     modified_icon = "●",
     close_icon = "", -- 
     left_trunc_marker = "",
@@ -34,7 +34,7 @@ bufferline.setup {
     -- end,
 
     max_name_length = 30,
-    max_prefix_length = 30, -- prefix used when a buffer is de-duplicated
+    max_prefix_length = 30,   -- prefix used when a buffer is de-duplicated
     tab_size = 21,
     diagnostics = 'nvim_lsp', -- false | "nvim_lsp" | "coc",
     diagnostics_indicator = function(count, level, diagnostics_dict, context)
@@ -73,7 +73,7 @@ bufferline.setup {
     -- can also be a table containing 2 custom separators
     -- [focused and unfocused]. eg: { '|', '|' }
 
-    separator_style = "thin", -- "slant" |"padded_slant" | "slope" | "thick" | "thin" | { 'any', 'any' },
+    separator_style = "thin",     -- "slant" |"padded_slant" | "slope" | "thick" | "thin" | { 'any', 'any' },
     enforce_regular_tabs = false, -- If true showing Unique Tab/Buffer names won't work
     always_show_bufferline = true,
     -- sort_by = 'id' | 'extension' | 'relative_directory' | 'directory' | 'tabs' | function(buffer_a, buffer_b)
