@@ -194,6 +194,11 @@ lazy.setup({
     init = load_config("copilot")
   },
   {
+    "folke/trouble.nvim",
+    config = load_config("trouble"),
+    dependencies = { "nvim-tree/nvim-web-devicons" },
+  }, -- Pretty list for diagnostics, references, telescope results, quickfix and location lists
+  {
     "hrsh7th/nvim-cmp",
     config = load_config("cmp"),
     dependencies = {
@@ -212,7 +217,7 @@ lazy.setup({
       "williamboman/mason.nvim",           -- Simple to use language server installer
       "williamboman/mason-lspconfig.nvim", -- Bridges mason.nvim with the lspconfig plugin
       "williamboman/nvim-lsp-installer",   -- LSP installer
-      "jose-elias-alvarez/null-ls.nvim",   -- Formatters and linters
+      "nvimtools/none-ls.nvim",            -- Formatters and linters
     },
   },                                       -- Enable LSP (collection of lsp configs)
   {

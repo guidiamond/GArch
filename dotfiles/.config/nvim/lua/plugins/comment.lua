@@ -1,12 +1,21 @@
-local status_ok, comment = pcall(require, "Comment")
-if not status_ok then
+local status_ok_comment, comment = pcall(require, "Comment")
+if not status_ok_comment then
   return
 end
 
+local M = {}
 
-comment.setup({
-  pre_hook = require('ts_context_commentstring.integrations.comment_nvim').create_pre_hook()
-})
+local status_ok_ts_context_commentstring, ts_context = pcall(require, "ts_context_commentstring")
+if not status_ok then
+  ts_context.setup {}
+  -- Speeds up loading time
+  vim.g.skip_ts_context_commentstring_module = true
+  M['pre_hook'] = require('ts_context_commentstring.integrations.comment_nvim').create_pre_hook()
+end
+
+
+
+comment.setup(M)
 
 -- Default keybindings:
 --

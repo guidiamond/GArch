@@ -18,13 +18,13 @@ null_ls.setup({
     formatting.prettier,
     formatting.black.with({ extra_args = { "--fast" } }),
     formatting.stylua,
-    formatting.eslint_d,
-    formatting.beautysh, -- In addition to Bash, Beautysh can format csh, ksh, sh and zsh.
-    code_actions.eslint_d,
-    diagnostics.eslint_d,
+    -- formatting.eslint_d,
+    -- formatting.beautysh, -- In addition to Bash, Beautysh can format csh, ksh, sh and zsh.
+    -- code_actions.eslint_d,
+    -- diagnostics.eslint_d,
     diagnostics.zsh,
     diagnostics.mypy, -- Type Checking
-    diagnostics.ruff, -- Linting
+    -- diagnostics.ruff, -- Linting
   },
   on_attach = function(client, bufnr)
     if client.supports_method("textDocument/formatting") then

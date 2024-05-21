@@ -127,6 +127,7 @@ local mappings = {
       i = { "<cmd>LspInfo<cr>", "Lsp info" },
       I = { "<cmd>LspInstallInfo<CR>", "Lsp install info" },
       o = { "<cmd>Lspsaga outline<CR>", "Outline" },
+      d = { "<cmd>TroubleToggle workspace_diagnostics<CR>", "Diagnostic" },
       -- o = { "<cmd>lua vim.lsp.buf.format{ async = true }<cr>", "Format file" },
       r = { "<cmd>Lspsaga rename<CR>", "Rename" },
       ['['] = {
@@ -167,7 +168,8 @@ local mappings = {
       q = { "<cmd>lua require'dap'.close()<cr>", "Quit" },
       U = { "<cmd>lua require'dapui'.toggle({reset = true})<cr>", "Toggle UI" },
     },
-    e = { nvim_tree_toggle_focus, "NvimTree Toggle & Focus" },
+    -- e = { nvim_tree_toggle_focus, "NvimTree Toggle & Focus" },
+    e = { "<cmd>NvimTreeToggle<CR>", "NvimTree Toggle & Focus" },
     f = {
       name = "+Find",
       a = { "<cmd>Telescope buffers<CR>", "Buffers search" },

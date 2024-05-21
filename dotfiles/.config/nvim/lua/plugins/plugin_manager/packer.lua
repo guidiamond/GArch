@@ -100,7 +100,7 @@ return packer.startup(function(use)
 	use({ "williamboman/mason-lspconfig.nvim" }) -- Bridges mason.nvim with the lspconfig plugin
 	use({ "williamboman/nvim-lsp-installer" }) -- LSP installer
 	use({ "RRethy/vim-illuminate" }) -- Automatically highlighting other uses of the word under the cursor
-	use({ "jose-elias-alvarez/null-ls.nvim" }) -- Formatters and linters
+	use({ "jose-elias-alvarez/none-ls.nvim" }) -- Formatters and linters
 	use({
 		"nvim-treesitter/nvim-treesitter", -- Syntax highlighting
 		requires = { "p00f/nvim-ts-rainbow" }, -- Rainbow parentheses for neovim using tree-sitter
