@@ -13,3 +13,7 @@ application/pdf=okularApplication_pdf.desktop;
 video/x-matroska=vlc.desktop;
 x-scheme-handler/postman=Postman.desktop
 text/csv=libreoffice-calc.desktop;
+x-scheme-handler/eclipse+command=_usr_lib_dbeaver_.desktop
+x-scheme-handler/etcher=balena-etcher.desktop
+application/json=brave-usercreated-1.desktop;
+x-scheme-handler/ferdium=ferdium.desktop

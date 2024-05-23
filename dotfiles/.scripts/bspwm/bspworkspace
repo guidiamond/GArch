@@ -6,6 +6,7 @@ FOCUSED_MONITOR=$(bspc query -M -d focused --names)
 MAIN_MONITOR="${MONITORS[0]}"
 WORKSPACE_NUMBER=${2}
 
+# Changed for one monitor
 if [ $FOCUSED_MONITOR == $MAIN_MONITOR ];then
   WORKSPACE_NUMBER=$((WORKSPACE_NUMBER+10))
 fi

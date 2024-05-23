@@ -1,9 +1,13 @@
 SCRIPTS_DIR="$HOME/.config/scripts"
 alias grepi="grep -i "
 
+
+# GIT
 # deletes commited files in gitignore
 alias gitignore__clean_commited='git rm --cached $(git ls-files -i --exclude-from=.gitignore)'
 alias gclean='git reset --hard && git clean -df'
+alias gc='git checkout'
+alias gcb='git checkout -b'
 
 # DEFAULT ALIASES
 alias ls="lsd"
