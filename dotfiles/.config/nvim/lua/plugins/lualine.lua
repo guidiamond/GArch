@@ -82,7 +82,7 @@ ins_left {
   function()
     return '▊'
   end,
-  color = { fg = colors.blue }, -- Sets highlighting of component
+  color = { fg = colors.blue },      -- Sets highlighting of component
   padding = { left = 0, right = 1 }, -- We don't need space before this
 }
 
@@ -129,11 +129,11 @@ ins_left {
   'filename',
   cond = conditions.buffer_not_empty,
   color = { fg = colors.magenta, gui = 'bold' },
-  path = 1,                -- 0: Just the filename
-                           -- 1: Relative path
-                           -- 2: Absolute path
-                           -- 3: Absolute path, with tilde as the home directory
-                           -- 4: Filename and parent dir, with tilde as the home directory
+  path = 1, -- 0: Just the filename
+  -- 1: Relative path
+  -- 2: Absolute path
+  -- 3: Absolute path, with tilde as the home directory
+  -- 4: Filename and parent dir, with tilde as the home directory
 }
 
 
@@ -167,7 +167,7 @@ ins_right {
   function()
     local msg = 'No Active Lsp'
     local buf_ft = vim.api.nvim_buf_get_option(0, 'filetype')
-    local clients = vim.lsp.get_active_clients()
+    local clients = vim.lsp.get_clients()
     if next(clients) == nil then
       return msg
     end
