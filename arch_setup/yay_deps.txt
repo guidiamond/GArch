@@ -2,7 +2,6 @@ alacritty
 arandr
 aws-cli-v2
 brave-bin
-bsp
 bspwm
 chromium
 ctags
@@ -34,9 +33,10 @@ gzip
 htop
 insomnia
 isync
+kitty
 lazygit
 lightdm
-lightdm-webkit-theme-aether
+lightdm-webkit2-greeter
 lsd
 lshw
 lsof
@@ -69,7 +69,6 @@ pulseaudio-alsa
 python-pip
 python-virtualenv
 qt5ct
-rambox-bin
 ranger
 ripgrep
 robo3t-bin
@@ -161,3 +160,5 @@ xournalpp
 zip
 zsh
 zsh-theme-powerlevel10k-git
+1password
+datagrip

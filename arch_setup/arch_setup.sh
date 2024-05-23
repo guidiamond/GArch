@@ -42,13 +42,8 @@ function setup_yay() {
     makepkg -si
 }
 
-function setup_vim() {
-    sh -c 'curl -fLo "${XDG_DATA_HOME:-$HOME/.local/share}"/nvim/site/autoload/plug.vim --create-dirs \
-        https://raw.githubusercontent.com/junegunn/vim-plug/master/plug.vim'
-}
 
 
-#setup_yay
-#setup_dotenv
-setup_vim
+setup_yay
 #install_yay_deps
+# setup_dotenv
