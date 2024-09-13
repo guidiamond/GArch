@@ -1,10 +1,14 @@
 local status_ok, trouble = pcall(require, "trouble")
 if not status_ok then
-  return
+	return
 end
 
-
 trouble.setup({
-  action_keys = {
-    jump_close = { "o", "<cr>", "<tab>" } }
+	auto_close = true,
+	keys = {
+		o = "jump_close",
+		["<CR>"] = "jump_close",
+		["<TAB>"] = "jump_close",
+	},
+	focus = true,
 })

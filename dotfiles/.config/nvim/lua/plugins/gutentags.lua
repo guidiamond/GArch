@@ -8,7 +8,9 @@ set.gutentags_add_default_project_roots = 0
 set.gutentags_project_root = { "package.json", ".git" }
 
 -- One of the things that annoyed me was that for every new project I would have at work, I had to add the tags and tags.lock file to the .gitignore file every single project so I tried to configure it outside of the git repository so that Git wouldn't track it. You can do this with g:gutentags_cache_dir by configuring it like so:
-set.gutentags_cache_dir = fn.expand("~/.cache/vim/ctags/")
+local gutentags_cache_dir = "~/.cache/vim/ctags/"
+
+set.gutentags_cache_dir = fn.expand(gutentags_cache_dir)
 
 -- Gutentags should generate new tags if you just finished writing a new file which you're going to include and use in another file. When you write it, you can immediately jump to its definitions.
 set.gutentags_generate_on_write = 1

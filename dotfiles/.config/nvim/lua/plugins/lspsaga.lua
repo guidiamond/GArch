@@ -1,11 +1,10 @@
 local status_ok, lspsaga = pcall(require, "lspsaga")
 if not status_ok then
-  return
+	return
 end
 
-
 lspsaga.setup({
-  lightbulb = {
-    enable = false
-  }
+	lightbulb = {
+		enable = false,
+	},
 })

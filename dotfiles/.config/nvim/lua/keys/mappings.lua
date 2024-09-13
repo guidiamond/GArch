@@ -1,8 +1,8 @@
 local set = vim.g
 
 local opts = {
-  noremap = true, -- Non recursive mapping (will only change the specific keymap)
-  silent = true,
+	noremap = true, -- Non recursive mapping (will only change the specific keymap)
+	silent = true,
 }
 
 set.mapleader = "\\"
@@ -30,7 +30,7 @@ keymap("n", "<C-k>", "<C-w>k", opts)
 keymap("n", "<C-l>", "<C-w>l", opts)
 
 keymap("n", "ge", ":b #<CR>", opts) -- Switch to last buffer
-keymap("n", "J", "mzJ`z", opts)     -- Don't move cursor when (J)oining line from above
+keymap("n", "J", "mzJ`z", opts) -- Don't move cursor when (J)oining line from above
 
 -- Allows moving selected chunks of code
 keymap("v", "J", ":m '>+1<CR>gv=gv", opts)
@@ -47,7 +47,7 @@ keymap("n", "gb", ":lua require'gitsigns'.blame_line{full=false}<CR>", opts)
 keymap("n", "gB", ":lua require'gitsigns'.blame_line{full=true}<CR>", opts)
 keymap("n", "gh", ":Gitsigns preview_hunk<CR>", opts)
 keymap("n", "gh", ":Gitsigns preview_hunk<CR>", opts)
-keymap("n", "gr", ":TroubleToggle lsp_references<CR>", opts)
+keymap("n", "gr", ":Trouble lsp_references toggle<CR>", opts)
 
 -- Resize splits
 keymap("n", "<C-w>>", ":vertical resize +10<CR>", opts)
