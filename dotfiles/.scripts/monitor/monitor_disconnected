@@ -1,0 +1,5 @@
+#!/bin/sh
+# Called when a monitor is disconnected. Delegates to monitor_hotplug.sh.
+# Can also be called manually: monitor_disconnected
+
+exec "$HOME/.scripts/monitor/monitor_hotplug.sh" disconnect

@@ -1,10 +1,14 @@
 #! /bin/sh
 USERNAME=$(echo $USER)
 # Startup #{{{
-"/home/${USERNAME}/.config/polybar_ex/launch.sh" & \
+"/home/${USERNAME}/.config/eww/launch_bar.sh" & \
     sxhkd & \
     xmodmap "/home/${USERNAME}/.Xmodmap" & \
     "/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
+
+# Monitor hotplug watcher (handles connect/disconnect + eww relaunch)
+pkill -f monitor_watcher.sh 2>/dev/null
+"/home/${USERNAME}/.scripts/monitor/monitor_watcher.sh" &
 #}}}
 # /home/diamond/.config/polybar/launch.sh &
 
@@ -12,8 +16,8 @@ USERNAME=$(echo $USER)
 bspc config window_gap                    10
 bspc config border_width                  3
 
-bspc config top_padding                   40
-bspc config bottom_padding                10
+bspc config top_padding                   48
+bspc config bottom_padding                5
 bspc config left_padding                  0
 bspc config right_padding                 0
 #}}}
@@ -62,6 +66,8 @@ bspc config urgent_border_color 	      "#dd2727"
 #polybar hidden when fullscreen for vlc, youtube, mpv ...
 #find out the name of your monitor with xrandr
 xdo below -t $(xdo id -n root) $(xdo id -a /home/diamond/.config/polybar_ex/launch.sh)
+
+bspc rule -a electron state=floating
 
 #bspc rule -a Gimp desktop='^8' state=floating follow=on
 #bspc rule -a Chromium desktop='^2'
