@@ -7,6 +7,19 @@
 
 plugged/
 
+.serena/
+.luarc.json
+
+# Stray ~ directory
+~/
+
+# Machine-specific / auto-generated
+dotfiles/.Xauthority
+.config/nvim/.claude/
+# Temp files
+dotfiles/.config/i3/temp_qr.png
+dotfiles/.config/i3/config copy
+
 
 ############################################
 #  Gitignore personal gitignore additions  #
