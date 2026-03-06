@@ -112,6 +112,7 @@ handle_disconnect() {
     cleanup_orphan_desktops
 
     relaunch_eww
+    feh --bg-scale --randomize ~/Pictures/Backgrounds &
     log "=== DISCONNECT complete ==="
 }
 
@@ -146,6 +147,7 @@ handle_connect() {
     log "Ensured workspaces 1-10 on $INTERNAL_MONITOR"
 
     relaunch_eww
+    feh --bg-scale --randomize ~/Pictures/Backgrounds &
     log "=== CONNECT complete ==="
 }
 
