@@ -1,0 +1,40 @@
+;; System stats widget — CPU, Memory, Temperature
+;; Uses colored circles that change from green → yellow → orange → red
+;; <60%: circle only | 60-89%: circle + percent | 90%+: circle + precise value
+
+(defpoll sys-data :interval "2s"
+                  :initial '{"cpu":0,"cpu_precise":"0.00","memory":{"used_mb":0,"total_mb":1,"percent":0,"percent_precise":"0.00","used_gb":"0.00","total_gb":"0.00"},"temp":0,"temp_precise":"0.00","temp_icon":""}'
+  `~/.config/eww/scripts/system.sh`)
+
+(defwidget system-stats []
+  (box :class "system-stats" :orientation "horizontal" :space-evenly false :spacing 10
+    ;; CPU
+    (button :class "sys-item sys-cpu"
+            :onclick "wezterm start htop &"
+            :tooltip "CPU: ${sys-data.cpu_precise}%"
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "sys-circle ${sys-data.cpu >= 90 ? 'circle-critical' : sys-data.cpu >= 75 ? 'circle-high' : sys-data.cpu >= 60 ? 'circle-warning' : sys-data.cpu >= 40 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "sys-val"
+               :visible {sys-data.cpu >= 60}
+               :text {sys-data.cpu >= 90 ? "${sys-data.cpu_precise}%" : "${sys-data.cpu}%"})))
+    ;; RAM
+    (button :class "sys-item sys-mem"
+            :onclick "wezterm start htop &"
+            :tooltip "RAM: ${sys-data.memory.used_gb} / ${sys-data.memory.total_gb} GB (${sys-data.memory.percent_precise}%)"
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "sys-circle ${sys-data.memory.percent >= 90 ? 'circle-critical' : sys-data.memory.percent >= 75 ? 'circle-high' : sys-data.memory.percent >= 60 ? 'circle-warning' : sys-data.memory.percent >= 40 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "sys-val"
+               :visible {sys-data.memory.percent >= 60}
+               :text {sys-data.memory.percent >= 90 ? "${sys-data.memory.percent_precise}%" : "${sys-data.memory.percent}%"})))
+    ;; Temperature
+    (button :class "sys-item sys-temp"
+            :onclick "wezterm start htop &"
+            :tooltip "Temperature: ${sys-data.temp_precise}°C"
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "sys-circle ${sys-data.temp >= 85 ? 'circle-critical' : sys-data.temp >= 75 ? 'circle-high' : sys-data.temp >= 60 ? 'circle-warning' : sys-data.temp >= 45 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "sys-val"
+               :visible {sys-data.temp >= 60}
+               :text {sys-data.temp >= 90 ? "${sys-data.temp_precise}°C" : "${sys-data.temp}°C"})))))

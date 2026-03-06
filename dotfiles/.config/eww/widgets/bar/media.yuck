@@ -1,0 +1,64 @@
+;; Media playback widget + player-selector popup
+
+(deflisten media-data
+  :initial '{"visible":false,"status":"","title":"","artist":"","player":"","icon":""}'
+  `~/.config/eww/scripts/media.sh`)
+
+(defvar media-popup-visible false)
+
+;; Inline bar widget — shows current track with controls
+(defwidget media-player []
+  (box :class "media-player"
+       :orientation "horizontal"
+       :space-evenly false
+       :spacing 8
+       :visible {media-data.visible}
+    ;; Player icon + track info (right-click opens popup)
+    (eventbox :class "media-info"
+              :onclick "playerctl play-pause"
+              :onrightclick "~/.config/eww/scripts/media_switch.sh"
+              :tooltip "${media-data.player}: ${media-data.title} — ${media-data.artist}"
+      (box :orientation "horizontal" :space-evenly false :spacing 8
+        (label :class "media-icon" :text {media-data.icon})
+        (label :class "media-title" :limit-width 18 :text {media-data.title})
+        (label :class "media-artist" :limit-width 12 :text {media-data.artist != "" ? "— ${media-data.artist}" : ""})))
+    ;; Playback controls
+    (box :class "media-controls" :orientation "horizontal" :space-evenly false :spacing 4
+      (button :class "media-ctl-btn" :onclick "playerctl previous" "󰒮")
+      (button :class "media-ctl-btn media-play-btn"
+              :onclick "playerctl play-pause"
+        {media-data.status == "Playing" ? "󰏤" : "󰐊"})
+      (button :class "media-ctl-btn" :onclick "playerctl next" "󰒭"))))
+
+;; Player-selector popup content
+(defwidget media-popup-content []
+  (box :class "media-popup" :orientation "vertical" :space-evenly false :spacing 8
+    (label :class "media-popup-title" :text "Active Players" :halign "start")
+    (box :class "media-popup-list" :orientation "vertical" :space-evenly false :spacing 4
+      (for entry in media-players
+        (button :class "media-popup-item ${entry.status == 'Playing' ? 'media-popup-active' : ''}"
+                :onclick "playerctl -p '${entry.name}' play-pause && ~/.config/eww/scripts/media_switch.sh"
+          (box :orientation "horizontal" :space-evenly false :spacing 8
+            (label :class "media-popup-icon" :text {entry.icon})
+            (box :orientation "vertical" :space-evenly false
+              (label :class "media-popup-name" :halign "start" :text {entry.name})
+              (label :class "media-popup-track" :halign "start" :limit-width 35 :text {entry.title}))
+            (label :class "media-popup-status"
+                   :text {entry.status == "Playing" ? "󰐊" : "󰏤"})
+            ))))))
+
+;; Poll players only when popup is visible
+(defpoll media-players :interval "2s"
+                       :initial "[]"
+                       :run-while media-popup-visible
+  `~/.config/eww/scripts/media_players.sh`)
+
+;; Popup overlay window
+(defwindow media-popup
+           :geometry (geometry :x "0px"
+                               :y "48px"
+                               :anchor "top center")
+           :stacking "overlay"
+           :windowtype "dialog"
+           :wm-ignore true
+  (media-popup-content))
