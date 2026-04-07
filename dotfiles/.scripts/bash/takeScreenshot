@@ -1,0 +1,12 @@
+#!/bin/bash
+
+function takeScreenshot {
+  SCREENSHOT_DIR="$HOME/Pictures/screenshots"
+  mkdir -p "$SCREENSHOT_DIR"
+  scrot -s "$SCREENSHOT_DIR/Screenshot_%Y-%m-%d-%S_\$wx\$h.png"
+  latest_screenshot="$(ls -t "$SCREENSHOT_DIR"/Screenshot_*.png | head -n1)"
+  cat "$latest_screenshot" | xclip -selection clipboard -t image/png
+}
+
+
+takeScreenshot

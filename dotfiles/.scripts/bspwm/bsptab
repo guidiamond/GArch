@@ -1,56 +1,1763 @@
-#!/bin/sh
+#!/usr/bin/env python3
+"""bsptab - i3-style tabbed window management for bspwm.
 
-# Usage:
-# tabc.sh <tabbed-id> <command>
-# Commands:
-#    add <window-id> 	- Add window to tabbed
-#    remove <window-id> - Remove window from tabbed
-#    list				- List all clients of tabbed
+Uses ctypes to call X11, Cairo, and Pango directly.
+Zero external Python dependencies - only standard library + system C libs.
 
-#
-# Functions
-#
+Architecture:
+  - Daemon process manages tab groups via X11 event loop
+  - CLI sends commands to daemon via Unix socket
+  - Container X windows are reparented to hold multiple client windows
+  - Tab bar rendered with Cairo + Pango
+"""
 
-# Get wid of root window
-function get_root_wid {
-	xwininfo -root | awk '/Window id:/{print $4}'
+import ctypes
+import ctypes.util
+import dataclasses
+import json
+import logging
+import os
+import select
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+# ── X11 Constants ──────────────────────────────────────────────────────────── #
+
+# Event types
+Expose = 12
+DestroyNotify = 17
+UnmapNotify = 18
+MapNotify = 19
+MapRequest = 20
+ReparentNotify = 21
+ConfigureNotify = 22
+PropertyNotify = 28
+ClientMessage = 33
+ButtonPress = 4
+FocusIn = 9
+FocusOut = 10
+EnterNotify = 7
+
+# Event masks
+ExposureMask = 1 << 15
+StructureNotifyMask = 1 << 17
+SubstructureNotifyMask = 1 << 19
+SubstructureRedirectMask = 1 << 20
+FocusChangeMask = 1 << 21
+PropertyChangeMask = 1 << 22
+ButtonPressMask = 1 << 2
+EnterWindowMask = 1 << 4
+
+# Misc X11
+InputOutput = 1
+CopyFromParent = 0
+RevertToParent = 2
+CurrentTime = 0
+PropModeReplace = 0
+XA_STRING = 31
+XA_ATOM = 4
+XA_CARDINAL = 6
+XA_WINDOW = 33
+Success = 0
+IsViewable = 2
+NotifyNormal = 0
+NotifyNonlinear = 3
+NotifyNonlinearVirtual = 4
+
+# Pango
+PANGO_SCALE = 1024
+PANGO_ELLIPSIZE_END = 3
+PANGO_ALIGN_CENTER = 1
+
+# ── Style Constants ────────────────────────────────────────────────────────── #
+
+TAB_HEIGHT = 26
+
+COLORS = {
+    "active_bg": "#285577",
+    "active_fg": "#ffffff",
+    "active_border": "#4c7899",
+    "inactive_bg": "#222222",
+    "inactive_fg": "#888888",
+    "inactive_border": "#333333",
+    "urgent_bg": "#900000",
+    "urgent_fg": "#ffffff",
+    "bar_bg": "#1d1f21",
+    "separator": "#444444",
 }
 
-# Get children of tabbed
-function get_clients {
-	id=$1
-	xwininfo -id $id -children | sed -n '/[0-9]\+ \(child\|children\):/,$s/ \+\(0x[0-9a-z]\+\).*/\1/p'
-}
+FONT_DESC = "Sans Bold 10"
 
-# Get class of a wid
-function get_class {
-	id=$1
-	xprop -id $id | sed -n '/WM_CLASS/s/.*, "\(.*\)"/\1/p'
-}
+# ── Paths ──────────────────────────────────────────────────────────────────── #
 
-#
-# Main Program
-#
-cmd=$1
+SOCKET_PATH = f"/run/user/{os.getuid()}/bsptab.sock"
+LOG_PATH = os.path.expanduser("~/.bsptab.log")
 
-case $cmd in
-	add)
-  	tabbedid=$(bspc query -N -n $2)
-  	if [ -z $tabbedid ]; then
-    		tabbed -c &
-    		sleep 0.1
-    		tabbedid=$(xdotool search --class tabbed | tail -n1)
-  	fi
-		wid=$3
-		xdotool windowreparent $wid $tabbedid
-		;;
-	remove)
-		wid=$2
-    tabbedid=$(bspc query -N -n focused)
-		xdotool windowreparent $wid $(get_root_wid)
-		;;
-	list)
-		tabbedid=$2
-		get_clients $tabbedid
-		;;
-esac
+# ── ctypes Types ───────────────────────────────────────────────────────────── #
+
+Window = ctypes.c_ulong
+Atom = ctypes.c_ulong
+Time = ctypes.c_ulong
+Bool = ctypes.c_int
+Display_p = ctypes.c_void_p
+c_int = ctypes.c_int
+c_uint = ctypes.c_uint
+c_long = ctypes.c_long
+c_ulong = ctypes.c_ulong
+c_void_p = ctypes.c_void_p
+c_char_p = ctypes.c_char_p
+POINTER = ctypes.POINTER
+
+# ── ctypes Structures ──────────────────────────────────────────────────────── #
+
+
+class XEvent(ctypes.Union):
+    _fields_ = [("type", c_int), ("pad", c_long * 24)]
+
+
+class XAnyEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+    ]
+
+
+class XExposeEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("x", c_int),
+        ("y", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("count", c_int),
+    ]
+
+
+class XConfigureEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("event", c_ulong),
+        ("window", c_ulong),
+        ("x", c_int),
+        ("y", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("border_width", c_int),
+        ("above", c_ulong),
+        ("override_redirect", c_int),
+    ]
+
+
+class XButtonEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("root", c_ulong),
+        ("subwindow", c_ulong),
+        ("time", c_ulong),
+        ("x", c_int),
+        ("y", c_int),
+        ("x_root", c_int),
+        ("y_root", c_int),
+        ("state", c_uint),
+        ("button", c_uint),
+        ("same_screen", c_int),
+    ]
+
+
+class XPropertyEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("atom", c_ulong),
+        ("time", c_ulong),
+        ("state", c_int),
+    ]
+
+
+class XDestroyWindowEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("event", c_ulong),
+        ("window", c_ulong),
+    ]
+
+
+class XUnmapEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("event", c_ulong),
+        ("window", c_ulong),
+        ("from_configure", c_int),
+    ]
+
+
+class XFocusChangeEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("mode", c_int),
+        ("detail", c_int),
+    ]
+
+
+class XCrossingEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("root", c_ulong),
+        ("subwindow", c_ulong),
+        ("time", c_ulong),
+        ("x", c_int),
+        ("y", c_int),
+        ("x_root", c_int),
+        ("y_root", c_int),
+        ("mode", c_int),
+        ("detail", c_int),
+        ("same_screen", c_int),
+        ("focus", c_int),
+        ("state", c_uint),
+    ]
+
+
+class XClientMessageEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("message_type", c_ulong),
+        ("format", c_int),
+        ("data", c_long * 5),
+    ]
+
+
+class XWindowAttributes(ctypes.Structure):
+    _fields_ = [
+        ("x", c_int),
+        ("y", c_int),
+        ("width", c_int),
+        ("height", c_int),
+        ("border_width", c_int),
+        ("depth", c_int),
+        ("visual", c_void_p),
+        ("root", c_ulong),
+        ("class_", c_int),
+        ("bit_gravity", c_int),
+        ("win_gravity", c_int),
+        ("backing_store", c_int),
+        ("backing_planes", c_ulong),
+        ("backing_pixel", c_ulong),
+        ("save_under", c_int),
+        ("colormap", c_ulong),
+        ("map_installed", c_int),
+        ("map_state", c_int),
+        ("all_event_masks", c_long),
+        ("your_event_mask", c_long),
+        ("do_not_propagate_mask", c_long),
+        ("override_redirect", c_int),
+        ("screen", c_void_p),
+    ]
+
+
+class XClassHint(ctypes.Structure):
+    # Use c_void_p (not c_char_p) to preserve raw pointers for XFree
+    _fields_ = [
+        ("res_name", c_void_p),
+        ("res_class", c_void_p),
+    ]
+
+
+class XTextProperty(ctypes.Structure):
+    _fields_ = [
+        ("value", c_void_p),
+        ("encoding", c_ulong),
+        ("format", c_int),
+        ("nitems", c_ulong),
+    ]
+
+
+# ── Library Loading ────────────────────────────────────────────────────────── #
+
+
+class X11Lib:
+    """Loads X11, Cairo, Pango shared libraries and sets up function signatures."""
+
+    def __init__(self):
+        self.x11 = ctypes.cdll.LoadLibrary(ctypes.util.find_library("X11"))
+        self.cairo = ctypes.cdll.LoadLibrary(ctypes.util.find_library("cairo"))
+        self.pango = ctypes.cdll.LoadLibrary(ctypes.util.find_library("pango-1.0"))
+        self.pangocairo = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("pangocairo-1.0")
+        )
+        self.gobject = ctypes.cdll.LoadLibrary(
+            ctypes.util.find_library("gobject-2.0")
+        )
+        self._setup()
+
+    def _setup(self):
+        x = self.x11
+
+        x.XOpenDisplay.argtypes = [c_char_p]
+        x.XOpenDisplay.restype = c_void_p
+        x.XCloseDisplay.argtypes = [c_void_p]
+        x.XDefaultScreen.argtypes = [c_void_p]
+        x.XDefaultScreen.restype = c_int
+        x.XRootWindow.argtypes = [c_void_p, c_int]
+        x.XRootWindow.restype = c_ulong
+        x.XDefaultVisual.argtypes = [c_void_p, c_int]
+        x.XDefaultVisual.restype = c_void_p
+        x.XDefaultColormap.argtypes = [c_void_p, c_int]
+        x.XDefaultColormap.restype = c_ulong
+        x.XDefaultDepth.argtypes = [c_void_p, c_int]
+        x.XDefaultDepth.restype = c_int
+        x.XBlackPixel.argtypes = [c_void_p, c_int]
+        x.XBlackPixel.restype = c_ulong
+        x.XWhitePixel.argtypes = [c_void_p, c_int]
+        x.XWhitePixel.restype = c_ulong
+
+        x.XCreateSimpleWindow.argtypes = [
+            c_void_p, c_ulong, c_int, c_int, c_uint, c_uint,
+            c_uint, c_ulong, c_ulong,
+        ]
+        x.XCreateSimpleWindow.restype = c_ulong
+        x.XDestroyWindow.argtypes = [c_void_p, c_ulong]
+        x.XMapWindow.argtypes = [c_void_p, c_ulong]
+        x.XUnmapWindow.argtypes = [c_void_p, c_ulong]
+        x.XReparentWindow.argtypes = [c_void_p, c_ulong, c_ulong, c_int, c_int]
+        x.XMoveResizeWindow.argtypes = [c_void_p, c_ulong, c_int, c_int, c_uint, c_uint]
+        x.XResizeWindow.argtypes = [c_void_p, c_ulong, c_uint, c_uint]
+        x.XSelectInput.argtypes = [c_void_p, c_ulong, c_long]
+        x.XNextEvent.argtypes = [c_void_p, POINTER(XEvent)]
+        x.XPending.argtypes = [c_void_p]
+        x.XPending.restype = c_int
+        x.XSetInputFocus.argtypes = [c_void_p, c_ulong, c_int, c_ulong]
+        x.XGetWindowAttributes.argtypes = [c_void_p, c_ulong, POINTER(XWindowAttributes)]
+        x.XGetWindowAttributes.restype = c_int
+        x.XInternAtom.argtypes = [c_void_p, c_char_p, c_int]
+        x.XInternAtom.restype = c_ulong
+        x.XGetWindowProperty.argtypes = [
+            c_void_p, c_ulong, c_ulong, c_long, c_long, c_int, c_ulong,
+            POINTER(c_ulong), POINTER(c_int), POINTER(c_ulong),
+            POINTER(c_ulong), POINTER(c_void_p),
+        ]
+        x.XGetWindowProperty.restype = c_int
+        x.XChangeProperty.argtypes = [
+            c_void_p, c_ulong, c_ulong, c_ulong, c_int, c_int,
+            c_void_p, c_int,
+        ]
+        x.XSetClassHint.argtypes = [c_void_p, c_ulong, POINTER(XClassHint)]
+        x.XStoreName.argtypes = [c_void_p, c_ulong, c_char_p]
+        x.XFetchName.argtypes = [c_void_p, c_ulong, POINTER(c_char_p)]
+        x.XFetchName.restype = c_int
+        x.XFree.argtypes = [c_void_p]
+        x.XFlush.argtypes = [c_void_p]
+        x.XSync.argtypes = [c_void_p, c_int]
+        x.XConnectionNumber.argtypes = [c_void_p]
+        x.XConnectionNumber.restype = c_int
+        x.XSetErrorHandler.argtypes = [c_void_p]
+        x.XSetErrorHandler.restype = c_void_p
+        x.XQueryTree.argtypes = [
+            c_void_p, c_ulong, POINTER(c_ulong), POINTER(c_ulong),
+            POINTER(POINTER(c_ulong)), POINTER(c_uint),
+        ]
+        x.XQueryTree.restype = c_int
+        x.XGetClassHint.argtypes = [c_void_p, c_ulong, POINTER(XClassHint)]
+        x.XGetClassHint.restype = c_int
+        x.XKillClient.argtypes = [c_void_p, c_ulong]
+        x.XConfigureWindow.argtypes = [c_void_p, c_ulong, c_uint, c_void_p]
+        x.XSetWindowBorderWidth.argtypes = [c_void_p, c_ulong, c_uint]
+        x.XSetWindowBorder.argtypes = [c_void_p, c_ulong, c_ulong]
+        x.XSendEvent.argtypes = [c_void_p, c_ulong, c_int, c_long, POINTER(XEvent)]
+        x.XSendEvent.restype = c_int
+
+        # Cairo
+        cr = self.cairo
+        cr.cairo_xlib_surface_create.argtypes = [
+            c_void_p, c_ulong, c_void_p, c_int, c_int,
+        ]
+        cr.cairo_xlib_surface_create.restype = c_void_p
+        cr.cairo_xlib_surface_set_size.argtypes = [c_void_p, c_int, c_int]
+        cr.cairo_create.argtypes = [c_void_p]
+        cr.cairo_create.restype = c_void_p
+        cr.cairo_destroy.argtypes = [c_void_p]
+        cr.cairo_surface_destroy.argtypes = [c_void_p]
+        cr.cairo_set_source_rgb.argtypes = [c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+        cr.cairo_rectangle.argtypes = [c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double]
+        cr.cairo_fill.argtypes = [c_void_p]
+        cr.cairo_stroke.argtypes = [c_void_p]
+        cr.cairo_move_to.argtypes = [c_void_p, ctypes.c_double, ctypes.c_double]
+        cr.cairo_line_to.argtypes = [c_void_p, ctypes.c_double, ctypes.c_double]
+        cr.cairo_set_line_width.argtypes = [c_void_p, ctypes.c_double]
+        cr.cairo_save.argtypes = [c_void_p]
+        cr.cairo_restore.argtypes = [c_void_p]
+        cr.cairo_clip.argtypes = [c_void_p]
+        cr.cairo_paint.argtypes = [c_void_p]
+        cr.cairo_set_operator.argtypes = [c_void_p, c_int]
+        cr.cairo_surface_flush.argtypes = [c_void_p]
+
+        # Pango
+        p = self.pango
+        p.pango_font_description_from_string.argtypes = [c_char_p]
+        p.pango_font_description_from_string.restype = c_void_p
+        p.pango_font_description_free.argtypes = [c_void_p]
+        p.pango_layout_set_text.argtypes = [c_void_p, c_char_p, c_int]
+        p.pango_layout_set_font_description.argtypes = [c_void_p, c_void_p]
+        p.pango_layout_set_ellipsize.argtypes = [c_void_p, c_int]
+        p.pango_layout_set_width.argtypes = [c_void_p, c_int]
+        p.pango_layout_set_alignment.argtypes = [c_void_p, c_int]
+        p.pango_layout_get_pixel_size.argtypes = [c_void_p, POINTER(c_int), POINTER(c_int)]
+
+        # PangoCairo
+        pc = self.pangocairo
+        pc.pango_cairo_create_layout.argtypes = [c_void_p]
+        pc.pango_cairo_create_layout.restype = c_void_p
+        pc.pango_cairo_show_layout.argtypes = [c_void_p, c_void_p]
+        pc.pango_cairo_update_layout.argtypes = [c_void_p, c_void_p]
+
+        # GObject
+        self.gobject.g_object_unref.argtypes = [c_void_p]
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────── #
+
+
+def hex_to_rgb(h: str):
+    return (int(h[1:3], 16) / 255.0, int(h[3:5], 16) / 255.0, int(h[5:7], 16) / 255.0)
+
+
+def hex_to_pixel(h: str) -> int:
+    return (int(h[1:3], 16) << 16) | (int(h[3:5], 16) << 8) | int(h[5:7], 16)
+
+
+def bspc(*args) -> str:
+    """Run a bspc command and return stdout."""
+    try:
+        result = subprocess.run(
+            ["bspc"] + list(args),
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def bspc_ok(*args) -> bool:
+    """Run a bspc command and return True if it succeeded."""
+    try:
+        result = subprocess.run(
+            ["bspc"] + list(args),
+            capture_output=True, text=True, timeout=2,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def get_focused_wid() -> int:
+    s = bspc("query", "-N", "-n", "focused")
+    if not s:
+        return 0
+    return int(s, 16)
+
+
+def get_neighbor_wid(direction: str) -> int:
+    s = bspc("query", "-N", "-n", direction)
+    if not s:
+        return 0
+    return int(s, 16)
+
+
+def wid_hex(wid: int) -> str:
+    return f"0x{wid:08X}"
+
+
+# ── X Error Handler ───────────────────────────────────────────────────────── #
+
+# Must be kept alive to prevent GC
+_ERROR_HANDLER_TYPE = ctypes.CFUNCTYPE(c_int, c_void_p, c_void_p)
+
+
+def _x_error_handler(display, event):
+    return 0
+
+
+_error_handler_cb = _ERROR_HANDLER_TYPE(_x_error_handler)
+
+
+# ── XDisplay Wrapper ──────────────────────────────────────────────────────── #
+
+
+class XDisplay:
+    def __init__(self, lib: X11Lib):
+        self.lib = lib
+        self.dpy = lib.x11.XOpenDisplay(None)
+        if not self.dpy:
+            raise RuntimeError("Cannot open X display")
+        self.screen = lib.x11.XDefaultScreen(self.dpy)
+        self.root = lib.x11.XRootWindow(self.dpy, self.screen)
+        self.visual = lib.x11.XDefaultVisual(self.dpy, self.screen)
+        self.colormap = lib.x11.XDefaultColormap(self.dpy, self.screen)
+        self.depth = lib.x11.XDefaultDepth(self.dpy, self.screen)
+        self.fd = lib.x11.XConnectionNumber(self.dpy)
+
+        # Atoms
+        self._WM_DELETE_WINDOW = self.intern_atom("WM_DELETE_WINDOW")
+        self._WM_PROTOCOLS = self.intern_atom("WM_PROTOCOLS")
+        self._WM_NAME = self.intern_atom("WM_NAME")
+        self._NET_WM_NAME = self.intern_atom("_NET_WM_NAME")
+        self._NET_WM_PID = self.intern_atom("_NET_WM_PID")
+        self._UTF8_STRING = self.intern_atom("UTF8_STRING")
+        self._WM_STATE = self.intern_atom("WM_STATE")
+
+        # Suppress non-fatal X errors
+        lib.x11.XSetErrorHandler(_error_handler_cb)
+
+    def intern_atom(self, name: str) -> int:
+        return self.lib.x11.XInternAtom(self.dpy, name.encode(), 0)
+
+    def get_window_title(self, wid: int) -> str:
+        # Try _NET_WM_NAME first (UTF-8)
+        actual_type = c_ulong()
+        actual_format = c_int()
+        nitems = c_ulong()
+        bytes_after = c_ulong()
+        prop_data = c_void_p()
+
+        status = self.lib.x11.XGetWindowProperty(
+            self.dpy, wid, self._NET_WM_NAME,
+            0, 1024, 0, self._UTF8_STRING,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after),
+            ctypes.byref(prop_data),
+        )
+        if status == Success and nitems.value > 0 and prop_data.value:
+            title = ctypes.string_at(prop_data.value, nitems.value).decode("utf-8", errors="replace")
+            self.lib.x11.XFree(prop_data)
+            return title
+
+        # Fallback to WM_NAME
+        name_ptr = c_char_p()
+        if self.lib.x11.XFetchName(self.dpy, wid, ctypes.byref(name_ptr)) and name_ptr.value:
+            title = name_ptr.value.decode("utf-8", errors="replace")
+            self.lib.x11.XFree(name_ptr)
+            return title
+
+        return f"0x{wid:x}"
+
+    def get_window_attrs(self, wid: int) -> XWindowAttributes:
+        attrs = XWindowAttributes()
+        self.lib.x11.XGetWindowAttributes(self.dpy, wid, ctypes.byref(attrs))
+        return attrs
+
+    def get_window_class(self, wid: int) -> str:
+        hint = XClassHint()
+        if self.lib.x11.XGetClassHint(self.dpy, wid, ctypes.byref(hint)):
+            cls = ""
+            if hint.res_class:
+                cls = ctypes.string_at(hint.res_class).decode("utf-8", errors="replace")
+                self.lib.x11.XFree(hint.res_class)
+            if hint.res_name:
+                self.lib.x11.XFree(hint.res_name)
+            return cls
+        return ""
+
+    def create_container(self, x: int, y: int, w: int, h: int) -> int:
+        bg = hex_to_pixel(COLORS["bar_bg"])
+        wid = self.lib.x11.XCreateSimpleWindow(
+            self.dpy, self.root, x, y, max(w, 1), max(h, 1), 0, 0, bg,
+        )
+
+        # Set WM_CLASS (keep refs alive to prevent GC during XSetClassHint)
+        hint = XClassHint()
+        name_buf = ctypes.create_string_buffer(b"bsptab")
+        class_buf = ctypes.create_string_buffer(b"Bsptab")
+        hint.res_name = ctypes.cast(name_buf, c_void_p)
+        hint.res_class = ctypes.cast(class_buf, c_void_p)
+        self.lib.x11.XSetClassHint(self.dpy, wid, ctypes.byref(hint))
+
+        # Event mask
+        mask = (
+            ExposureMask | StructureNotifyMask | SubstructureNotifyMask
+            | ButtonPressMask | FocusChangeMask | EnterWindowMask
+        )
+        self.lib.x11.XSelectInput(self.dpy, wid, mask)
+
+        # Set WM_PROTOCOLS (WM_DELETE_WINDOW)
+        proto = (c_ulong * 1)(self._WM_DELETE_WINDOW)
+        self.lib.x11.XChangeProperty(
+            self.dpy, wid, self._WM_PROTOCOLS, XA_ATOM, 32,
+            PropModeReplace, ctypes.addressof(proto), 1,
+        )
+
+        # Set _NET_WM_PID
+        pid_val = (c_ulong * 1)(os.getpid())
+        self.lib.x11.XChangeProperty(
+            self.dpy, wid, self._NET_WM_PID, XA_CARDINAL, 32,
+            PropModeReplace, ctypes.addressof(pid_val), 1,
+        )
+
+        # Set WM_NAME
+        self.lib.x11.XStoreName(self.dpy, wid, b"bsptab")
+
+        return wid
+
+    def reparent(self, child: int, parent: int, x: int, y: int):
+        self.lib.x11.XReparentWindow(self.dpy, child, parent, x, y)
+
+    def reparent_to_root(self, child: int):
+        self.lib.x11.XReparentWindow(self.dpy, child, self.root, 0, 0)
+
+    def map_window(self, wid: int):
+        self.lib.x11.XMapWindow(self.dpy, wid)
+
+    def unmap_window(self, wid: int):
+        self.lib.x11.XUnmapWindow(self.dpy, wid)
+
+    def move_resize(self, wid: int, x: int, y: int, w: int, h: int):
+        self.lib.x11.XMoveResizeWindow(self.dpy, wid, x, y, max(w, 1), max(h, 1))
+
+    def set_input_focus(self, wid: int):
+        self.lib.x11.XSetInputFocus(self.dpy, wid, RevertToParent, CurrentTime)
+
+    def destroy_window(self, wid: int):
+        self.lib.x11.XDestroyWindow(self.dpy, wid)
+
+    def select_input(self, wid: int, mask: int):
+        self.lib.x11.XSelectInput(self.dpy, wid, mask)
+
+    def flush(self):
+        self.lib.x11.XFlush(self.dpy)
+
+    def sync(self):
+        self.lib.x11.XSync(self.dpy, 0)
+
+    def pending(self) -> int:
+        return self.lib.x11.XPending(self.dpy)
+
+    def next_event(self) -> XEvent:
+        ev = XEvent()
+        self.lib.x11.XNextEvent(self.dpy, ctypes.byref(ev))
+        return ev
+
+    def get_children(self, wid: int) -> list:
+        root_ret = c_ulong()
+        parent_ret = c_ulong()
+        children_ret = POINTER(c_ulong)()
+        nchildren = c_uint()
+        status = self.lib.x11.XQueryTree(
+            self.dpy, wid,
+            ctypes.byref(root_ret), ctypes.byref(parent_ret),
+            ctypes.byref(children_ret), ctypes.byref(nchildren),
+        )
+        if not status or nchildren.value == 0:
+            return []
+        result = [children_ret[i] for i in range(nchildren.value)]
+        self.lib.x11.XFree(children_ret)
+        return result
+
+    def send_delete(self, wid: int):
+        """Send WM_DELETE_WINDOW client message to gracefully close a window."""
+        ev = XClientMessageEvent()
+        ev.type = ClientMessage
+        ev.window = wid
+        ev.message_type = self._WM_PROTOCOLS
+        ev.format = 32
+        ev.data[0] = self._WM_DELETE_WINDOW
+        ev.data[1] = CurrentTime
+        # Cast to XEvent for XSendEvent
+        xev = XEvent()
+        ctypes.memmove(ctypes.byref(xev), ctypes.byref(ev), ctypes.sizeof(ev))
+        self.lib.x11.XSendEvent(self.dpy, wid, 0, 0, ctypes.byref(xev))
+        self.flush()
+
+    def has_protocol(self, wid: int, protocol: int) -> bool:
+        actual_type = c_ulong()
+        actual_format = c_int()
+        nitems = c_ulong()
+        bytes_after = c_ulong()
+        prop_data = c_void_p()
+        status = self.lib.x11.XGetWindowProperty(
+            self.dpy, wid, self._WM_PROTOCOLS,
+            0, 1024, 0, XA_ATOM,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after),
+            ctypes.byref(prop_data),
+        )
+        if status != Success or nitems.value == 0 or not prop_data.value:
+            return False
+        atoms = ctypes.cast(prop_data.value, POINTER(c_ulong))
+        found = any(atoms[i] == protocol for i in range(nitems.value))
+        self.lib.x11.XFree(prop_data)
+        return found
+
+    def close(self):
+        if self.dpy:
+            self.lib.x11.XCloseDisplay(self.dpy)
+            self.dpy = None
+
+
+# ── Tab Bar Renderer ───────────────────────────────────────────────────────── #
+
+
+@dataclasses.dataclass
+class TabInfo:
+    wid: int
+    title: str
+    urgent: bool = False
+
+
+class TabBar:
+    def __init__(self, xdisplay: XDisplay, container_wid: int, width: int):
+        self.xd = xdisplay
+        self.lib = xdisplay.lib
+        self.container_wid = container_wid
+        self.width = width
+        self.height = TAB_HEIGHT
+        self.surface = None
+        self.font_desc = None
+        self._init()
+
+    def _init(self):
+        attrs = self.xd.get_window_attrs(self.container_wid)
+        self.surface = self.lib.cairo.cairo_xlib_surface_create(
+            self.xd.dpy, self.container_wid, attrs.visual,
+            self.width, self.height,
+        )
+        self.font_desc = self.lib.pango.pango_font_description_from_string(
+            FONT_DESC.encode()
+        )
+
+    def resize(self, new_width: int):
+        self.width = new_width
+        if self.surface:
+            self.lib.cairo.cairo_xlib_surface_set_size(
+                self.surface, self.width, self.height,
+            )
+
+    def draw(self, tabs: list, active_index: int):
+        if not tabs or not self.surface:
+            return
+
+        cr = self.lib.cairo.cairo_create(self.surface)
+        n = len(tabs)
+        tab_w = self.width / n
+
+        # Background
+        bg = hex_to_rgb(COLORS["bar_bg"])
+        self.lib.cairo.cairo_set_source_rgb(cr, *bg)
+        self.lib.cairo.cairo_rectangle(cr, 0.0, 0.0, float(self.width), float(self.height))
+        self.lib.cairo.cairo_fill(cr)
+
+        for i, tab in enumerate(tabs):
+            x = i * tab_w
+            is_active = i == active_index
+
+            # Tab background
+            if tab.urgent:
+                bg_col = hex_to_rgb(COLORS["urgent_bg"])
+                fg_col = hex_to_rgb(COLORS["urgent_fg"])
+                border_col = hex_to_rgb(COLORS["urgent_bg"])
+            elif is_active:
+                bg_col = hex_to_rgb(COLORS["active_bg"])
+                fg_col = hex_to_rgb(COLORS["active_fg"])
+                border_col = hex_to_rgb(COLORS["active_border"])
+            else:
+                bg_col = hex_to_rgb(COLORS["inactive_bg"])
+                fg_col = hex_to_rgb(COLORS["inactive_fg"])
+                border_col = hex_to_rgb(COLORS["inactive_border"])
+
+            # Draw tab background
+            self.lib.cairo.cairo_set_source_rgb(cr, *bg_col)
+            self.lib.cairo.cairo_rectangle(cr, x + 1.0, 1.0, tab_w - 2.0, float(self.height - 2))
+            self.lib.cairo.cairo_fill(cr)
+
+            # Draw top border for active tab
+            if is_active:
+                self.lib.cairo.cairo_set_source_rgb(cr, *border_col)
+                self.lib.cairo.cairo_rectangle(cr, x + 1.0, 0.0, tab_w - 2.0, 2.0)
+                self.lib.cairo.cairo_fill(cr)
+
+            # Draw text
+            self.lib.cairo.cairo_save(cr)
+            padding = 8.0
+            text_x = x + padding
+            text_max_w = tab_w - padding * 2
+
+            if text_max_w > 0:
+                layout = self.lib.pangocairo.pango_cairo_create_layout(cr)
+                self.lib.pango.pango_layout_set_font_description(layout, self.font_desc)
+                title_bytes = tab.title.encode("utf-8") if tab.title else b""
+                self.lib.pango.pango_layout_set_text(layout, title_bytes, len(title_bytes))
+                self.lib.pango.pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END)
+                self.lib.pango.pango_layout_set_width(layout, int(text_max_w * PANGO_SCALE))
+
+                # Vertically center
+                tw = c_int()
+                th = c_int()
+                self.lib.pango.pango_layout_get_pixel_size(layout, ctypes.byref(tw), ctypes.byref(th))
+                text_y = (self.height - th.value) / 2.0
+
+                self.lib.cairo.cairo_set_source_rgb(cr, *fg_col)
+                self.lib.cairo.cairo_move_to(cr, text_x, text_y)
+                self.lib.pangocairo.pango_cairo_show_layout(cr, layout)
+                self.lib.gobject.g_object_unref(layout)
+
+            self.lib.cairo.cairo_restore(cr)
+
+            # Separator
+            if i < n - 1:
+                sep = hex_to_rgb(COLORS["separator"])
+                self.lib.cairo.cairo_set_source_rgb(cr, *sep)
+                self.lib.cairo.cairo_set_line_width(cr, 1.0)
+                self.lib.cairo.cairo_move_to(cr, x + tab_w, 2.0)
+                self.lib.cairo.cairo_line_to(cr, x + tab_w, float(self.height - 2))
+                self.lib.cairo.cairo_stroke(cr)
+
+        self.lib.cairo.cairo_destroy(cr)
+        self.lib.cairo.cairo_surface_flush(self.surface)
+        self.xd.flush()
+
+    def hit_test(self, x: int, n_tabs: int) -> int:
+        if n_tabs == 0:
+            return -1
+        tab_w = self.width / n_tabs
+        idx = int(x / tab_w)
+        return min(idx, n_tabs - 1)
+
+    def destroy(self):
+        if self.font_desc:
+            self.lib.pango.pango_font_description_free(self.font_desc)
+            self.font_desc = None
+        if self.surface:
+            self.lib.cairo.cairo_surface_destroy(self.surface)
+            self.surface = None
+
+
+# ── Tab Group ──────────────────────────────────────────────────────────────── #
+
+
+@dataclasses.dataclass
+class TabGroup:
+    container_wid: int
+    clients: list  # list of client window IDs (int)
+    active_index: int = 0
+    tab_bar: TabBar = None
+    width: int = 0
+    height: int = 0
+
+
+# ── Tab Manager (Daemon Core) ─────────────────────────────────────────────── #
+
+
+class TabManager:
+    def __init__(self):
+        self.lib = X11Lib()
+        self.xd = XDisplay(self.lib)
+        self.groups: dict[int, TabGroup] = {}         # container_wid -> TabGroup
+        self.client_to_group: dict[int, int] = {}     # client_wid -> container_wid
+        self.running = False
+        self.server_socket = None
+        self._expected_unmaps: dict[int, int] = {}    # client_wid -> count
+        self._redirecting_focus = False
+        self.log = logging.getLogger("bsptab")
+
+    # ── Group Lifecycle ──
+
+    def create_group(self, target_wid: int) -> dict:
+        """Create a new tab group from a single window."""
+        if not target_wid:
+            return {"ok": False, "error": "No window specified"}
+
+        if target_wid in self.client_to_group:
+            return {"ok": False, "error": "Window already in a tab group"}
+
+        if target_wid in self.groups:
+            return {"ok": False, "error": "Window is already a tab container"}
+
+        # Get target geometry
+        attrs = self.xd.get_window_attrs(target_wid)
+        if attrs.width == 0 or attrs.height == 0:
+            return {"ok": False, "error": "Cannot get window attributes"}
+
+        w, h = attrs.width, attrs.height
+
+        # Create container
+        container_wid = self.xd.create_container(0, 0, w, h)
+        self.log.info(f"Created container {wid_hex(container_wid)} for {wid_hex(target_wid)}")
+
+        # Map container so bspwm manages it
+        self.xd.map_window(container_wid)
+        self.xd.sync()
+
+        # Give bspwm a moment to create the node
+        time.sleep(0.05)
+
+        # Swap container into target's position
+        bspc("node", wid_hex(container_wid), "-s", wid_hex(target_wid))
+        self.xd.sync()
+        time.sleep(0.02)
+
+        # Register group BEFORE reparenting so event handlers don't
+        # see the client as "external" during the reparent UnmapNotify
+        tab_bar = TabBar(self.xd, container_wid, w)
+        group = TabGroup(
+            container_wid=container_wid,
+            clients=[target_wid],
+            active_index=0,
+            tab_bar=tab_bar,
+            width=w,
+            height=h,
+        )
+        self.groups[container_wid] = group
+        self.client_to_group[target_wid] = container_wid
+
+        # Expect unmaps from reparenting (child unmap + SubstructureNotify)
+        self._expected_unmaps[target_wid] = self._expected_unmaps.get(target_wid, 0) + 2
+
+        # Reparent target into container
+        self.xd.select_input(target_wid, PropertyChangeMask | StructureNotifyMask)
+        self.xd.reparent(target_wid, container_wid, 0, TAB_HEIGHT)
+        self.xd.sync()
+        time.sleep(0.05)
+
+        # Map and resize the client
+        self.xd.map_window(target_wid)
+        self.xd.sync()
+
+        # Update container geometry (bspwm may have resized it)
+        c_attrs = self.xd.get_window_attrs(container_wid)
+        w = c_attrs.width if c_attrs.width > 0 else w
+        h = c_attrs.height if c_attrs.height > 0 else h
+        group.width = w
+        group.height = h
+        tab_bar.resize(w)
+
+        # Resize client to match actual container size
+        self.xd.move_resize(target_wid, 0, TAB_HEIGHT, w, max(h - TAB_HEIGHT, 1))
+        self.xd.set_input_focus(target_wid)
+
+        # Focus the container in bspwm and redirect to client
+        bspc("node", wid_hex(container_wid), "--focus")
+        self.xd.set_input_focus(target_wid)
+
+        # Draw tab bar
+        self._redraw_group(group)
+        self.xd.flush()
+
+        return {"ok": True, "container": wid_hex(container_wid)}
+
+    def add_to_group(self, container_wid: int, new_wid: int) -> dict:
+        """Add a window to an existing tab group."""
+        if not new_wid:
+            return {"ok": False, "error": "No window to add"}
+
+        if new_wid in self.groups:
+            return {"ok": False, "error": "Cannot add a tab container to another group"}
+
+        group = self.groups.get(container_wid)
+        if not group:
+            return {"ok": False, "error": "Tab group not found"}
+
+        # If already in a different group, remove first
+        if new_wid in self.client_to_group:
+            old_container = self.client_to_group[new_wid]
+            if old_container == container_wid:
+                return {"ok": False, "error": "Window already in this group"}
+            self._remove_client(new_wid, reparent=False)
+
+        # Register in group BEFORE reparenting to prevent event race
+        group.clients.append(new_wid)
+        group.active_index = len(group.clients) - 1
+        self.client_to_group[new_wid] = container_wid
+
+        # Select events on the new client
+        self.xd.select_input(new_wid, PropertyChangeMask | StructureNotifyMask)
+
+        # Expect unmaps from reparenting
+        self._expected_unmaps[new_wid] = self._expected_unmaps.get(new_wid, 0) + 2
+
+        # Unmap current active
+        if len(group.clients) > 1:
+            old_active = group.clients[group.active_index - 1] if group.active_index > 0 else None
+            # Find the previously active client (the one before we appended)
+            prev_active_idx = group.active_index - 1
+            if 0 <= prev_active_idx < len(group.clients):
+                prev_wid = group.clients[prev_active_idx]
+                self._expected_unmaps[prev_wid] = self._expected_unmaps.get(prev_wid, 0) + 2
+                self.xd.unmap_window(prev_wid)
+
+        # Reparent new window into container
+        self.xd.reparent(new_wid, container_wid, 0, TAB_HEIGHT)
+        self.xd.sync()
+        time.sleep(0.05)
+
+        # Resize and map new client
+        self.xd.move_resize(new_wid, 0, TAB_HEIGHT, group.width, max(group.height - TAB_HEIGHT, 1))
+        self.xd.map_window(new_wid)
+        self.xd.set_input_focus(new_wid)
+
+        # Focus container in bspwm
+        bspc("node", wid_hex(container_wid), "--focus")
+        self.xd.set_input_focus(new_wid)
+
+        self._redraw_group(group)
+        self.xd.flush()
+
+        self.log.info(f"Added {wid_hex(new_wid)} to group {wid_hex(container_wid)}")
+        return {"ok": True}
+
+    def add_direction(self, direction: str) -> dict:
+        """Add a neighbor window in the given direction to the focused group."""
+        focused = get_focused_wid()
+        if not focused:
+            return {"ok": False, "error": "No focused window"}
+
+        # Get neighbor BEFORE any mutations
+        neighbor = get_neighbor_wid(direction)
+        if not neighbor:
+            return {"ok": False, "error": f"No window in direction: {direction}"}
+
+        if neighbor == focused:
+            return {"ok": False, "error": "Neighbor is the same as focused"}
+
+        # Skip if neighbor is already in a group
+        if neighbor in self.client_to_group:
+            return {"ok": False, "error": "Neighbor is already in a tab group"}
+        if neighbor in self.groups:
+            return {"ok": False, "error": "Neighbor is already a tab container"}
+
+        # Determine the target container
+        if focused in self.groups:
+            # Focused IS a container
+            container_wid = focused
+        elif focused in self.client_to_group:
+            # Focused is a client in a group
+            container_wid = self.client_to_group[focused]
+        else:
+            # Focused is a regular window — create a group from it first
+            result = self.create_group(focused)
+            if not result.get("ok"):
+                return result
+            container_wid = int(result["container"], 16)
+
+        return self.add_to_group(container_wid, neighbor)
+
+    def remove_active(self, wid: int = None) -> dict:
+        """Remove the active tab from its group (or a specified window)."""
+        if wid is None:
+            focused = get_focused_wid()
+            if not focused:
+                return {"ok": False, "error": "No focused window"}
+
+            if focused in self.groups:
+                # Focused is a container — remove its active client
+                group = self.groups[focused]
+                if not group.clients:
+                    return {"ok": False, "error": "No clients in group"}
+                wid = group.clients[group.active_index]
+            elif focused in self.client_to_group:
+                wid = focused
+            else:
+                return {"ok": False, "error": "Window is not in a tab group"}
+
+        if wid not in self.client_to_group:
+            return {"ok": False, "error": "Window is not in a tab group"}
+
+        self._remove_client(wid, reparent=True)
+        return {"ok": True}
+
+    def _remove_client(self, client_wid: int, reparent: bool = True):
+        """Internal: remove a client from its group."""
+        container_wid = self.client_to_group.get(client_wid)
+        if container_wid is None:
+            return
+
+        group = self.groups.get(container_wid)
+        if group is None:
+            del self.client_to_group[client_wid]
+            return
+
+        if client_wid not in group.clients:
+            del self.client_to_group[client_wid]
+            return
+
+        idx = group.clients.index(client_wid)
+        was_active = idx == group.active_index
+        group.clients.remove(client_wid)
+        del self.client_to_group[client_wid]
+
+        # Reparent back to root if requested
+        if reparent:
+            self._expected_unmaps[client_wid] = self._expected_unmaps.get(client_wid, 0) + 2
+            self.xd.reparent_to_root(client_wid)
+            self.xd.map_window(client_wid)
+            self.xd.sync()
+
+        remaining = len(group.clients)
+
+        if remaining == 0:
+            # Dissolve empty group
+            self._dissolve_group(container_wid)
+        elif remaining == 1:
+            # Auto-dissolve single-client group
+            self._dissolve_group(container_wid)
+        else:
+            # Adjust active index
+            if was_active:
+                group.active_index = min(idx, remaining - 1)
+                new_active = group.clients[group.active_index]
+                self.xd.move_resize(new_active, 0, TAB_HEIGHT, group.width, max(group.height - TAB_HEIGHT, 1))
+                self.xd.map_window(new_active)
+                self.xd.set_input_focus(new_active)
+            elif idx < group.active_index:
+                group.active_index -= 1
+
+            self._redraw_group(group)
+            self.xd.flush()
+
+        # Focus the reparented window in bspwm
+        if reparent:
+            time.sleep(0.05)
+            bspc("node", wid_hex(client_wid), "--focus")
+
+    def _dissolve_group(self, container_wid: int):
+        """Dissolve a tab group, reparenting all remaining clients to root."""
+        group = self.groups.get(container_wid)
+        if not group:
+            return
+
+        remaining_clients = list(group.clients)
+
+        # Reparent all remaining clients to root
+        for client_wid in remaining_clients:
+            self._expected_unmaps[client_wid] = self._expected_unmaps.get(client_wid, 0) + 2
+            self.xd.reparent_to_root(client_wid)
+            self.xd.map_window(client_wid)
+            if client_wid in self.client_to_group:
+                del self.client_to_group[client_wid]
+
+        self.xd.sync()
+        time.sleep(0.05)
+
+        # Swap first remaining client into container's position
+        if remaining_clients:
+            bspc("node", wid_hex(container_wid), "-s", wid_hex(remaining_clients[0]))
+
+        # Destroy tab bar and container
+        if group.tab_bar:
+            group.tab_bar.destroy()
+        self.xd.destroy_window(container_wid)
+        del self.groups[container_wid]
+        self.xd.sync()
+
+        # Focus the first remaining client
+        if remaining_clients:
+            time.sleep(0.02)
+            bspc("node", wid_hex(remaining_clients[0]), "--focus")
+
+        self.log.info(f"Dissolved group {wid_hex(container_wid)}")
+
+    def switch_tab(self, container_wid: int, index: int) -> dict:
+        """Switch to a specific tab by index."""
+        group = self.groups.get(container_wid)
+        if not group:
+            return {"ok": False, "error": "Tab group not found"}
+
+        if not group.clients:
+            return {"ok": False, "error": "No clients"}
+
+        index = max(0, min(index, len(group.clients) - 1))
+        if index == group.active_index:
+            # Still refocus to be safe
+            self.xd.set_input_focus(group.clients[index])
+            return {"ok": True}
+
+        # Unmap current (2 events: StructureNotifyMask on client + SubstructureNotifyMask on container)
+        old_wid = group.clients[group.active_index]
+        self._expected_unmaps[old_wid] = self._expected_unmaps.get(old_wid, 0) + 2
+        self.xd.unmap_window(old_wid)
+
+        # Map new
+        group.active_index = index
+        new_wid = group.clients[index]
+        self.xd.move_resize(new_wid, 0, TAB_HEIGHT, group.width, max(group.height - TAB_HEIGHT, 1))
+        self.xd.map_window(new_wid)
+        self.xd.set_input_focus(new_wid)
+
+        self._redraw_group(group)
+        self.xd.flush()
+
+        return {"ok": True}
+
+    def next_tab(self) -> dict:
+        focused = get_focused_wid()
+        container = self._resolve_container(focused)
+        if not container:
+            return {"ok": False, "error": "No tab group focused"}
+        group = self.groups[container]
+        new_idx = (group.active_index + 1) % len(group.clients)
+        return self.switch_tab(container, new_idx)
+
+    def prev_tab(self) -> dict:
+        focused = get_focused_wid()
+        container = self._resolve_container(focused)
+        if not container:
+            return {"ok": False, "error": "No tab group focused"}
+        group = self.groups[container]
+        new_idx = (group.active_index - 1) % len(group.clients)
+        return self.switch_tab(container, new_idx)
+
+    def focus_tab(self, index: int) -> dict:
+        focused = get_focused_wid()
+        container = self._resolve_container(focused)
+        if not container:
+            return {"ok": False, "error": "No tab group focused"}
+        return self.switch_tab(container, index - 1)  # 1-indexed from user
+
+    def close_active(self) -> dict:
+        """Close the active tab's window."""
+        focused = get_focused_wid()
+        container = self._resolve_container(focused)
+        if not container:
+            return {"ok": False, "error": "No tab group focused"}
+        group = self.groups[container]
+        if not group.clients:
+            return {"ok": False, "error": "No clients"}
+        client_wid = group.clients[group.active_index]
+
+        if self.xd.has_protocol(client_wid, self.xd._WM_DELETE_WINDOW):
+            self.xd.send_delete(client_wid)
+        else:
+            self.xd.destroy_window(client_wid)
+
+        return {"ok": True}
+
+    def list_groups(self) -> dict:
+        data = {}
+        for cid, group in self.groups.items():
+            clients = []
+            for i, wid in enumerate(group.clients):
+                title = self.xd.get_window_title(wid)
+                clients.append({
+                    "wid": wid_hex(wid),
+                    "title": title,
+                    "active": i == group.active_index,
+                })
+            data[wid_hex(cid)] = {
+                "container": wid_hex(cid),
+                "clients": clients,
+                "active_index": group.active_index,
+            }
+        return {"ok": True, "data": data}
+
+    # ── Helpers ──
+
+    def _resolve_container(self, wid: int) -> int | None:
+        """Given a WID (container or client), return the container WID."""
+        if wid in self.groups:
+            return wid
+        if wid in self.client_to_group:
+            return self.client_to_group[wid]
+        return None
+
+    def _redraw_group(self, group: TabGroup):
+        tabs = []
+        for wid in group.clients:
+            title = self.xd.get_window_title(wid)
+            tabs.append(TabInfo(wid=wid, title=title))
+        group.tab_bar.draw(tabs, group.active_index)
+
+        # Also update container's WM_NAME to show active tab title
+        if tabs and 0 <= group.active_index < len(tabs):
+            active_title = tabs[group.active_index].title
+            self.xd.lib.x11.XStoreName(
+                self.xd.dpy, group.container_wid,
+                f"[tab] {active_title}".encode("utf-8"),
+            )
+
+    # ── Event Handlers ──
+
+    def handle_expose(self, ev):
+        e = XExposeEvent.from_buffer_copy(ev)
+        if e.count != 0:
+            return
+        group = self.groups.get(e.window)
+        if group:
+            self._redraw_group(group)
+
+    def handle_configure_notify(self, ev):
+        e = XConfigureEvent.from_buffer_copy(ev)
+        group = self.groups.get(e.window)
+        if not group:
+            return
+
+        if e.width == group.width and e.height == group.height:
+            return
+
+        group.width = e.width
+        group.height = e.height
+
+        # Resize tab bar
+        group.tab_bar.resize(e.width)
+
+        # Resize all clients
+        for wid in group.clients:
+            self.xd.move_resize(wid, 0, TAB_HEIGHT, e.width, max(e.height - TAB_HEIGHT, 1))
+
+        self._redraw_group(group)
+
+    def handle_button_press(self, ev):
+        e = XButtonEvent.from_buffer_copy(ev)
+        group = self.groups.get(e.window)
+        if not group:
+            return
+
+        if e.y < TAB_HEIGHT and e.button == 1:
+            idx = group.tab_bar.hit_test(e.x, len(group.clients))
+            if 0 <= idx < len(group.clients):
+                self.switch_tab(e.window, idx)
+        elif e.y < TAB_HEIGHT and e.button == 2:
+            # Middle click closes the tab under cursor
+            idx = group.tab_bar.hit_test(e.x, len(group.clients))
+            if 0 <= idx < len(group.clients):
+                client_wid = group.clients[idx]
+                if self.xd.has_protocol(client_wid, self.xd._WM_DELETE_WINDOW):
+                    self.xd.send_delete(client_wid)
+                else:
+                    self.xd.destroy_window(client_wid)
+
+    def handle_property_notify(self, ev):
+        e = XPropertyEvent.from_buffer_copy(ev)
+        if e.window in self.client_to_group:
+            if e.atom in (self.xd._WM_NAME, self.xd._NET_WM_NAME):
+                container_wid = self.client_to_group[e.window]
+                group = self.groups.get(container_wid)
+                if group:
+                    self._redraw_group(group)
+
+    def handle_destroy_notify(self, ev):
+        e = XDestroyWindowEvent.from_buffer_copy(ev)
+        wid = e.window
+
+        if wid in self.client_to_group:
+            self.log.info(f"Client {wid_hex(wid)} destroyed")
+            self._remove_client(wid, reparent=False)
+        elif wid in self.groups:
+            # Container itself was destroyed externally
+            group = self.groups[wid]
+            for client_wid in list(group.clients):
+                if client_wid in self.client_to_group:
+                    del self.client_to_group[client_wid]
+            if group.tab_bar:
+                group.tab_bar.destroy()
+            del self.groups[wid]
+
+    def handle_unmap_notify(self, ev):
+        e = XUnmapEvent.from_buffer_copy(ev)
+        wid = e.window
+
+        # Check if this is an expected unmap (tab switching or reparenting)
+        if self._expected_unmaps.get(wid, 0) > 0:
+            self._expected_unmaps[wid] -= 1
+            if self._expected_unmaps[wid] == 0:
+                del self._expected_unmaps[wid]
+            return
+
+        # External unmap — window was closed/hidden externally
+        if wid in self.client_to_group:
+            self.log.info(f"Client {wid_hex(wid)} externally unmapped")
+            self._remove_client(wid, reparent=False)
+
+    def handle_focus_in(self, ev):
+        e = XFocusChangeEvent.from_buffer_copy(ev)
+        group = self.groups.get(e.window)
+        if not group or not group.clients:
+            return
+        if self._redirecting_focus:
+            return
+
+        # Redirect focus to active client
+        self._redirecting_focus = True
+        try:
+            active_wid = group.clients[group.active_index]
+            self.xd.set_input_focus(active_wid)
+        finally:
+            self._redirecting_focus = False
+
+    def handle_client_message(self, ev):
+        e = XClientMessageEvent.from_buffer_copy(ev)
+        if e.message_type == self.xd._WM_PROTOCOLS and e.data[0] == self.xd._WM_DELETE_WINDOW:
+            if e.window in self.groups:
+                # Close all tabs and dissolve
+                group = self.groups[e.window]
+                for client_wid in list(group.clients):
+                    if self.xd.has_protocol(client_wid, self.xd._WM_DELETE_WINDOW):
+                        self.xd.send_delete(client_wid)
+                    else:
+                        self.xd.destroy_window(client_wid)
+
+    # ── Event Loop ──
+
+    def _process_x_event(self):
+        ev = self.xd.next_event()
+        etype = ev.type
+
+        try:
+            if etype == Expose:
+                self.handle_expose(ev)
+            elif etype == ConfigureNotify:
+                self.handle_configure_notify(ev)
+            elif etype == ButtonPress:
+                self.handle_button_press(ev)
+            elif etype == PropertyNotify:
+                self.handle_property_notify(ev)
+            elif etype == DestroyNotify:
+                self.handle_destroy_notify(ev)
+            elif etype == UnmapNotify:
+                self.handle_unmap_notify(ev)
+            elif etype == FocusIn:
+                self.handle_focus_in(ev)
+            elif etype == ClientMessage:
+                self.handle_client_message(ev)
+        except Exception as e:
+            self.log.error(f"Event handler error (type={etype}): {e}", exc_info=True)
+
+    def _handle_ipc(self):
+        try:
+            conn, _ = self.server_socket.accept()
+        except (OSError, socket.error):
+            return
+
+        try:
+            conn.settimeout(2.0)
+            data = conn.recv(4096).decode().strip()
+            if not data:
+                return
+            request = json.loads(data)
+            response = self._dispatch(request)
+            conn.sendall((json.dumps(response) + "\n").encode())
+        except Exception as e:
+            try:
+                conn.sendall((json.dumps({"ok": False, "error": str(e)}) + "\n").encode())
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    def _dispatch(self, request: dict) -> dict:
+        cmd = request.get("cmd", "")
+        self.log.info(f"IPC command: {cmd} {request}")
+
+        if cmd == "create":
+            target = request.get("wid")
+            if target:
+                target = int(target, 16) if isinstance(target, str) else target
+            else:
+                target = get_focused_wid()
+            return self.create_group(target)
+
+        elif cmd == "add":
+            direction = request.get("direction")
+            if not direction:
+                return {"ok": False, "error": "Direction required"}
+            return self.add_direction(direction)
+
+        elif cmd == "remove":
+            wid = request.get("wid")
+            if wid:
+                wid = int(wid, 16) if isinstance(wid, str) else wid
+            return self.remove_active(wid)
+
+        elif cmd == "next":
+            return self.next_tab()
+
+        elif cmd == "prev":
+            return self.prev_tab()
+
+        elif cmd == "focus":
+            index = request.get("index", 1)
+            return self.focus_tab(int(index))
+
+        elif cmd == "close":
+            return self.close_active()
+
+        elif cmd == "list":
+            return self.list_groups()
+
+        elif cmd == "ping":
+            return {"ok": True, "pong": True}
+
+        else:
+            return {"ok": False, "error": f"Unknown command: {cmd}"}
+
+    def _setup_socket(self):
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+        self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server_socket.bind(SOCKET_PATH)
+        self.server_socket.listen(5)
+        self.server_socket.setblocking(False)
+
+    def _handle_signal(self, signum, frame):
+        self.log.info(f"Received signal {signum}, shutting down")
+        self.running = False
+
+    def _recover_groups(self):
+        """Scan for existing Bsptab containers on startup (daemon restart recovery)."""
+        try:
+            children = self.xd.get_children(self.xd.root)
+        except Exception:
+            return
+        for wid in children:
+            try:
+                cls = self.xd.get_window_class(wid)
+            except Exception:
+                continue
+            if cls == "Bsptab" and wid not in self.groups:
+                # Found an orphaned container, try to recover
+                attrs = self.xd.get_window_attrs(wid)
+                if attrs.map_state != IsViewable:
+                    continue
+                clients = self.xd.get_children(wid)
+                if not clients:
+                    # Empty container, destroy it
+                    self.xd.destroy_window(wid)
+                    continue
+
+                self.log.info(f"Recovering group {wid_hex(wid)} with {len(clients)} clients")
+                tab_bar = TabBar(self.xd, wid, attrs.width)
+                group = TabGroup(
+                    container_wid=wid,
+                    clients=list(clients),
+                    active_index=0,
+                    tab_bar=tab_bar,
+                    width=attrs.width,
+                    height=attrs.height,
+                )
+                self.groups[wid] = group
+                for client_wid in clients:
+                    self.client_to_group[client_wid] = wid
+                    self.xd.select_input(client_wid, PropertyChangeMask | StructureNotifyMask)
+
+                # Determine which client is mapped (active)
+                for i, client_wid in enumerate(clients):
+                    c_attrs = self.xd.get_window_attrs(client_wid)
+                    if c_attrs.map_state == IsViewable:
+                        group.active_index = i
+                        break
+
+                self._redraw_group(group)
+
+    def _cleanup(self):
+        """Dissolve all groups on shutdown."""
+        for container_wid in list(self.groups.keys()):
+            self._dissolve_group(container_wid)
+
+        if self.server_socket:
+            self.server_socket.close()
+        if os.path.exists(SOCKET_PATH):
+            os.unlink(SOCKET_PATH)
+        self.xd.close()
+
+    def run(self):
+        """Main event loop."""
+        # Check if daemon is already running
+        if os.path.exists(SOCKET_PATH):
+            try:
+                test_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                test_sock.connect(SOCKET_PATH)
+                test_sock.close()
+                print("bsptab daemon is already running", file=sys.stderr)
+                sys.exit(1)
+            except (ConnectionRefusedError, OSError):
+                os.unlink(SOCKET_PATH)
+
+        # Setup logging
+        logging.basicConfig(
+            filename=LOG_PATH,
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(message)s",
+        )
+
+        self._setup_socket()
+        self.running = True
+        signal.signal(signal.SIGTERM, self._handle_signal)
+        signal.signal(signal.SIGINT, self._handle_signal)
+
+        # Try to recover existing tab groups
+        self._recover_groups()
+
+        x_fd = self.xd.fd
+        sock_fd = self.server_socket.fileno()
+
+        self.log.info("bsptab daemon started")
+        print("bsptab daemon started", file=sys.stderr)
+
+        try:
+            while self.running:
+                # Process any buffered X events
+                while self.xd.pending() > 0:
+                    self._process_x_event()
+
+                # Wait for X events or socket commands
+                try:
+                    readable, _, _ = select.select([x_fd, sock_fd], [], [], 1.0)
+                except (ValueError, OSError):
+                    break
+
+                if x_fd in readable:
+                    while self.xd.pending() > 0:
+                        self._process_x_event()
+
+                if sock_fd in readable:
+                    self._handle_ipc()
+        except Exception as e:
+            self.log.error(f"Fatal error: {e}", exc_info=True)
+        finally:
+            self.log.info("bsptab daemon shutting down")
+            self._cleanup()
+
+
+# ── CLI Client ─────────────────────────────────────────────────────────────── #
+
+
+def send_command(cmd_dict: dict) -> dict:
+    if not os.path.exists(SOCKET_PATH):
+        print("bsptab daemon is not running. Start it with: bsptab daemon", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect(SOCKET_PATH)
+        sock.sendall((json.dumps(cmd_dict) + "\n").encode())
+        response = sock.recv(8192).decode().strip()
+        sock.close()
+        return json.loads(response)
+    except ConnectionRefusedError:
+        print("bsptab daemon is not responding. Restart with: bsptab daemon", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error communicating with daemon: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+# ── Main ───────────────────────────────────────────────────────────────────── #
+
+USAGE = """\
+bsptab - i3-style tabbed windows for bspwm
+
+Usage:
+  bsptab daemon          Start the daemon (run once, e.g. from bspwmrc)
+  bsptab create          Create a tab group from the focused window
+  bsptab add <dir>       Add neighbor in direction (west/south/north/east) to group
+  bsptab remove          Remove active tab from its group
+  bsptab next            Switch to next tab
+  bsptab prev            Switch to previous tab
+  bsptab focus <n>       Focus tab number n (1-indexed)
+  bsptab close           Close the active tab's window
+  bsptab list            List all tab groups (JSON)
+"""
+
+
+def main():
+    if len(sys.argv) < 2:
+        print(USAGE, file=sys.stderr)
+        sys.exit(1)
+
+    cmd = sys.argv[1]
+
+    if cmd == "daemon":
+        manager = TabManager()
+        manager.run()
+        return
+
+    if cmd == "create":
+        wid = sys.argv[2] if len(sys.argv) > 2 else None
+        result = send_command({"cmd": "create", "wid": wid})
+
+    elif cmd == "add":
+        if len(sys.argv) < 3:
+            print("Usage: bsptab add <west|south|north|east>", file=sys.stderr)
+            sys.exit(1)
+        direction = sys.argv[2]
+        result = send_command({"cmd": "add", "direction": direction})
+
+    elif cmd == "remove":
+        wid = sys.argv[2] if len(sys.argv) > 2 else None
+        result = send_command({"cmd": "remove", "wid": wid})
+
+    elif cmd == "next":
+        result = send_command({"cmd": "next"})
+
+    elif cmd == "prev":
+        result = send_command({"cmd": "prev"})
+
+    elif cmd == "focus":
+        if len(sys.argv) < 3:
+            print("Usage: bsptab focus <n>", file=sys.stderr)
+            sys.exit(1)
+        result = send_command({"cmd": "focus", "index": int(sys.argv[2])})
+
+    elif cmd == "close":
+        result = send_command({"cmd": "close"})
+
+    elif cmd == "list":
+        result = send_command({"cmd": "list"})
+        if result.get("ok") and result.get("data"):
+            for cid, info in result["data"].items():
+                print(f"Group {cid}:")
+                for client in info["clients"]:
+                    marker = " *" if client["active"] else "  "
+                    print(f"  {marker} {client['wid']}  {client['title']}")
+            return
+
+    elif cmd in ("--help", "-h", "help"):
+        print(USAGE)
+        return
+
+    else:
+        print(f"Unknown command: {cmd}", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
+        sys.exit(1)
+
+    if not result.get("ok"):
+        print(f"Error: {result.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

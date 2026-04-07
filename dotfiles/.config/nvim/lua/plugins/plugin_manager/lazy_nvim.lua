@@ -33,8 +33,9 @@ local function generate_colorscheme_setup(opts, name, is_main)
 	opts.config = function()
 		-- Try loading custom colorscheme setup from plugins.colorschemes.<colorscheme_name>
 		local custom_colorscheme_cfg_loaded, _ = pcall(require, "plugins.colorschemes." .. name)
+		local cscheme = vim.g.colors_name -- Check if a colorscheme is already loaded in plugins.colorschemes.<colorscheme_name>
 
-		if not custom_colorscheme_cfg_loaded then
+		if not custom_colorscheme_cfg_loaded or cscheme == nil then
 			-- If it doesn't exist, load it with the default command
 			---@diagnostic disable-next-line: param-type-mismatch
 			local colorscheme_loaded, _ = pcall(vim.cmd, "colorscheme " .. name)
@@ -63,16 +64,26 @@ lazy.setup({
 		name = "challenger-deep",
 	}, "challenger_deep"),
 	generate_colorscheme_setup({
-		"pineapplegiant/spaceduck",
-		branch = "main",
-	}, "spaceduck"),
+		"catppuccin/nvim",
+		name = "catppuccin",
+	}, "catppuccin"),
+	generate_colorscheme_setup({
+		"rebelot/kanagawa.nvim",
+		name = "kanagawa",
+	}, "kanagawa"),
+
+	-- OUTDATED/NOT MAINTAINED COLORSCHEMES
+	-- generate_colorscheme_setup({
+	-- 	"pineapplegiant/spaceduck",
+	-- 	branch = "main",
+	-- }, "spaceduck"),
+	-- generate_colorscheme_setup({
+	-- 	"tomasr/molokai",
+	-- }, "molokai"),
 	generate_colorscheme_setup({
 		"dracula/vim",
 		name = "dracula",
 	}, "dracula"),
-	generate_colorscheme_setup({
-		"tomasr/molokai",
-	}, "molokai"),
 	generate_colorscheme_setup({
 		"folke/tokyonight.nvim",
 		branch = "main",
@@ -146,7 +157,7 @@ lazy.setup({
 	-- Vim Movement
 	{ "unblevable/quick-scope", init = load_config("quickscope") }, -- Colors for fnameter movement with (t or f)
 	{
-		"ggandor/leap.nvim",
+		"https://codeberg.org/andyg/leap.nvim",
 		config = load_config("leap"),
 	}, -- Two key movement
 
@@ -215,12 +226,21 @@ lazy.setup({
 			"saadparwaiz1/cmp_luasnip", -- Snippet completions
 		},
 	}, -- Completion Plugin
+	-- WORDAROUND UNTIL LAZY NVIM FIXES MASON's NEW VERSION (https://github.com/LazyVim/LazyVim/issues/6039#issuecomment-2856227817)
+	{
+		"mason-org/mason.nvim",
+		version = "^1.0.0",
+	},
+	{
+		"mason-org/mason-lspconfig.nvim",
+		version = "^1.0.0",
+	},
 	{
 		"neovim/nvim-lspconfig",
 		config = load_config("lsp"),
 		dependencies = {
-			"williamboman/mason.nvim", -- Simple to use language server installer
-			"williamboman/mason-lspconfig.nvim", -- Bridges mason.nvim with the lspconfig plugin
+			-- "williamboman/mason.nvim", -- Simple to use language server installer
+			-- "williamboman/mason-lspconfig.nvim", -- Bridges mason.nvim with the lspconfig plugin
 			"williamboman/nvim-lsp-installer", -- LSP installer
 			"nvimtools/none-ls.nvim", -- Formatters and linters
 		},
@@ -234,11 +254,11 @@ lazy.setup({
 			"nvimtools/none-ls-extras.nvim",
 		},
 	},
-	--   {
-	--   "pmizio/typescript-tools.nvim",
-	--   dependencies = { "nvim-lua/plenary.nvim", "neovim/nvim-lspconfig" },
-	--   opts = {},
-	-- }, -- Replacement for typescript-language-server
+	{
+		"pmizio/typescript-tools.nvim",
+		dependencies = { "nvim-lua/plenary.nvim", "neovim/nvim-lspconfig" },
+		config = load_config("typescript-tools"),
+	},
 	{
 		"nvim-treesitter/nvim-treesitter", -- Syntax highlighting
 		dependencies = {
@@ -255,6 +275,18 @@ lazy.setup({
 		},
 		config = load_config("rainbow-delimiters"),
 	},
+	{ "mfussenegger/nvim-dap", "nvim-neotest/nvim-nio" },
+	{
+		"nvim-neotest/neotest",
+		dependencies = {
+			"nvim-neotest/nvim-nio",
+			"nvim-lua/plenary.nvim",
+			"antoinemadec/FixCursorHold.nvim",
+			"nvim-treesitter/nvim-treesitter",
+			"nvim-neotest/neotest-python", -- Python adapter
+		},
+		config = load_config("neotest"),
+	},
 	{
 		"mfussenegger/nvim-dap",
 		dependencies = { "rcarriga/nvim-dap-ui" }, -- Debugger UI
@@ -267,6 +299,10 @@ lazy.setup({
 			"nvim-treesitter/nvim-treesitter",
 			"nvim-tree/nvim-web-devicons",
 		},
+	},
+	{
+		"OXY2DEV/markview.nvim",
+		lazy = false,
 	},
 
 	-- Plug 'KabbAmine/vCoolor.vim'

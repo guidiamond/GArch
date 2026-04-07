@@ -27,7 +27,7 @@
 (defwindow stats_eDP_1
            :geometry (geometry :x "3px"
                                :y "3px"
-                               :width "320px"
+                               :width "420px"
                                :height "36px"
                                :anchor "bottom left")
            :stacking "bottom"
@@ -63,7 +63,7 @@
 (defwindow stats_HDMI_1
            :geometry (geometry :x "3px"
                                :y "3px"
-                               :width "320px"
+                               :width "420px"
                                :height "36px"
                                :anchor "bottom left")
            :stacking "bottom"

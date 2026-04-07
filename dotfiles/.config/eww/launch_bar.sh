@@ -78,7 +78,7 @@ for monitor in $monitors; do
 (defwindow stats_${var}
            :geometry (geometry :x "3px"
                                :y "${stats_y}"
-                               :width "320px"
+                               :width "420px"
                                :height "36px"
                                :anchor "${stats_anchor}")
            :stacking "bottom"

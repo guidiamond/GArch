@@ -1,15 +1,3 @@
--- local set = vim.g
---
--- local colorscheme = "onedark"
---
--- local status_ok, _ = pcall(vim.cmd, "colorscheme onedark")
--- if not status_ok then
---   return
--- end
---
--- set.onedark_terminal_italics = 1
-
--- Lua
 local status_ok, onedark = pcall(require, "onedark")
 
 if not status_ok then
@@ -51,9 +39,7 @@ onedark.setup({
 	-- Plugins Config --
 	diagnostics = {
 		darker = true, -- darker colors for diagnostic
-		undercurl = true, -- use undercurl instead of underline for diagnostics
+		undercurl = false, -- use underline instead of undercurl for diagnostics
 		background = true, -- use background color for virtual text
 	},
 })
-
-onedark.load()

@@ -166,8 +166,9 @@ nvim_tree.setup({
 		ignore_dirs = {},
 	},
 	git = {
-		enable = true,
+		enable = false,
 		ignore = true,
+		-- async = true, -- TODO: Check how to make it async before it was in experimental but now it got deprecated
 		show_on_dirs = true,
 		show_on_open_dirs = true,
 		timeout = 400,
@@ -236,11 +237,6 @@ nvim_tree.setup({
 		confirm = {
 			remove = true,
 			trash = true,
-		},
-	},
-	experimental = {
-		git = {
-			async = true,
 		},
 	},
 	log = {

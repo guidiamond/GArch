@@ -1,3 +1,3 @@
-require "plugins.lsp.mason" -- Sets up lspconfig, mason and mason_lspconfig
-require("plugins.lsp.handlers").setup()
+require("plugins.lsp.handlers").setup() -- Diagnostics + LspAttach autocmd
+require "plugins.lsp.mason" -- Sets up mason, mason-lspconfig, and vim.lsp.config/enable
 require "plugins.lsp.none-ls"

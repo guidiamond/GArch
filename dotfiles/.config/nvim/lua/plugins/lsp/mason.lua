@@ -1,3 +1,17 @@
+local servers = {
+	"biome",
+	"lua_ls",
+	-- "ts_ls", -- Replaced by typescript-tools.nvim
+	"ruff",
+	"pyright",
+	"jsonls",
+	"terraformls",
+	-- "cssls",
+	-- "html",
+	-- "bashls",
+	-- "yamlls",
+}
+
 local function setup_mason()
 	local status_ok_mason, mason = pcall(require, "mason")
 	if not status_ok_mason then
@@ -30,46 +44,35 @@ local function setup_mason_lspconfig()
 	return true
 end
 
-local function setup_lspconfig()
-	local lspconfig_status_ok, lspconfig = pcall(require, "lspconfig")
-	if not lspconfig_status_ok then
-		return false
+local function setup_lsp()
+	-- Shared capabilities for all servers
+	local capabilities = vim.lsp.protocol.make_client_capabilities()
+	capabilities.textDocument.completion.completionItem.snippetSupport = true
+	local cmp_ok, cmp_nvim_lsp = pcall(require, "cmp_nvim_lsp")
+	if cmp_ok then
+		capabilities = cmp_nvim_lsp.default_capabilities(capabilities)
 	end
 
-	local servers = {
-		"lua_ls",
-		"tsserver",
-		"pyright",
-		"jsonls",
-		-- "cssls",
-		-- "html",
-		-- "bashls",
-		-- "yamlls",
-	}
+	vim.lsp.config("*", {
+		capabilities = capabilities,
+	})
 
-	local opts = {}
-
-	for _, server in pairs(servers) do
-		opts = {
-			on_attach = require("plugins.lsp.handlers").on_attach,
-			capabilities = require("plugins.lsp.handlers").capabilities,
-		}
-
+	-- Apply per-server custom settings
+	for _, server in ipairs(servers) do
 		server = vim.split(server, "@")[1]
 
-		-- Set custom configs for server
 		local require_ok, conf_opts = pcall(require, "plugins.lsp.settings." .. server)
 		if require_ok then
-			opts = vim.tbl_deep_extend("force", conf_opts, opts)
+			vim.lsp.config(server, conf_opts)
 		end
-
-		lspconfig[server].setup(opts)
 	end
 
+	-- Enable all servers
+	vim.lsp.enable(servers)
 	return true
 end
 
--- Runs setup_mason -> setup_mason_lspconfig -> setup_lspconfig
+-- Runs setup_mason -> setup_mason_lspconfig -> setup_lsp
 local function setup()
 	local throw_err = vim.api.nvim_err_writeln
 
@@ -79,9 +82,8 @@ local function setup()
 	if not setup_mason_lspconfig() then
 		throw_err("Failure in setup_mason_lspconfig!")
 	end
-	if not setup_lspconfig() then
-		throw_err("Failure in setup_lspconfig!")
-		return true
+	if not setup_lsp() then
+		throw_err("Failure in setup_lsp!")
 	end
 end
 

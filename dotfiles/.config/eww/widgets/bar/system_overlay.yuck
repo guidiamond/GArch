@@ -1,5 +1,10 @@
 ;; System stats overlay — floating pill at opposite corner from bar
 
+;; Pomodoro timer
+(deflisten pomo-data
+  :initial '{"time":"45:00","running":false,"paused":true,"mode":"work","cycle":1,"icon":"󰔟","negative":false}'
+  `~/.config/eww/scripts/pomodoro.sh`)
+
 ;; Notification data from dunst
 (deflisten notif-data
   :initial '{"count":0,"history":0,"icon":"󰂚","visible":false,"paused":false}'
@@ -42,6 +47,18 @@
         (label :class "stats-val"
                :visible {sys-data.temp >= 60}
                :text {sys-data.temp >= 90 ? "${sys-data.temp_precise}°C" : "${sys-data.temp}°C"})))
+    ;; Pomodoro
+    (button :class "stats-pill pomo-pill pomo-${pomo-data.mode} ${pomo-data.paused ? 'pomo-paused' : ''} ${pomo-data.negative ? 'pomo-negative' : ''}"
+            :onclick "~/.config/eww/scripts/pomodoro.sh toggle &"
+            :onmiddleclick "~/.config/eww/scripts/pomodoro.sh reset &"
+            :onrightclick "~/.config/eww/scripts/pomodoro.sh skip &"
+            :tooltip {pomo-data.mode == "work"
+                      ? "Pomodoro #${pomo-data.cycle} · Working${pomo-data.paused ? ' (paused)' : ''}${pomo-data.negative ? ' · OVERTIME' : ''}"
+                      : "Pomodoro #${pomo-data.cycle} · ${pomo-data.cycle % 4 == 0 ? 'Long' : 'Short'} rest${pomo-data.paused ? ' (paused)' : ''}${pomo-data.negative ? ' · OVERTIME' : ''}"}
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "pomo-icon" :text {pomo-data.icon})
+        (label :class "pomo-time" :text {pomo-data.time})
+        (label :class "pomo-cycle" :text {pomo-data.cycle})))
     ;; Notifications
     (button :class "stats-pill stats-notif ${notif-data.count > 0 ? 'notif-active' : ''} ${notif-data.paused ? 'notif-paused' : ''}"
             :onclick "~/.config/eww/scripts/toggle_notif.sh &"

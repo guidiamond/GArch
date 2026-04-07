@@ -8,6 +8,7 @@ alias gitignore__clean_commited='git rm --cached $(git ls-files -i --exclude-fro
 alias gclean='git reset --hard && git clean -df'
 alias gc='git checkout'
 alias gcb='git checkout -b'
+alias gst='git stash --include-untracked'
 
 # DEFAULT ALIASES
 alias ls="lsd"
@@ -56,12 +57,17 @@ alias pdfer="bash $HOME/.scripts/pdfdownload.sh"
 #alias diropen="xdg-open . & &>/dev/null"
 #alias diropen="xdg-open . &> /dev/null"
 
+# function tvim() {
+#   devour alacritty --option "window.padding.x=0" --option 'window.padding.y=0' --command nvim $@
+# }
+#
 function tvim() {
-  devour alacritty --option "window.padding.x=0" --option 'window.padding.y=0' --command nvim $@
+  devour wezterm --config-file ~/.config/wezterm/wezterm_tvim.lua start nvim "$@"
 }
 
 function ttmux() {
-  devour alacritty --option "window.padding.x=0" --option 'window.padding.y=0' --command tmux $@
+  devour wezterm --config-file ~/.config/wezterm/wezterm_tvim.lua start tmux "$@"
+  # devour alacritty --option "window.padding.x=0" --option 'window.padding.y=0' --command tmux $@
 }
 
 
@@ -83,6 +89,13 @@ alias cdenv="cd $HOME/.virtualenv/"
 alias resolution="xrandr | grep '*'"
 alias xdg-open="mimeopen"
 
+pdfpagecount() {
+    find "$1" -type f -name "*.pdf" -exec pdfinfo {} \; | grep "Pages:" | awk '{sum += $2} END {print sum}'
+}
+
+alias prp="poetry run python"
+alias prl="poetry run jupyter lab"
+
 # VIRTUAL ENV
 changedirectory="cd $HOME/.virtualenv"
 #createenv="virtualenv -p ${@} ${@}"
@@ -90,5 +103,38 @@ createenv="virtualenv ${@}"
 alias makenv="${changedirectory} && ${createenv}"
 alias dotfiles="/usr/bin/git --git-dir=$HOME/.dotfiles/ --work-tree=$HOME"
 
+# SSH ALIASES
+COLETIVAS_PEM="$HOME/.ssh/guidiamond_coletivas_key.pem"
+COLETIVAS_PEM_GTB="$HOME/.ssh/gtb_key.pem"
+
+# alias copy_to_coletivas_vm="rsync -avz -e 'ssh -i $COLETIVAS_PEM' $1 guidiamond@172.174.141.33:$2"
+
+# copy_to_coletivas_gtb() {
+#   rsync -avz -e "ssh -i $COLETIVAS_PEM_GTB" "$1" gtb@172.174.141.33:"$2"
+# }
+
+copy_to_coletivas_gtb() {
+  rsync -az --info=progress2 --inplace --partial --compress-level=0 -e "ssh -i $COLETIVAS_PEM_GTB -o Compression=no -T" "$1" gtb@172.174.141.33:"$2"
+}
+
+
+copy_to_coletivas_gd() {
+  rsync -avz -e "ssh -i $COLETIVAS_PEM" "$1" guidiamond@172.174.141.33:"$2"
+}
+
+copy_from_coletivas_gtb() {
+  rsync -avz --progress -e "ssh -i $COLETIVAS_PEM_GTB" gtb@172.174.141.33:"$1" "$2"
+
+}
+
+copy_from_coletivas_gd() {
+  rsync -avz -e "ssh -i $COLETIVAS_PEM" guidiamond@172.174.141.33:"$1" "$2"
+}
+
+
 alias lg="lazygit"
 
+# Node modules cleanup (n<command>)
+alias ndall="find . \( -name "dist" -o -name "node_modules" -o -name ".next" -o -name ".turbo" \) -type d -prune -exec rm -rf '{}' +" 
+alias ndbuild="find . \( -name "dist" -o -name ".next" -o -name ".turbo" \) -type d -prune -exec rm -rf '{}' +" 
+alias ndnm="find . \( -o -name "node_modules" \) -type d -prune -exec rm -rf '{}' +" 

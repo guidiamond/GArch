@@ -7,7 +7,6 @@ declare -a BAR_NAMES=("top" "bottom")
 # PRIMARY_MONITOR=$(polybar -m | grep 'primary' | cut -d ':' -f1)
 # OTHER_MONITORS=$(polybar -m | grep -v 'primary' | cut -d ':' -f1)
 MONITORS=$(polybar -m | cut -d ':' -f1)
-echo $MONITORS
 
 # Terminate already running bar instances
 killall -q polybar

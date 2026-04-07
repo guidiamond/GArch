@@ -415,6 +415,57 @@ calendar * {
   color: $subtext;
 }
 
+// Pomodoro timer
+.pomo-pill {
+  transition: all 300ms ease;
+}
+
+.pomo-icon {
+  font-size: 14px;
+  color: $red;
+  transition: color 300ms ease;
+}
+
+.pomo-time {
+  font-size: 12px;
+  font-weight: bold;
+  color: $text;
+  min-width: 36px;
+  transition: color 300ms ease;
+}
+
+.pomo-cycle {
+  font-size: 10px;
+  color: $muted;
+  min-width: 10px;
+}
+
+.pomo-rest {
+  .pomo-icon {
+    color: $green;
+  }
+
+  .pomo-time {
+    color: $green;
+  }
+}
+
+.pomo-paused {
+  .pomo-icon {
+    color: $muted;
+  }
+
+  .pomo-time {
+    color: $muted;
+  }
+}
+
+.pomo-negative {
+  .pomo-time {
+    color: $red;
+  }
+}
+
 // Notification indicator
 .stats-notif {
   transition: all 300ms ease;
