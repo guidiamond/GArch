@@ -44,6 +44,8 @@ function setup_yay() {
 
 
 
-setup_yay
+mkdir -p .cache/zsh
+touch history
+#setup_yay
 #install_yay_deps
-# setup_dotenv
+setup_dotenv

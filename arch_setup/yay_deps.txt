@@ -19,6 +19,7 @@ electron
 etcher-bin
 fd
 feh
+ferdium-bin
 flameshot
 fzf
 gcc
