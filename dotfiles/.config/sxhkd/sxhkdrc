@@ -143,7 +143,7 @@ super + {_,shift + }c
 	bspc node -f {next,prev}.local
 # key D
 super + shift + d
-  rofi_launcher
+  ~/.config/rofi/launchers/type-2/launcher.sh
 # key E
 # key F
 super + f
