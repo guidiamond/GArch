@@ -6,9 +6,9 @@ USERNAME=$(echo $USER)
     xmodmap "/home/${USERNAME}/.Xmodmap" & \
     "/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
 
-# Monitor hotplug watcher (handles connect/disconnect + eww relaunch)
-pkill -f monitor_watcher.sh 2>/dev/null
-"/home/${USERNAME}/.scripts/monitor/monitor_watcher.sh" &
+# Start bsptab daemon for i3-style tabbed windows
+pkill -f "bsptab daemon" 2>/dev/null
+"/home/${USERNAME}/.scripts/bspwm/bsptab" daemon &
 #}}}
 # /home/diamond/.config/polybar/launch.sh &
 
@@ -16,8 +16,7 @@ pkill -f monitor_watcher.sh 2>/dev/null
 bspc config window_gap                    10
 bspc config border_width                  3
 
-bspc config top_padding                   48
-bspc config bottom_padding                5
+# top/bottom padding managed by launch_bar.sh based on bar position
 bspc config left_padding                  0
 bspc config right_padding                 0
 #}}}
