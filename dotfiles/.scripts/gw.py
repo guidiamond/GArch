@@ -117,10 +117,22 @@ def branch_exists(branch_name):
 
 def remote_branch_exists(branch_name):
     """Checks if a branch exists on a remote. Returns the remote ref (e.g. 'origin/branch') or None."""
+
+    def _parse_ref(ls_remote_output, remote_name):
+        """Parses the actual branch name from git ls-remote output (format: '<hash>\\trefs/heads/<branch>')."""
+        for line in ls_remote_output.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 2 and parts[1].startswith("refs/heads/"):
+                actual_branch = parts[1][len("refs/heads/"):]
+                return f"{remote_name}/{actual_branch}"
+        return None
+
     # Try common remote name 'origin' first, then check all remotes
     output = run_command(f"git ls-remote --heads origin {branch_name}")
     if output:
-        return f"origin/{branch_name}"
+        ref = _parse_ref(output, "origin")
+        if ref:
+            return ref
     # Check all remotes
     output = run_command("git remote")
     if output:
@@ -129,7 +141,9 @@ def remote_branch_exists(branch_name):
             if remote and remote != "origin":
                 check = run_command(f"git ls-remote --heads {remote} {branch_name}")
                 if check:
-                    return f"{remote}/{branch_name}"
+                    ref = _parse_ref(check, remote)
+                    if ref:
+                        return ref
     return None
 
 
@@ -322,12 +336,13 @@ def cmd_create(args, root_dir, worktrees_dir):
         remote_ref = remote_branch_exists(branch_name)
         if remote_ref:
             remote_name = remote_ref.split("/", 1)[0]
+            actual_branch = remote_ref.split("/", 1)[1]
             log(
-                f"Branch '{branch_name}' found on remote '{remote_name}'. Fetching and creating worktree...",
+                f"Branch '{actual_branch}' found on remote '{remote_name}'. Fetching and creating worktree...",
                 CYAN,
             )
             # Fetch the remote branch
-            run_command(f"git fetch {remote_name} {branch_name}")
+            run_command(f"git fetch {remote_name} {actual_branch}")
             # Create worktree tracking the remote branch
             git_cmd = [
                 "git",
@@ -335,7 +350,7 @@ def cmd_create(args, root_dir, worktrees_dir):
                 "add",
                 "--track",
                 "-b",
-                branch_name,
+                actual_branch,
                 target_path,
                 remote_ref,
             ]

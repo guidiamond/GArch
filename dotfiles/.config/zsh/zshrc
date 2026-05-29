@@ -12,7 +12,7 @@ fpath+=( ~/func )
 autoload -Uz myfunc
 fpath+="$CONFIG/zsh/func"
 export SCRIPTS="$HOME/.scripts/"
-export PYTHON_ENV="/home/guidiamond/.virtualenv/nvim"
+export PYTHON_ENV="/home/damn/.virtualenv/data-science"
 # export ZSH="$HOME/.local/share/zinit/zinit.git"
 export EDITOR="nvim"
 export UPDATE_ZSH_DAYS=7 # Auto update weekly

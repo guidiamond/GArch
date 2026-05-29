@@ -7,6 +7,9 @@ end
 configs.setup({
 	enable = true,
 	ensure_installed = "all", -- one of "all" or a list of languages
+	install = {
+		prefer_git = true,
+	},
 	ignore_install = { "" }, -- List of parsers to ignore installing
 	indent = { enable = true, disable = { "python", "css" } },
 	rainbow = {

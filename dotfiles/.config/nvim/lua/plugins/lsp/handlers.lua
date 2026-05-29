@@ -71,13 +71,14 @@ M.setup = function()
 		},
 	})
 
-	vim.lsp.handlers["textDocument/hover"] = vim.lsp.with(vim.lsp.handlers.hover, {
-		border = "rounded",
-	})
+	-- vim.lsp.with() was deprecated in nvim 0.12; manually merge border config instead
+	vim.lsp.handlers["textDocument/hover"] = function(err, result, ctx, config)
+		return vim.lsp.handlers.hover(err, result, ctx, vim.tbl_deep_extend("force", config or {}, { border = "rounded" }))
+	end
 
-	vim.lsp.handlers["textDocument/signatureHelp"] = vim.lsp.with(vim.lsp.handlers.signature_help, {
-		border = "rounded",
-	})
+	vim.lsp.handlers["textDocument/signatureHelp"] = function(err, result, ctx, config)
+		return vim.lsp.handlers.signature_help(err, result, ctx, vim.tbl_deep_extend("force", config or {}, { border = "rounded" }))
+	end
 
 	-- LspAttach autocmd (replaces the old on_attach callback)
 	vim.api.nvim_create_autocmd("LspAttach", {
@@ -88,7 +89,7 @@ M.setup = function()
 			lsp_keymaps(bufnr)
 
 			-- Format on save
-			if client and client.supports_method("textDocument/formatting") then
+			if client and client:supports_method("textDocument/formatting") then
 				vim.api.nvim_clear_autocmds({ group = format_augroup, buffer = bufnr })
 				vim.api.nvim_create_autocmd("BufWritePre", {
 					group = format_augroup,
@@ -136,7 +137,12 @@ M.setup = function()
 			if not status_ok then
 				return
 			end
+			-- vim-illuminate uses deprecated client.supports_method (dot syntax)
+			-- suppress the warning until the plugin is updated upstream
+			local orig_deprecate = vim.deprecate
+			vim.deprecate = function() end
 			illuminate.on_attach(client)
+			vim.deprecate = orig_deprecate
 		end,
 	})
 end

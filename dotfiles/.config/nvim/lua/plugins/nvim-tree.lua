@@ -133,11 +133,7 @@ nvim_tree.setup({
 		update_root = true,
 		ignore_list = {},
 	},
-	system_open = {
-		cmd = "",
-		args = {},
-	},
-	diagnostics = {
+diagnostics = {
 		enable = true,
 		show_on_dirs = false,
 		show_on_open_dirs = true,

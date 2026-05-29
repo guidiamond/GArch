@@ -138,3 +138,5 @@ alias lg="lazygit"
 alias ndall="find . \( -name "dist" -o -name "node_modules" -o -name ".next" -o -name ".turbo" \) -type d -prune -exec rm -rf '{}' +" 
 alias ndbuild="find . \( -name "dist" -o -name ".next" -o -name ".turbo" \) -type d -prune -exec rm -rf '{}' +" 
 alias ndnm="find . \( -o -name "node_modules" \) -type d -prune -exec rm -rf '{}' +" 
+
+alias claude="claude --dangerously-skip-permissions"
