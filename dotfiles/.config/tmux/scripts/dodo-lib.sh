@@ -191,3 +191,18 @@ open_worktree_session() {
   start_backend="${servers%% *}"; start_frontend="${servers##* }"
   _create_session "$name" "$path" "$workflow_id" "$prod_db" "$start_backend" "$start_frontend"
 }
+
+# _render_row <name> <claude_working> <claude_live> <state> <ci> <threads>
+# One visible line: "<claude> <state> <name>  <ci> [💬N]".
+_render_row() {
+  local name="$1" cw="$2" cl="$3" state="$4" ci="$5" threads="${6:-0}"
+  local badges
+  badges="$(_ci_glyph "$ci")"
+  if [[ -n "$threads" && "$threads" -gt 0 ]] 2>/dev/null; then
+    badges="$badges 💬$threads"
+  fi
+  printf '%s %s %s  %s' "$(_claude_glyph "$cw" "$cl")" "$(_state_glyph "$state")" "$name" "$badges"
+}
+
+# _name_from_row <row> — worktree name is the 3rd whitespace token.
+_name_from_row() { awk '{print $3}' <<<"$1"; }

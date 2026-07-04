@@ -54,6 +54,15 @@ assert_eq "$(_cache_get eng-4308-create-abandoned-cart ci)" "failing" "cache_get
 assert_eq "$(_cache_get eng-4308-create-abandoned-cart unresolved_threads)" "2" "cache_get threads"
 assert_eq "$(_cache_get does-not-exist pr_state)" "" "cache_get missing branch = empty"
 
+# --- _render_row <name> <claude_working> <claude_live> <state> <ci> <threads> ---
+row=$(_render_row "eng-4308" yes yes review failing 2)
+assert_eq "$row" "⚙ 👀 eng-4308  ❌ 💬2" "render active review failing w/ threads"
+row=$(_render_row "foo" no no untracked none 0)
+assert_eq "$row" "💤 ◽ foo  ─" "render dead untracked no threads"
+
+# --- _name_from_row: name is token 3 ---
+assert_eq "$(_name_from_row "⚙ 👀 eng-4308  ❌ 💬2")" "eng-4308" "name_from_row extracts name"
+
 printf '\n%s\n' "----"
 if [[ "$fails" -gt 0 ]]; then printf '%d test(s) failed\n' "$fails"; exit 1; fi
 printf 'all passed\n'
