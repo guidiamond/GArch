@@ -238,7 +238,7 @@ _run_fzf() {
 
   # Auto-refresh interval (seconds). Set DODO_REFRESH_SECS=off (or 0) to disable
   # live updates entirely and only refresh on keypress (^r) or view change.
-  local interval="${DODO_REFRESH_SECS:-3}"
+  local interval="${DODO_REFRESH_SECS:-30}"
   local pf lf; pf="$(mktemp)"; lf="$(mktemp)"
   local refresher=""
   if [[ "$interval" != "off" && "$interval" != "0" ]]; then
