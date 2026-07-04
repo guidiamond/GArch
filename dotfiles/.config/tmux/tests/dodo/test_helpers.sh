@@ -63,6 +63,13 @@ assert_eq "$row" "💤 ◽ foo  ─" "render dead untracked no threads"
 # --- _name_from_row: name is token 3 ---
 assert_eq "$(_name_from_row "⚙ 👀 eng-4308  ❌ 💬2")" "eng-4308" "name_from_row extracts name"
 
+# --- regression: empty/unknown state glyph must be VISIBLE (non-space) so that
+# positional name parsing (_name_from_row = token 3) stays correct for browse-all
+# rows where the branch state is unknown. ---
+assert_eq "$(_state_glyph "")"        "·" "state glyph empty = visible dot"
+assert_eq "$(_state_glyph whatever)"  "·" "state glyph unknown = visible dot"
+assert_eq "$(_name_from_row "$(_render_row browse-me no no "" none 0)")" "browse-me" "name_from_row survives empty state"
+
 printf '\n%s\n' "----"
 if [[ "$fails" -gt 0 ]]; then printf '%d test(s) failed\n' "$fails"; exit 1; fi
 printf 'all passed\n'

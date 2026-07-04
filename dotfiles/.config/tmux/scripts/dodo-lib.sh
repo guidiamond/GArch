@@ -28,7 +28,7 @@ _state_glyph() {
     tracked)   printf '⬆' ;;
     review)    printf '👀' ;;
     merged)    printf '🟢' ;;
-    *)         printf ' ' ;;
+    *)         printf '·' ;;
   esac
 }
 
