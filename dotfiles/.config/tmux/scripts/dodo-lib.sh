@@ -13,6 +13,12 @@ WORKFLOW_LOG="${WORKFLOW_LOG:-$WORKFLOW_DIR/workflows.jsonl}"
 GH_CACHE="${GH_CACHE:-$WORKFLOW_DIR/gh-cache.json}"
 LAST_OPENED_DIR="${LAST_OPENED_DIR:-$WORKFLOW_DIR/last-opened}"
 
+# Directory of this library, so we can locate sibling scripts (the sidebar) no
+# matter who sources us. The sidebar is embedded as a left pane in each agent.
+DODO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DODO_SIDEBAR="${DODO_SIDEBAR:-$DODO_LIB_DIR/dodo-sidebar.sh}"
+DODO_SIDEBAR_WIDTH="${DODO_SIDEBAR_WIDTH:-46}"
+
 # --- Pure presentation helpers ---
 
 # _claude_glyph <working:yes|no> <live:yes|no>
@@ -126,8 +132,15 @@ _create_session() {
   tmux set-environment -t "$session_name" DODO_WORKTREE_PATH "$worktree_path"
 
   tmux rename-window -t "$session_name:1" "claude"
-  tmux send-keys -t "$session_name:1" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
-  tmux send-keys -t "$session_name:1" "claude --dangerously-skip-permissions" C-m
+  # Pin the always-visible agent sidebar to the LEFT of the claude window, then
+  # run claude in the (now right-hand) original pane and focus it.
+  local claude_pane
+  claude_pane=$(tmux list-panes -t "$session_name:1" -F '#{pane_id}' | head -1)
+  tmux split-window -h -b -l "$DODO_SIDEBAR_WIDTH" -t "$claude_pane" -c "$worktree_path" \
+    "exec $DODO_SIDEBAR --pane"
+  tmux send-keys -t "$claude_pane" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
+  tmux send-keys -t "$claude_pane" "claude --dangerously-skip-permissions" C-m
+  tmux select-pane -t "$claude_pane"
 
   local ready_file="/tmp/dodo-ready-${session_name}"
   rm -f "$ready_file"

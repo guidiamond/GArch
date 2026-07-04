@@ -1,24 +1,16 @@
 #!/usr/bin/env bash
-# dodo-dashboard.sh — create-or-toggle the persistent 'dodo' sidebar session.
+# dodo-dashboard.sh — prefix+a launcher.
+# The sidebar lives embedded in each agent's claude window (added by
+# _create_session). This launcher is how you summon the list from ANYWHERE
+# (including editor/server windows that have no embedded sidebar) to jump to or
+# create an agent. It also makes sure the GitHub status daemon is running.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck disable=SC1091
-source "$HERE/dodo-lib.sh"
-
-SESSION="dodo"
 
 # Ensure the GH daemon loop is running (single instance via its own flock; the
-# loop performs its first poll immediately on start). Fully detached so it never
-# blocks this keybind.
+# loop polls immediately on start). Fully detached so it never blocks the keybind.
 setsid "$HERE/dodo-gh-daemon.sh" >/dev/null 2>&1 < /dev/null &
 
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  tmux switch-client -t "$SESSION"
-  exit 0
-fi
-
-# Create the dashboard: one window running the sidebar UI.
-tmux new-session -d -s "$SESSION" -c "$DODO_DIR" -n agents
-tmux send-keys -t "$SESSION:agents" "exec $HERE/dodo-sidebar.sh" C-m
-tmux switch-client -t "$SESSION"
+# Open the sidebar as a centered popup launcher.
+tmux display-popup -E -w 75% -h 75% "exec $HERE/dodo-sidebar.sh --popup"

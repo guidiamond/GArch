@@ -225,39 +225,64 @@ _current() {
   case "$v" in all) _list_all ;; *) _list ;; esac
 }
 
-_ui() {
-  local port="${DODO_FZF_PORT:-6277}"
+# _run_fzf <mode>   mode: pane (embedded, narrow, list-only) | popup (launcher w/ preview)
+#
+# Both use `--listen 0` so each instance gets its own auto-assigned port — this
+# lets many agent sidebars run at once without colliding. A background loop reads
+# that port (written by the fzf `start` binding) and reloads the current view
+# every 3s while in the default list view (never on a timer in browse-all).
+_run_fzf() {
+  local mode="$1"
   mkdir -p "$WORKFLOW_DIR"
-  echo list > "$VIEW_FILE"   # always start in the default view
+  echo list > "$VIEW_FILE"
 
-  # Background refresher: only auto-reload while in the default (list) view, so
-  # browse-all stays a stable snapshot and we never reload 180 rows on a timer.
-  ( while sleep 3; do
+  local pf; pf="$(mktemp)"
+  ( for _ in $(seq 1 50); do [[ -s "$pf" ]] && break; sleep 0.1; done
+    local port; port="$(cat "$pf" 2>/dev/null)"; [[ -z "$port" ]] && exit 0
+    while sleep 3; do
       [[ "$(cat "$VIEW_FILE" 2>/dev/null || echo list)" == "list" ]] || continue
-      curl -s -XPOST "localhost:$port" -d "reload($HERE/dodo-sidebar.sh --current)" >/dev/null 2>&1 || true
+      curl -s -XPOST "localhost:$port" -d "reload($HERE/dodo-sidebar.sh --current)" >/dev/null 2>&1 || break
     done ) &
   local refresher=$!
   # shellcheck disable=SC2064
-  trap "kill $refresher 2>/dev/null || true" EXIT
+  trap "kill $refresher 2>/dev/null || true; rm -f '$pf'" EXIT
 
-  "$HERE/dodo-sidebar.sh" --list | fzf --ansi \
-    --listen "$port" \
-    --track \
-    --header $'  🐦 dodo agents\n  ↵ open · ^n new · ^x rm · ^r sync · / browse all · esc back\n  🔔 input · ⚙ working · 💤 off  ·  ◽⬆👀🟢 state  ·  ✅❌🟡 ci · 💬 threads\n' \
-    --header-first \
-    --prompt '  ❯ ' \
-    --no-sort --no-multi --reverse \
-    --border rounded --border-label ' 🐦 dodo ' --padding 1 \
-    --color='header:italic:blue,border:blue,label:blue' \
-    --preview "$HERE/dodo-sidebar.sh --preview {}" \
-    --preview-window 'right:70%:wrap' \
-    --bind "enter:execute($HERE/dodo-sidebar.sh --open {})" \
-    --bind "ctrl-n:execute($HERE/dodo-sidebar.sh --new)+reload($HERE/dodo-sidebar.sh --current)" \
-    --bind "ctrl-x:execute-silent($HERE/dodo-sidebar.sh --remove {})+reload($HERE/dodo-sidebar.sh --current)" \
-    --bind "ctrl-r:execute-silent($HERE/dodo-sidebar.sh --refresh-row {})+reload($HERE/dodo-sidebar.sh --current)" \
-    --bind "/:execute-silent(echo all > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list-all)" \
-    --bind "esc:execute-silent(echo list > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list)" \
-    || true
+  local -a args=(
+    --ansi --listen 0 --track --no-sort --no-multi --reverse
+    --border rounded --border-label ' 🐦 dodo '
+    --color='header:italic:blue,border:blue,label:blue'
+    --bind "start:execute-silent(echo \$FZF_PORT > '$pf')"
+    --bind "ctrl-n:execute($HERE/dodo-sidebar.sh --new)+reload($HERE/dodo-sidebar.sh --current)"
+    --bind "ctrl-x:execute-silent($HERE/dodo-sidebar.sh --remove {})+reload($HERE/dodo-sidebar.sh --current)"
+    --bind "ctrl-r:execute-silent($HERE/dodo-sidebar.sh --refresh-row {})+reload($HERE/dodo-sidebar.sh --current)"
+    --bind "/:execute-silent(echo all > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list-all)"
+    --bind "esc:execute-silent(echo list > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list)"
+  )
+
+  if [[ "$mode" == "pane" ]]; then
+    # Narrow, embedded to the left of an agent's claude window. No inline preview
+    # (too little room); full detail on demand via ^p in a popup. Enter switches
+    # to the selected agent — whose own claude window also carries this sidebar.
+    args+=(
+      --prompt '❯ '
+      --header $'🐦 agents\n↵ go · ^n new · ^x rm\n^r sync · / all · ^p info'
+      --header-first
+      --bind "enter:execute($HERE/dodo-sidebar.sh --open {})"
+      --bind "ctrl-p:execute(tmux display-popup -E -w 80% -h 80% \"$HERE/dodo-sidebar.sh --preview-popup {}\")"
+    )
+  else
+    # Launcher popup (prefix+a from anywhere): list + preview; enter opens and closes.
+    args+=(
+      --prompt '  ❯ '
+      --header $'  🐦 dodo agents\n  ↵ open · ^n new · ^x rm · ^r sync · / browse all · esc back\n  🔔 input · ⚙ working · 💤 off  ·  ◽⬆👀🟢 state  ·  ✅❌🟡 ci · 💬 threads\n'
+      --header-first --padding 1
+      --preview "$HERE/dodo-sidebar.sh --preview {}"
+      --preview-window 'right:60%:wrap'
+      --bind "enter:execute($HERE/dodo-sidebar.sh --open {})+accept"
+    )
+  fi
+
+  "$HERE/dodo-sidebar.sh" --list | fzf "${args[@]}" || true
 }
 
 case "${1:-}" in
@@ -265,10 +290,12 @@ case "${1:-}" in
   --list-all)  _list_all ;;
   --name-from) shift; _name_from_row "$*" ;;
   --preview)   shift; _preview "$*" ;;
+  --preview-popup) shift; _preview "$*"; printf '\n  (press any key to close)'; read -rsn1 ;;
   --open)      shift; _open "$*" ;;
   --refresh-row) shift; _refresh_row "$*" ;;
   --new)       _new ;;
   --remove)    shift; _remove "$*" ;;
   --current)   _current ;;
-  ""|--ui)     _ui ;;
+  --pane)      _run_fzf pane ;;
+  --popup|--ui|"") _run_fzf popup ;;
 esac

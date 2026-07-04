@@ -2,13 +2,24 @@
 
 Conductor-style tmux sidebar for managing Claude agents across `~/dodo/master` worktrees.
 
+## Model
+The sidebar is a **persistent left pane pinned to each agent's `claude` window**
+(added automatically when the agent's session is created). So while you work in
+an agent, the live list of all agents is always on the left. Selecting another
+agent switches to it — and its `claude` window carries the same sidebar.
+
+`prefix + a` opens the sidebar as a **popup launcher** from anywhere (including
+editor/server windows that have no embedded sidebar), to jump to or create an
+agent. It also ensures the GitHub status daemon is running.
+
 ## Use
-- `prefix + a` — open / return to the `dodo` dashboard sidebar (persistent session).
-- In the sidebar:
-  - `↵` open/attach the agent (asks dev-server questions if it isn't open yet)
+- `prefix + a` — summon the launcher popup from any window.
+- In the sidebar (embedded pane or popup):
+  - `↵` go to / open the agent (asks dev-server questions if it isn't open yet)
   - `^n` new worktree · `^x` remove · `^r` refresh GitHub status for the row
   - `/` browse all worktrees · `esc` back to active+recent
-  - type to filter
+  - `^p` full detail popup (embedded pane) · type to filter
+- Width of the embedded pane: `DODO_SIDEBAR_WIDTH` (default 46).
 
 ## Legend
 - Claude: 🔔 needs input · ⚙ working · 💤 no session
