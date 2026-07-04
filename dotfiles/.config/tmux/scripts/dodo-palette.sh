@@ -17,15 +17,12 @@ LAST_OPENED_DIR="$WORKFLOW_DIR/last-opened"
 SORT_STATE_FILE="$WORKFLOW_DIR/.worktree-sort-mode"
 SCRIPT_PATH="$(readlink -f "$0" 2>/dev/null || echo "$0")"
 
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dodo-lib.sh"
+
 mkdir -p "$WORKFLOW_DIR" "$LAST_OPENED_DIR"
 
 # ─── Worktree metadata helpers ──────────────────────────────────────────────
-
-_mark_opened() {
-  local name="$1"
-  mkdir -p "$LAST_OPENED_DIR"
-  touch "$LAST_OPENED_DIR/$name"
-}
 
 _last_opened_ts() {
   local name="$1"
@@ -651,7 +648,15 @@ new_dodo_worktree() {
     workflow_id="wf-$(date +%s)-$$"
   fi
 
-  local session_name="$ticket"
+  # gw names the worktree folder after the LAST path segment of the branch
+  # (it strips any "feature/" prefix). The tmux session — and every later
+  # has-session / _mark_opened lookup, including "Open Existing Worktree" —
+  # keys off that folder name, so derive the session name identically. Using
+  # the raw ticket left a "/" in the name, which made _mark_opened's
+  # `touch "$LAST_OPENED_DIR/<name>"` fail on a nonexistent nested dir and,
+  # under `set -e`, abort the palette before the session was ever created.
+  local session_name
+  session_name="$(basename "$worktree_path")"
 
   # ── Create tmux session in the worktree ──
   if tmux has-session -t "$session_name" 2>/dev/null; then
@@ -763,65 +768,6 @@ open_existing_worktree() {
   fi
 
   _create_session "$wt_name" "$wt_path" "$workflow_id" "$prod_db" "$start_backend" "$start_frontend"
-}
-
-# ─── Helper: Create tmux session in a worktree ──────────────────────────────
-
-_create_session() {
-  local session_name="$1"
-  local worktree_path="$2"
-  local workflow_id="$3"
-  local prod_db="${4:-false}"
-  local start_backend="${5:-true}"
-  local start_frontend="${6:-true}"
-
-  _mark_opened "$session_name"
-
-  tmux new-session -d -s "$session_name" -c "$worktree_path"
-  tmux set-environment -t "$session_name" DODO_WORKFLOW_ID "$workflow_id"
-  tmux set-environment -t "$session_name" DODO_WORKTREE_PATH "$worktree_path"
-
-  # Window 1 — Claude
-  tmux rename-window -t "$session_name:1" "claude"
-  tmux send-keys -t "$session_name:1" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
-  tmux send-keys -t "$session_name:1" "claude --dangerously-skip-permissions" C-m
-
-  # Sentinel file: servers wait for build to finish before starting
-  local ready_file="/tmp/dodo-ready-${session_name}"
-  rm -f "$ready_file"
-
-  # Window 2 — nvim (editor + build)
-  tmux new-window -t "$session_name:2" -n "editor" -c "$worktree_path"
-  tmux send-keys -t "$session_name:2" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
-  tmux send-keys -t "$session_name:2" "pnpm i && pnpm build:packages && touch '$ready_file' && nvim" C-m
-
-  # Resolve prod DB URL if needed
-  local db_prefix=""
-  if [[ "$prod_db" == "True" || "$prod_db" == true ]]; then
-    local prod_url
-    prod_url=$(grep '^DATABASE_URL=' "$DODO_DIR/.env.production" | head -1 | cut -d= -f2-)
-    prod_url="${prod_url%\"}"
-    prod_url="${prod_url#\"}"
-    db_prefix="DATABASE_URL=\"$prod_url\" "
-  fi
-
-  local wait_cmd="echo 'Waiting for pnpm build to finish...' && while [ ! -f '$ready_file' ]; do sleep 1; done"
-
-  # Window 3 — Backend server (only if requested)
-  if [[ "$start_backend" == true ]]; then
-    tmux new-window -t "$session_name" -n "backend" -c "$worktree_path"
-    tmux send-keys -t "$session_name:backend" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
-    tmux send-keys -t "$session_name:backend" "$wait_cmd && ${db_prefix}pnpm dev:backend" C-m
-  fi
-
-  # Window 4 — Frontend server (only if requested)
-  if [[ "$start_frontend" == true ]]; then
-    tmux new-window -t "$session_name" -n "frontend" -c "$worktree_path"
-    tmux send-keys -t "$session_name:frontend" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
-    tmux send-keys -t "$session_name:frontend" "$wait_cmd && ${db_prefix}pnpm dev:frontend" C-m
-  fi
-
-  tmux switch-client -t "$session_name:1"
 }
 
 # ─── Entry Point ─────────────────────────────────────────────────────────────
