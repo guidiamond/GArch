@@ -12,6 +12,7 @@ source "$HERE/dodo-lib.sh"
 
 POLL_SECONDS="${DODO_POLL_SECONDS:-600}"
 LOCKFILE="$WORKFLOW_DIR/.gh-daemon.lock"
+WRITELOCK="$WORKFLOW_DIR/.gh-cache.writelock"
 mkdir -p "$WORKFLOW_DIR"
 
 # --- worktree path -> branch map (single git call) ---
@@ -77,10 +78,14 @@ _refresh_branch() {
     fi
   fi
 
-  # Merge this entry into the cache atomically.
+  # Merge this entry into the cache. The temp file is created NEXT TO the target
+  # (same filesystem) so `mv` is a truly atomic rename; a write lock serializes
+  # concurrent writers (the loop daemon and an on-demand --refresh).
   local now tmp
   now=$(date -Iseconds)
-  tmp=$(mktemp)
+  exec 8>"$WRITELOCK"
+  flock 8
+  tmp=$(mktemp "$(dirname "$GH_CACHE")/.gh-cache.XXXXXX")
   [[ -f "$GH_CACHE" ]] || echo '{}' > "$GH_CACHE"
   jq --arg b "$branch" --arg now "$now" --arg prs "$pr_state" \
      --argjson prn "${pr_number:-0}" --arg url "$pr_url" \
@@ -89,6 +94,7 @@ _refresh_branch() {
      '.[$b] = {updated_at:$now, pr_state:$prs, pr_number:$prn, pr_url:$url,
                ci:$ci, ci_detail:$cid, unresolved_threads:$th, has_remote:$hr}' \
      "$GH_CACHE" > "$tmp" 2>/dev/null && mv "$tmp" "$GH_CACHE" || rm -f "$tmp"
+  flock -u 8
 }
 
 _pass() {
@@ -106,10 +112,12 @@ case "${1:-}" in
   --once)
     _pass ;;
   --refresh)
+    arg="${2:-}"
+    [[ -z "$arg" ]] && { echo "usage: --refresh <branch-or-worktree-name>" >&2; exit 0; }
     _load_branch_map
     # arg may be a branch or a worktree name
-    b="$2"
-    [[ -n "${WT_BRANCH[$WORKTREES_DIR/$2]:-}" ]] && b="${WT_BRANCH[$WORKTREES_DIR/$2]}"
+    b="$arg"
+    [[ -n "${WT_BRANCH[$WORKTREES_DIR/$arg]:-}" ]] && b="${WT_BRANCH[$WORKTREES_DIR/$arg]}"
     _refresh_branch "$b" ;;
   *)
     # Long-running loop, single instance via flock.
