@@ -187,9 +187,88 @@ _preview() {
   fi
 }
 
+# Enter: open/attach the selected worktree (asks dev-server questions if new).
+_open() {
+  local name; name="$(_name_from_row "$*")"
+  [[ -z "$name" ]] && return 0
+  open_worktree_session "$name" "$WORKTREES_DIR/$name"
+}
+
+# ^r: force-refresh gh cache for the selected row's branch, synchronously.
+_refresh_row() {
+  local name; name="$(_name_from_row "$*")"
+  [[ -z "$name" ]] && return 0
+  "$HERE/dodo-gh-daemon.sh" --refresh "$name" >/dev/null 2>&1 || true
+}
+
+# ^n: new worktree via the palette (choose "New Dodo Worktree").
+# Runs under fzf's `execute` binding, which grants a real tty — so do NOT
+# redirect its output or the palette's own fzf UI breaks.
+_new() {
+  "$HERE/dodo-palette.sh" || true
+}
+
+# ^x: remove the selected worktree if safe (delegates to gw; git refuses dirty).
+_remove() {
+  local name; name="$(_name_from_row "$*")"
+  [[ -z "$name" ]] && return 0
+  tmux has-session -t "$name" 2>/dev/null && return 0   # never remove an open agent
+  (cd "$DODO_DIR" && "$GW" delete "$name" >/dev/null 2>&1) || true
+  rm -f "$LAST_OPENED_DIR/$name" 2>/dev/null || true
+}
+
+VIEW_FILE="$WORKFLOW_DIR/.sidebar-view"
+
+# --current: render whichever view is active (default list vs browse-all).
+_current() {
+  local v="list"; [[ -f "$VIEW_FILE" ]] && v="$(cat "$VIEW_FILE" 2>/dev/null || echo list)"
+  case "$v" in all) _list_all ;; *) _list ;; esac
+}
+
+_ui() {
+  local port="${DODO_FZF_PORT:-6277}"
+  mkdir -p "$WORKFLOW_DIR"
+  echo list > "$VIEW_FILE"   # always start in the default view
+
+  # Background refresher: only auto-reload while in the default (list) view, so
+  # browse-all stays a stable snapshot and we never reload 180 rows on a timer.
+  ( while sleep 3; do
+      [[ "$(cat "$VIEW_FILE" 2>/dev/null || echo list)" == "list" ]] || continue
+      curl -s -XPOST "localhost:$port" -d "reload($HERE/dodo-sidebar.sh --current)" >/dev/null 2>&1 || true
+    done ) &
+  local refresher=$!
+  # shellcheck disable=SC2064
+  trap "kill $refresher 2>/dev/null || true" EXIT
+
+  "$HERE/dodo-sidebar.sh" --list | fzf --ansi \
+    --listen "$port" \
+    --track \
+    --header $'  🐦 dodo agents\n  ↵ open · ^n new · ^x rm · ^r sync · / browse all · esc back\n  🔔 input · ⚙ working · 💤 off  ·  ◽⬆👀🟢 state  ·  ✅❌🟡 ci · 💬 threads\n' \
+    --header-first \
+    --prompt '  ❯ ' \
+    --no-sort --no-multi --reverse \
+    --border rounded --border-label ' 🐦 dodo ' --padding 1 \
+    --color='header:italic:blue,border:blue,label:blue' \
+    --preview "$HERE/dodo-sidebar.sh --preview {}" \
+    --preview-window 'right:70%:wrap' \
+    --bind "enter:execute($HERE/dodo-sidebar.sh --open {})" \
+    --bind "ctrl-n:execute($HERE/dodo-sidebar.sh --new)+reload($HERE/dodo-sidebar.sh --current)" \
+    --bind "ctrl-x:execute-silent($HERE/dodo-sidebar.sh --remove {})+reload($HERE/dodo-sidebar.sh --current)" \
+    --bind "ctrl-r:execute-silent($HERE/dodo-sidebar.sh --refresh-row {})+reload($HERE/dodo-sidebar.sh --current)" \
+    --bind "/:execute-silent(echo all > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list-all)" \
+    --bind "esc:execute-silent(echo list > '$VIEW_FILE')+reload($HERE/dodo-sidebar.sh --list)" \
+    || true
+}
+
 case "${1:-}" in
   --list)      _list ;;
   --list-all)  _list_all ;;
   --name-from) shift; _name_from_row "$*" ;;
   --preview)   shift; _preview "$*" ;;
+  --open)      shift; _open "$*" ;;
+  --refresh-row) shift; _refresh_row "$*" ;;
+  --new)       _new ;;
+  --remove)    shift; _remove "$*" ;;
+  --current)   _current ;;
+  ""|--ui)     _ui ;;
 esac
