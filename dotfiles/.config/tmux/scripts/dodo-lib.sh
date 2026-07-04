@@ -50,3 +50,31 @@ _classify_branch_state() {
   if [[ "$has_remote" == "yes" ]]; then echo "tracked"; return; fi
   echo "untracked"
 }
+
+# _ci_from_rollup <statusCheckRollup-json-array>
+# Precedence: any running -> running; else any failure -> failing;
+# else if there are checks -> passing; else none.
+_ci_from_rollup() {
+  local json="${1:-[]}"
+  local n running failing
+  n=$(jq 'length' <<<"$json" 2>/dev/null || echo 0)
+  [[ "$n" -eq 0 ]] && { echo "none"; return; }
+  running=$(jq '[.[] | select(
+      (.status? // "" | test("IN_PROGRESS|QUEUED|PENDING|WAITING|REQUESTED"))
+      or (.state? // "" | test("PENDING|EXPECTED"))
+    )] | length' <<<"$json" 2>/dev/null || echo 0)
+  [[ "$running" -gt 0 ]] && { echo "running"; return; }
+  failing=$(jq '[.[] | select(
+      (.conclusion? // "" | test("FAILURE|TIMED_OUT|CANCELLED|ACTION_REQUIRED|STARTUP_FAILURE"))
+      or (.state? // "" | test("FAILURE|ERROR"))
+    )] | length' <<<"$json" 2>/dev/null || echo 0)
+  [[ "$failing" -gt 0 ]] && { echo "failing"; return; }
+  echo "passing"
+}
+
+# _cache_get <branch> <field> — reads GH_CACHE, empty string if absent.
+_cache_get() {
+  [[ -f "$GH_CACHE" ]] || { echo ""; return; }
+  jq -r --arg b "$1" --arg f "$2" '(.[$b][$f]) // "" | if type=="array" then join(",") else . end' \
+    "$GH_CACHE" 2>/dev/null || echo ""
+}

@@ -39,6 +39,21 @@ assert_eq "$(_classify_branch_state no yes OPEN)"  "review"    "classify review"
 assert_eq "$(_classify_branch_state yes yes OPEN)" "merged"    "classify merged wins"
 assert_eq "$(_classify_branch_state no no MERGED)" "merged"    "classify pr merged"
 
+# --- _ci_from_rollup <rollup-json> ---
+assert_eq "$(_ci_from_rollup '[]')" "none" "ci rollup empty=none"
+assert_eq "$(_ci_from_rollup '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]')" "passing" "ci rollup success"
+assert_eq "$(_ci_from_rollup '[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE"}]')" "failing" "ci rollup one failure"
+assert_eq "$(_ci_from_rollup '[{"__typename":"CheckRun","status":"IN_PROGRESS","conclusion":null}]')" "running" "ci rollup in progress"
+assert_eq "$(_ci_from_rollup '[{"__typename":"StatusContext","state":"SUCCESS"}]')" "passing" "ci rollup status context success"
+assert_eq "$(_ci_from_rollup '[{"__typename":"StatusContext","state":"PENDING"}]')" "running" "ci rollup status context pending"
+
+# --- _cache_get <branch> <field> (against fixture) ---
+GH_CACHE="$HERE/fixtures/gh-cache.json"
+assert_eq "$(_cache_get eng-4308-create-abandoned-cart pr_state)" "OPEN" "cache_get pr_state"
+assert_eq "$(_cache_get eng-4308-create-abandoned-cart ci)" "failing" "cache_get ci"
+assert_eq "$(_cache_get eng-4308-create-abandoned-cart unresolved_threads)" "2" "cache_get threads"
+assert_eq "$(_cache_get does-not-exist pr_state)" "" "cache_get missing branch = empty"
+
 printf '\n%s\n' "----"
 if [[ "$fails" -gt 0 ]]; then printf '%d test(s) failed\n' "$fails"; exit 1; fi
 printf 'all passed\n'
