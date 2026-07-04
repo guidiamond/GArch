@@ -112,8 +112,84 @@ _list_all() {
   done
 }
 
+_preview() {
+  local line="$1"
+  local name; name="$(_name_from_row "$line")"
+  [[ -z "$name" ]] && return 0
+  local path="$WORKTREES_DIR/$name"
+  local branch=""
+  [[ -e "$path/.git" ]] && branch=$(git -C "$path" branch --show-current 2>/dev/null || echo "")
+
+  echo "╭─ 🐦 $name ─╮"
+  printf "  🌿 %s\n" "${branch:-—}"
+
+  local pr_state ci ci_detail threads pr_url pr_number updated
+  pr_state="$(_cache_get "$branch" pr_state)"
+  ci="$(_cache_get "$branch" ci)"
+  ci_detail="$(_cache_get "$branch" ci_detail)"
+  threads="$(_cache_get "$branch" unresolved_threads)"
+  pr_url="$(_cache_get "$branch" pr_url)"
+  pr_number="$(_cache_get "$branch" pr_number)"
+  updated="$(_cache_get "$branch" updated_at)"
+
+  # Branch/PR state line
+  local merged="no"
+  if [[ -n "$branch" && "$branch" != master && "$branch" != main ]] \
+     && git -C "$DODO_DIR" merge-base --is-ancestor "$branch" master 2>/dev/null; then
+    merged="yes"
+  fi
+  local has_remote; has_remote="$(_cache_get "$branch" has_remote)"; [[ -z "$has_remote" ]] && has_remote="no"
+  local state; state="$(_classify_branch_state "$merged" "$has_remote" "${pr_state:-none}")"
+  case "$state" in
+    merged)    printf "  🟢 merged into master\n" ;;
+    review)    printf "  👀 In review · PR #%s\n" "${pr_number:-?}" ;;
+    tracked)   printf "  ⬆ tracked (pushed, no PR)\n" ;;
+    untracked) printf "  ◽ untracked (local only)\n" ;;
+  esac
+  [[ -n "$pr_url" ]] && printf "     %s\n" "$pr_url"
+
+  # CI
+  case "$ci" in
+    passing) printf "  ✅ CI passing\n" ;;
+    failing) printf "  ❌ CI failing: %s\n" "${ci_detail:-?}" ;;
+    running) printf "  🟡 CI running\n" ;;
+    *)       : ;;
+  esac
+  [[ -n "$threads" && "$threads" -gt 0 ]] 2>/dev/null && printf "  💬 %s unresolved review thread(s)\n" "$threads"
+  [[ -n "$updated" ]] && printf "  ⏱ gh cache: %s\n" "$updated"
+
+  # Local git state
+  if [[ -e "$path/.git" ]]; then
+    local dirty; dirty=$(git -C "$path" status --porcelain 2>/dev/null || true)
+    if [[ -n "$dirty" ]]; then
+      printf "  📝 dirty · %s file(s)\n" "$(wc -l <<<"$dirty" | tr -d ' ')"
+    else
+      printf "  ✨ clean\n"
+    fi
+    echo ""
+    echo "  📝 recent commits:"
+    git -C "$path" log --oneline -5 2>/dev/null | sed 's/^/    /'
+  fi
+  echo "╰─────────────╯"
+
+  # Live session capture
+  if tmux has-session -t "$name" 2>/dev/null; then
+    echo ""
+    echo "╭─ 📺 live ─╮"
+    local pane_info win_name pane_id
+    for pane_info in $(tmux list-panes -t "$name" -a -F "#{window_name}:#{pane_id}" 2>/dev/null); do
+      win_name="${pane_info%%:*}"; pane_id="${pane_info#*:}"
+      echo "  🪟 $win_name"
+      tmux capture-pane -t "$pane_id" -p 2>/dev/null | tail -12 | sed 's/^/    /'
+      echo ""
+    done
+    echo "╰──────────╯"
+  fi
+}
+
 case "${1:-}" in
   --list)      _list ;;
   --list-all)  _list_all ;;
   --name-from) shift; _name_from_row "$*" ;;
+  --preview)   shift; _preview "$*" ;;
 esac
