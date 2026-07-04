@@ -236,16 +236,29 @@ _run_fzf() {
   mkdir -p "$WORKFLOW_DIR"
   echo list > "$VIEW_FILE"
 
-  local pf; pf="$(mktemp)"
-  ( for _ in $(seq 1 50); do [[ -s "$pf" ]] && break; sleep 0.1; done
-    local port; port="$(cat "$pf" 2>/dev/null)"; [[ -z "$port" ]] && exit 0
-    while sleep 3; do
-      [[ "$(cat "$VIEW_FILE" 2>/dev/null || echo list)" == "list" ]] || continue
-      curl -s -XPOST "localhost:$port" -d "reload($HERE/dodo-sidebar.sh --current)" >/dev/null 2>&1 || break
-    done ) &
-  local refresher=$!
+  # Auto-refresh interval (seconds). Set DODO_REFRESH_SECS=off (or 0) to disable
+  # live updates entirely and only refresh on keypress (^r) or view change.
+  local interval="${DODO_REFRESH_SECS:-3}"
+  local pf lf; pf="$(mktemp)"; lf="$(mktemp)"
+  local refresher=""
+  if [[ "$interval" != "off" && "$interval" != "0" ]]; then
+    # Only pushes a redraw when the list CONTENT actually changed — so the pane
+    # sits still when nothing's happening, and updates the instant a status flips.
+    ( for _ in $(seq 1 50); do [[ -s "$pf" ]] && break; sleep 0.1; done
+      local port; port="$(cat "$pf" 2>/dev/null)"; [[ -z "$port" ]] && exit 0
+      local last="" cur
+      while sleep "$interval"; do
+        [[ "$(cat "$VIEW_FILE" 2>/dev/null || echo list)" == "list" ]] || continue
+        cur="$("$HERE/dodo-sidebar.sh" --list 2>/dev/null)"
+        [[ "$cur" == "$last" ]] && continue          # unchanged → no repaint
+        last="$cur"
+        printf '%s' "$cur" > "$lf"
+        curl -s -XPOST "localhost:$port" -d "reload(cat '$lf')" >/dev/null 2>&1 || break
+      done ) &
+    refresher=$!
+  fi
   # shellcheck disable=SC2064
-  trap "kill $refresher 2>/dev/null || true; rm -f '$pf'" EXIT
+  trap "[[ -n '$refresher' ]] && kill $refresher 2>/dev/null; rm -f '$pf' '$lf'" EXIT
 
   local -a args=(
     --ansi --listen 0 --track --no-sort --no-multi --reverse
