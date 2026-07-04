@@ -177,7 +177,7 @@ _preview() {
     echo ""
     echo "╭─ 📺 live ─╮"
     local pane_info win_name pane_id
-    for pane_info in $(tmux list-panes -t "$name" -a -F "#{window_name}:#{pane_id}" 2>/dev/null); do
+    for pane_info in $(tmux list-panes -s -t "$name" -F "#{window_name}:#{pane_id}" 2>/dev/null); do
       win_name="${pane_info%%:*}"; pane_id="${pane_info#*:}"
       echo "  🪟 $win_name"
       tmux capture-pane -t "$pane_id" -p 2>/dev/null | tail -12 | sed 's/^/    /'
