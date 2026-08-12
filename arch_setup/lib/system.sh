@@ -46,9 +46,20 @@ modules_line() {
     echo "MODULES=(${mods[*]})"
 }
 
-# grub_cmdline_add <file> key=value  -- idempotent, replaces a changed value
+# grub_cmdline_add <file> key=value  -- idempotent, replaces a changed value.
+# Asserts before and verifies after: a silent no-op here means a kernel with no
+# cryptdevice= and a system that will not boot, discovered only at reboot.
 grub_cmdline_add() {
     local file=$1 kv=$2 key=${2%%=*} current new tokens=() t
+
+    # & means "the whole match" in a sed replacement, and | is the delimiter.
+    if [[ "$kv" =~ [\&\|\\] ]]; then
+        error "grub_cmdline_add: '${kv}' contains a sed metacharacter (& | \\)"
+        return 1
+    fi
+
+    grep -qE '^GRUB_CMDLINE_LINUX="[^"]*"[[:space:]]*$' "$file" \
+        || { error "grub_cmdline_add: ${file} has no double-quoted GRUB_CMDLINE_LINUX line"; return 1; }
     current=$(grep -oP '(?<=^GRUB_CMDLINE_LINUX=").*(?="$)' "$file" || echo "")
     read -ra tokens <<< "$current"
     new=()
@@ -58,6 +69,8 @@ grub_cmdline_add() {
     done
     new+=("$kv")
     sed -i "s|^GRUB_CMDLINE_LINUX=\".*\"$|GRUB_CMDLINE_LINUX=\"${new[*]}\"|" "$file"
+    grep -qF -- "$kv" "$file" \
+        || { error "grub_cmdline_add: failed to write '${kv}' to ${file}"; return 1; }
 }
 
 detect_ucode() {

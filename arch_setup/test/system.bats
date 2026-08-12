@@ -87,3 +87,23 @@ setup() {
     run gpu_packages none
     [ -z "$output" ]
 }
+
+@test "grub_cmdline_add fails loudly when the line is absent" {
+    printf 'GRUB_TIMEOUT=5\n' > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
+    [ "$status" -ne 0 ]
+    ! grep -q 'cryptdevice' "$TMP/grub"
+}
+
+@test "grub_cmdline_add fails loudly on a single-quoted line" {
+    printf "GRUB_CMDLINE_LINUX='quiet'\n" > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
+    [ "$status" -ne 0 ]
+}
+
+@test "grub_cmdline_add fails loudly rather than corrupting on a sed metacharacter" {
+    printf 'GRUB_CMDLINE_LINUX="quiet"\n' > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "foo=a&b"
+    [ "$status" -ne 0 ]
+    [ "$(cat "$TMP/grub")" = 'GRUB_CMDLINE_LINUX="quiet"' ]
+}
