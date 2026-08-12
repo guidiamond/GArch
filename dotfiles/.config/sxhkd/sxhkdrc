@@ -200,7 +200,7 @@ super + shift + u
 # key W
 # close and kill
 super + shift + w
-  rambox
+  ferdium
 
 # super + {_,shift + }w*/
 #	  bspc node -{c,k}*/
