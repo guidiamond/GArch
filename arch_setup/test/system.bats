@@ -107,3 +107,27 @@ setup() {
     [ "$status" -ne 0 ]
     [ "$(cat "$TMP/grub")" = 'GRUB_CMDLINE_LINUX="quiet"' ]
 }
+
+# Machine-independent: assert on whichever branch this host lands in, so the
+# test does not silently depend on the developer's own login shell.
+@test "setup_shell --check-only reports without changing anything" {
+    run setup_shell --check-only
+    [ "$status" -eq 0 ]
+    if [ "$(getent passwd "$USER" | cut -d: -f7)" = "/usr/bin/zsh" ]; then
+        [[ "$output" == *"already"* ]]
+    else
+        [[ "$output" == *"would chsh"* ]]
+    fi
+}
+
+@test "needs_grub_install is true when the EFI stub is absent" {
+    run needs_grub_install "$TMP/nonexistent-esp"
+    [ "$status" -eq 0 ]
+}
+
+@test "needs_grub_install is false when the EFI stub exists" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp"
+    [ "$status" -eq 1 ]
+}
