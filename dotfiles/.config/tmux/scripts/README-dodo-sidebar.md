@@ -19,14 +19,19 @@ agent. It also ensures the GitHub status daemon is running.
   - `^n` new worktree · `^x` remove · `^r` refresh GitHub status for the row
   - `/` browse all worktrees · `esc` back to active+recent
   - `^p` full detail popup (embedded pane) · type to filter
-- Width of the embedded pane: `DODO_SIDEBAR_WIDTH` (default 46).
+- Width of the embedded pane: `DODO_SIDEBAR_WIDTH` (default `25%`; accepts a percentage like `25%` or a fixed column count like `46`).
 
 ## Legend
-- Claude: 🔔 needs input · ⚙ working · 💤 no session
-- Branch: ◽ untracked · ⬆ tracked · 👀 in review · 🟢 merged · `·` unknown (browse-all)
-- CI: ✅ pass · ❌ fail · 🟡 running · ─ none · 💬N unresolved review threads
 
-Row format: `<claude> <state> <name>  <ci> [💬N]`. The default view lists ACTIVE
+Glyphs are monochrome Nerd Font icons (Octicons/Codicons/FontAwesome), tinted via
+ANSI so the two status dimensions never read as "which colored circle is which":
+lifecycle uses **git shapes**, CI uses **check/cross/spinner**. Requires a Nerd Font.
+
+- Claude activity: bell `` needs input (magenta) · bolt `` working (yellow) · moon `` no session (dim)
+- Branch lifecycle (git shapes): laptop `` untracked/local (dim) · repo-push `` tracked (blue) · pull-request `` in review (magenta) · git-merge `` merged (green) · dot `` unknown
+- CI: check `` pass (green) · times `` fail (red) · sync `` running (yellow) · `─` none · comment ``N unresolved review threads (cyan)
+
+Row format: `<claude> <state> <name>  <ci> [N]`. The default view lists ACTIVE
 (live tmux sessions) first, then RECENT (last ~15 opened). `/` lists all worktrees
 (local git state only — GitHub badges are omitted there for speed).
 

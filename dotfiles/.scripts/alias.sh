@@ -133,6 +133,7 @@ copy_from_coletivas_gd() {
 
 
 alias lg="lazygit"
+alias prlink='gh pr view --json url -q .url'
 
 # Node modules cleanup (n<command>)
 alias ndall="find . \( -name "dist" -o -name "node_modules" -o -name ".next" -o -name ".turbo" \) -type d -prune -exec rm -rf '{}' +" 

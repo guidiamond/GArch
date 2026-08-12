@@ -133,11 +133,12 @@ super + Delete
 super + shift + b
   ~/.config/eww/scripts/toggle_bar_position.sh
 # key C
+# copy Claude Code's last reply to the clipboard
 # focus the next/previous node in the current desktop
 super + c
   rofi-calc-clipboard
-super + {_,shift + }c
-  bspc node -f {next,prev}.local
+#super + {_,shift + }c
+#  bspc node -f {next,prev}.local
 
 super + {_,shift + }c
 	bspc node -f {next,prev}.local
@@ -238,8 +239,8 @@ super + x
 super + y
 	bspc node newest.marked.local -n newest.!automatic.local
 # key Z
-super + ctrl + {m,x,y,z}
-	bspc node -g {marked,locked,sticky,private}
+#super + ctrl + {m,x,y,z}
+#	bspc node -g {marked,locked,sticky,private}
 super + z
   bspc node -g hidden=on
 super + shift +  z
@@ -247,3 +248,10 @@ super + shift +  z
 # }}}
 
 # vim:foldmethod=marker:foldlevel=0
+
+
+
+
+
+super + shift + k
+	claude-copy-last

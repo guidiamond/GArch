@@ -226,14 +226,11 @@ lazy.setup({
 			"saadparwaiz1/cmp_luasnip", -- Snippet completions
 		},
 	}, -- Completion Plugin
-	-- WORDAROUND UNTIL LAZY NVIM FIXES MASON's NEW VERSION (https://github.com/LazyVim/LazyVim/issues/6039#issuecomment-2856227817)
 	{
 		"mason-org/mason.nvim",
-		version = "^1.0.0",
 	},
 	{
 		"mason-org/mason-lspconfig.nvim",
-		version = "^1.0.0",
 	},
 	{
 		"neovim/nvim-lspconfig",
@@ -241,7 +238,6 @@ lazy.setup({
 		dependencies = {
 			-- "williamboman/mason.nvim", -- Simple to use language server installer
 			-- "williamboman/mason-lspconfig.nvim", -- Bridges mason.nvim with the lspconfig plugin
-			"williamboman/nvim-lsp-installer", -- LSP installer
 			"nvimtools/none-ls.nvim", -- Formatters and linters
 		},
 	}, -- Enable LSP (collection of lsp configs)
@@ -261,6 +257,8 @@ lazy.setup({
 	},
 	{
 		"nvim-treesitter/nvim-treesitter", -- Syntax highlighting
+		lazy = false, -- The `main` branch does not support lazy-loading
+		build = ":TSUpdate", -- Parsers are pinned per-plugin-version and must be kept in sync
 		dependencies = {
 			-- "p00f/nvim-ts-rainbow", -- Rainbow parentheses for neovim using treesitter
 			"JoosepAlviste/nvim-ts-context-commentstring", -- Make comments based on the cursor location in the file using treesitter
@@ -309,4 +307,6 @@ lazy.setup({
 	-- Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
 	-- Plug 'rrethy/vim-hexokinnamee', { 'do': 'make hexokinase' } " Color visualizer
 	-- use({ "christoomey/vim-tmux-navigator" }) -- Tmux integration
+}, {
+	rocks = { hererocks = false }, -- Use system luarocks (pacman) instead of hererocks
 })

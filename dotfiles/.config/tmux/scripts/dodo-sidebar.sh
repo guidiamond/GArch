@@ -121,7 +121,7 @@ _preview() {
   [[ -e "$path/.git" ]] && branch=$(git -C "$path" branch --show-current 2>/dev/null || echo "")
 
   echo "╭─ 🐦 $name ─╮"
-  printf "  🌿 %s\n" "${branch:-—}"
+  printf "  \033[32m\uf418\033[0m %s\n" "${branch:-—}"
 
   local pr_state ci ci_detail threads pr_url pr_number updated
   pr_state="$(_cache_get "$branch" pr_state)"
@@ -141,33 +141,33 @@ _preview() {
   local has_remote; has_remote="$(_cache_get "$branch" has_remote)"; [[ -z "$has_remote" ]] && has_remote="no"
   local state; state="$(_classify_branch_state "$merged" "$has_remote" "${pr_state:-none}")"
   case "$state" in
-    merged)    printf "  🟢 merged into master\n" ;;
-    review)    printf "  👀 In review · PR #%s\n" "${pr_number:-?}" ;;
-    tracked)   printf "  ⬆ tracked (pushed, no PR)\n" ;;
-    untracked) printf "  ◽ untracked (local only)\n" ;;
+    merged)    printf "  \033[32m\uf419\033[0m merged into master\n" ;;
+    review)    printf "  \033[35m\uf407\033[0m In review · PR #%s\n" "${pr_number:-?}" ;;
+    tracked)   printf "  \033[34m\uf408\033[0m tracked (pushed, no PR)\n" ;;
+    untracked) printf "  \033[90m\uf109\033[0m untracked (local only)\n" ;;
   esac
   [[ -n "$pr_url" ]] && printf "     %s\n" "$pr_url"
 
   # CI
   case "$ci" in
-    passing) printf "  ✅ CI passing\n" ;;
-    failing) printf "  ❌ CI failing: %s\n" "${ci_detail:-?}" ;;
-    running) printf "  🟡 CI running\n" ;;
+    passing) printf "  \033[32m\uf00c\033[0m CI passing\n" ;;
+    failing) printf "  \033[31m\uf00d\033[0m CI failing: %s\n" "${ci_detail:-?}" ;;
+    running) printf "  \033[33m\uea77\033[0m CI running\n" ;;
     *)       : ;;
   esac
-  [[ -n "$threads" && "$threads" -gt 0 ]] 2>/dev/null && printf "  💬 %s unresolved review thread(s)\n" "$threads"
-  [[ -n "$updated" ]] && printf "  ⏱ gh cache: %s\n" "$updated"
+  [[ -n "$threads" && "$threads" -gt 0 ]] 2>/dev/null && printf "  \033[36m\uf075\033[0m %s unresolved review thread(s)\n" "$threads"
+  [[ -n "$updated" ]] && printf "  \033[90m\uf017\033[0m gh cache: %s\n" "$updated"
 
   # Local git state
   if [[ -e "$path/.git" ]]; then
     local dirty; dirty=$(git -C "$path" status --porcelain 2>/dev/null || true)
     if [[ -n "$dirty" ]]; then
-      printf "  📝 dirty · %s file(s)\n" "$(wc -l <<<"$dirty" | tr -d ' ')"
+      printf "  \033[33m\uf040\033[0m dirty · %s file(s)\n" "$(wc -l <<<"$dirty" | tr -d ' ')"
     else
-      printf "  ✨ clean\n"
+      printf "  \033[32m\uf42e\033[0m clean\n"
     fi
     echo ""
-    echo "  📝 recent commits:"
+    printf "  \033[90m\uf417\033[0m recent commits:\n"
     git -C "$path" log --oneline -5 2>/dev/null | sed 's/^/    /'
   fi
   echo "╰─────────────╯"
@@ -175,11 +175,11 @@ _preview() {
   # Live session capture
   if tmux has-session -t "$name" 2>/dev/null; then
     echo ""
-    echo "╭─ 📺 live ─╮"
+    printf "╭─ \033[34m\uf108\033[0m live ─╮\n"
     local pane_info win_name pane_id
     for pane_info in $(tmux list-panes -s -t "$name" -F "#{window_name}:#{pane_id}" 2>/dev/null); do
       win_name="${pane_info%%:*}"; pane_id="${pane_info#*:}"
-      echo "  🪟 $win_name"
+      printf "  \033[34m\ueb03\033[0m %s\n" "$win_name"
       tmux capture-pane -t "$pane_id" -p 2>/dev/null | tail -12 | sed 's/^/    /'
       echo ""
     done
@@ -287,7 +287,7 @@ _run_fzf() {
     # Launcher popup (prefix+a from anywhere): list + preview; enter opens and closes.
     args+=(
       --prompt '  ❯ '
-      --header $'  🐦 dodo agents\n  ↵ open · ^n new · ^x rm · ^r sync · / browse all · esc back\n  🔔 input · ⚙ working · 💤 off  ·  ◽⬆👀🟢 state  ·  ✅❌🟡 ci · 💬 threads\n'
+      --header $'  🐦 dodo agents\n  ↵ open · ^n new · ^x rm · ^r sync · / browse all · esc back\n  \uf0f3 input · \uf0e7 working · \uf186 off  ·  \uf109 \uf408 \uf407 \uf419 state  ·  \uf00c \uf00d \uea77 ci · \uf075 threads\n'
       --header-first --padding 1
       --preview "$HERE/dodo-sidebar.sh --preview {}"
       --preview-window 'right:60%:wrap'
@@ -296,6 +296,30 @@ _run_fzf() {
   fi
 
   "$HERE/dodo-sidebar.sh" --list | fzf "${args[@]}" || true
+}
+
+# _toggle_sidebar [origin_pane]
+# Toggle the embedded left sidebar in the CURRENT window (prefix+e). If a pane
+# flagged @dodo_sidebar already exists in this window, close it; otherwise split
+# a fresh one to the left and hand focus back to where the user was. Sidebar
+# panes created by _create_session carry the same flag, so this recognizes them.
+_toggle_sidebar() {
+  local origin="${1:-}"
+  [[ -z "$origin" ]] && origin="$(tmux display-message -p '#{pane_id}')"
+  local win; win="$(tmux display-message -t "$origin" -p '#{window_id}')"
+  local existing
+  existing="$(tmux list-panes -t "$win" -F '#{pane_id} #{@dodo_sidebar}' 2>/dev/null \
+              | awk '$2=="1"{print $1; exit}')"
+  if [[ -n "$existing" ]]; then
+    tmux kill-pane -t "$existing"
+    return 0
+  fi
+  local path; path="$(tmux display-message -t "$origin" -p '#{pane_current_path}')"
+  local sb
+  sb="$(tmux split-window -h -b -l "$DODO_SIDEBAR_WIDTH" -t "$origin" -c "$path" \
+        -P -F '#{pane_id}' "exec $DODO_SIDEBAR --pane")"
+  tmux set-option -p -t "$sb" @dodo_sidebar 1
+  tmux select-pane -t "$origin"
 }
 
 case "${1:-}" in
@@ -310,5 +334,6 @@ case "${1:-}" in
   --remove)    shift; _remove "$*" ;;
   --current)   _current ;;
   --pane)      _run_fzf pane ;;
+  --sidebar)   shift; _toggle_sidebar "${1:-}" ;;
   --popup|--ui|"") _run_fzf popup ;;
 esac

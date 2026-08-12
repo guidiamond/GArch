@@ -5,12 +5,19 @@ end
 
 local set_hl = vim.api.nvim_set_hl
 
-leap.add_default_mappings()
+-- Set explicitly instead of via the deprecated `leap.add_default_mappings()`,
+-- which still points at the removed `<Plug>(leap-forward-to)` /
+-- `<Plug>(leap-backward-to)` keys and therefore silently does nothing.
+vim.keymap.set({ "n", "x", "o" }, "s", "<Plug>(leap-forward)", { desc = "Leap forward to" })
+vim.keymap.set({ "n", "x", "o" }, "S", "<Plug>(leap-backward)", { desc = "Leap backward to" })
+vim.keymap.set({ "x", "o" }, "x", "<Plug>(leap-forward-till)", { desc = "Leap forward till" })
+vim.keymap.set({ "x", "o" }, "X", "<Plug>(leap-backward-till)", { desc = "Leap backward till" })
+vim.keymap.set({ "n", "x", "o" }, "gs", "<Plug>(leap-from-window)", { desc = "Leap from window" })
 
--- Default mappings:
+-- Mappings:
 -- s (forward) & S (backward) search
 -- s<enter><enter> reapeats the previous search
--- gs or gS to search in multiple windows
+-- gs to search in multiple windows
 -- s{char}<enter><enter> is the same as f{char};, but works over multiple lines.
 
 set_hl(0, "LeapBackdrop", { link = "Comment" }) -- or some grey

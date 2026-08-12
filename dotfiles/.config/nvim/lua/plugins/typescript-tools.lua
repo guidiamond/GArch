@@ -18,6 +18,14 @@ typescript_tools.setup({
 		client.server_capabilities.documentRangeFormattingProvider = false
 	end,
 	capabilities = capabilities,
+	-- Override plugin defaults to drop legacy compound filetypes
+	-- ('javascript.jsx'/'typescript.tsx') that trigger checkhealth warnings
+	filetypes = {
+		"javascript",
+		"javascriptreact",
+		"typescript",
+		"typescriptreact",
+	},
 	settings = {
 		separate_diagnostic_server = true,
 		publish_diagnostic_on = "insert_leave",

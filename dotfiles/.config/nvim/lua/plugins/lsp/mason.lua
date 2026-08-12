@@ -39,7 +39,9 @@ local function setup_mason_lspconfig()
 	end
 	mason_lspconfig.setup({
 		ensure_installed = servers,
-		automatic_installation = true,
+		-- Only enable the servers we explicitly list below; we call
+		-- vim.lsp.enable() ourselves in setup_lsp (mason-lspconfig v2)
+		automatic_enable = false,
 	})
 	return true
 end
@@ -52,6 +54,11 @@ local function setup_lsp()
 	if cmp_ok then
 		capabilities = cmp_nvim_lsp.default_capabilities(capabilities)
 	end
+
+	-- Pin all servers to UTF-16 so they don't disagree with typescript-tools/
+	-- none-ls (biome otherwise negotiates UTF-8) on the same buffer
+	capabilities.general = capabilities.general or {}
+	capabilities.general.positionEncodings = { "utf-16" }
 
 	vim.lsp.config("*", {
 		capabilities = capabilities,

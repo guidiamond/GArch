@@ -1,3 +1,14 @@
+-- Silence the `client.supports_method` deprecation (nvim raises it as
+-- vim.deprecate('client.supports_method', ...)). vim-illuminate still uses the
+-- old dot-call upstream; suppress just this one notice, let all others through.
+local orig_deprecate = vim.deprecate
+vim.deprecate = function(name, ...)
+	if name == "client.supports_method" then
+		return
+	end
+	return orig_deprecate(name, ...)
+end
+
 local function set_cfg(options, cfg_type)
 	for k, v in pairs(options) do
 		vim[cfg_type][k] = v
@@ -7,6 +18,9 @@ end
 local options = {
 	g = {
 		python3_host_prog = vim.fn.expand("~/.virtualenv/nvim/bin/python"),
+		loaded_node_provider = 0, -- Disable Node.js provider (not used)
+		loaded_perl_provider = 0, -- Disable Perl provider (not used)
+		loaded_ruby_provider = 0, -- Disable Ruby provider (not used)
 	},
 	opt = {
 		swapfile = false, -- creates a swapfile

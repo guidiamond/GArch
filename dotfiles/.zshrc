@@ -23,3 +23,4 @@ autoload -Uz _zinit
 (( ${+_comps} )) && _comps[zinit]=_zinit
 
 source ~/.config/zsh/zshrc
+export PATH="$HOME/go/bin:$PATH"

@@ -28,7 +28,10 @@ show_bars() {
 }
 
 has_fullscreen() {
-  bspc query -N -n .fullscreen -d focused >/dev/null 2>&1
+  # timeout guard: never let an in-loop bspc query block forever and deadlock
+  # bspwm (single-threaded; delivers subscribe events synchronously). On timeout
+  # this returns non-zero -> treated as "not fullscreen" -> bars shown (safe default).
+  timeout 1 bspc query -N -n .fullscreen -d focused >/dev/null 2>&1
 }
 
 # Track state to avoid redundant calls

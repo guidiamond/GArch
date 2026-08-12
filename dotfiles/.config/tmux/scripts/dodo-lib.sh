@@ -17,34 +17,39 @@ LAST_OPENED_DIR="${LAST_OPENED_DIR:-$WORKFLOW_DIR/last-opened}"
 # matter who sources us. The sidebar is embedded as a left pane in each agent.
 DODO_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DODO_SIDEBAR="${DODO_SIDEBAR:-$DODO_LIB_DIR/dodo-sidebar.sh}"
-DODO_SIDEBAR_WIDTH="${DODO_SIDEBAR_WIDTH:-46}"
+DODO_SIDEBAR_WIDTH="${DODO_SIDEBAR_WIDTH:-25%}"
 
 # --- Pure presentation helpers ---
 
-# _claude_glyph <working:yes|no> <live:yes|no>
+# Nerd Font glyphs, emitted by codepoint (\uXXXX) so they can never be lost the
+# way pasted Private-Use-Area characters can. ANSI color is safe: every list is
+# rendered through `fzf --ansi`, and the detail popup runs in a real terminal.
+#
+# _claude_glyph <working:yes|no> <live:yes|no>   activity: bolt / bell / moon
 _claude_glyph() {
-  if [[ "${2:-no}" != "yes" ]]; then printf '💤'; return; fi
-  if [[ "${1:-no}" == "yes" ]]; then printf '⚙'; else printf '🔔'; fi
+  if [[ "${2:-no}" != "yes" ]]; then printf '\033[90m\uf186\033[0m'; return; fi   # off  = moon (dim)
+  if [[ "${1:-no}" == "yes" ]]; then printf '\033[33m\uf0e7\033[0m'                 # working = bolt (yellow)
+  else printf '\033[1;35m\uf0f3\033[0m'; fi                                          # input   = bell (bold magenta)
 }
 
-# _state_glyph <untracked|tracked|review|merged>
+# _state_glyph <untracked|tracked|review|merged>   lifecycle as git shapes
 _state_glyph() {
   case "${1:-}" in
-    untracked) printf '◽' ;;
-    tracked)   printf '⬆' ;;
-    review)    printf '👀' ;;
-    merged)    printf '🟢' ;;
-    *)         printf '·' ;;
+    untracked) printf '\033[90m\uf109\033[0m' ;;   # local only   = laptop (dim)
+    tracked)   printf '\033[34m\uf408\033[0m' ;;   # pushed, no PR = repo-push (blue)
+    review)    printf '\033[35m\uf407\033[0m' ;;   # PR open      = pull-request (magenta)
+    merged)    printf '\033[32m\uf419\033[0m' ;;   # merged       = git-merge (green)
+    *)         printf '\033[90m\uf41d\033[0m' ;;   # unknown      = dot (dim)
   esac
 }
 
-# _ci_glyph <passing|failing|running|none>
+# _ci_glyph <passing|failing|running|none>   check / cross / spinner
 _ci_glyph() {
   case "${1:-}" in
-    passing) printf '✅' ;;
-    failing) printf '❌' ;;
-    running) printf '🟡' ;;
-    *)       printf '─' ;;
+    passing) printf '\033[32m\uf00c\033[0m' ;;   # check  (green)
+    failing) printf '\033[31m\uf00d\033[0m' ;;   # times  (red)
+    running) printf '\033[33m\uea77\033[0m' ;;   # sync   (yellow)
+    *)       printf '\033[90m─\033[0m' ;;         # none   (dim dash)
   esac
 }
 
@@ -136,8 +141,11 @@ _create_session() {
   # run claude in the (now right-hand) original pane and focus it.
   local claude_pane
   claude_pane=$(tmux list-panes -t "$session_name:1" -F '#{pane_id}' | head -1)
-  tmux split-window -h -b -l "$DODO_SIDEBAR_WIDTH" -t "$claude_pane" -c "$worktree_path" \
-    "exec $DODO_SIDEBAR --pane"
+  local sidebar_pane
+  sidebar_pane=$(tmux split-window -h -b -l "$DODO_SIDEBAR_WIDTH" -t "$claude_pane" -c "$worktree_path" \
+    -P -F '#{pane_id}' "exec $DODO_SIDEBAR --pane")
+  # Flag it so `prefix+e` (_toggle_sidebar) recognizes and can toggle this pane.
+  tmux set-option -p -t "$sidebar_pane" @dodo_sidebar 1
   tmux send-keys -t "$claude_pane" "export DODO_WORKFLOW_ID='$workflow_id'" C-m
   tmux send-keys -t "$claude_pane" "claude --dangerously-skip-permissions" C-m
   tmux select-pane -t "$claude_pane"
@@ -206,13 +214,13 @@ open_worktree_session() {
 }
 
 # _render_row <name> <claude_working> <claude_live> <state> <ci> <threads>
-# One visible line: "<claude> <state> <name>  <ci> [💬N]".
+# One visible line: "<claude> <state> <name>  <ci> [N]".
 _render_row() {
   local name="$1" cw="$2" cl="$3" state="$4" ci="$5" threads="${6:-0}"
   local badges
   badges="$(_ci_glyph "$ci")"
   if [[ -n "$threads" && "$threads" -gt 0 ]] 2>/dev/null; then
-    badges="$badges 💬$threads"
+    badges="$badges $(printf '\033[36m\uf075\033[0m')$threads"   # comment glyph (cyan)
   fi
   printf '%s %s %s  %s' "$(_claude_glyph "$cw" "$cl")" "$(_state_glyph "$state")" "$name" "$badges"
 }
