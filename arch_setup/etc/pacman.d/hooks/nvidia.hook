@@ -7,6 +7,11 @@ Target=nvidia-open-dkms
 Target=nvidia-open
 Target=linux
 
+# The linux) exit 0 branch is deliberate, not inverted: when a transaction
+# includes the kernel, Arch's own linux hook already regenerates the initramfs,
+# and setup_gpu has made the nvidia modules permanent in mkinitcpio.conf, so
+# that rebuild already covers them. Skipping here avoids a second full
+# mkinitcpio -P run in the same transaction.
 [Action]
 Description=Rebuilding initramfs after an NVIDIA driver change
 Depends=mkinitcpio

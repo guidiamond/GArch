@@ -116,8 +116,15 @@ setup_zram() {
 }
 
 setup_shell() {
-    local check_only=${1:-} current
-    current=$(getent passwd "$USER" | cut -d: -f7)
+    local check_only=${1:-} target current
+    # $USER is root under `sudo ./provision.sh` (env_reset), which would chsh
+    # root's shell instead of the human's. Prefer SUDO_USER when present.
+    target=${SUDO_USER:-$USER}
+    if [[ -z "$target" ]]; then
+        error "setup_shell: cannot determine the target user (\$USER and \$SUDO_USER are both empty)"
+        return 1
+    fi
+    current=$(getent passwd "$target" | cut -d: -f7)
     if [[ "$current" == "/usr/bin/zsh" ]]; then
         success "login shell is already zsh"
         return 0
@@ -125,7 +132,10 @@ setup_shell() {
     [[ "$check_only" == "--check-only" ]] && { info "would chsh to /usr/bin/zsh"; return 0; }
 
     grep -qx /usr/bin/zsh /etc/shells || echo /usr/bin/zsh | sudo tee -a /etc/shells >/dev/null
-    sudo chsh -s /usr/bin/zsh "$USER"
+    if ! sudo chsh -s /usr/bin/zsh "$target"; then
+        error "setup_shell: chsh failed for ${target}"
+        return 1
+    fi
     success "login shell set to /usr/bin/zsh"
 }
 
@@ -177,8 +187,11 @@ setup_gpu() {
         sudo install -Dm644 "${ARCH_SETUP_DIR}/etc/pacman.d/hooks/nvidia.hook" \
             /etc/pacman.d/hooks/nvidia.hook
 
-        sudo bash -c "$(declare -f grub_cmdline_add error); \
-            grub_cmdline_add /etc/default/grub nvidia-drm.modeset=1"
+        if ! sudo bash -c "$(declare -f grub_cmdline_add error); \
+            grub_cmdline_add /etc/default/grub nvidia-drm.modeset=1"; then
+            error "setup_gpu: could not add nvidia-drm.modeset=1 to /etc/default/grub"
+            return 1
+        fi
 
         sudo mkinitcpio -P
         sudo grub-mkconfig -o /boot/grub/grub.cfg
@@ -191,7 +204,11 @@ enable_services() {
     for svc in "$@"; do
         if systemctl list-unit-files "${svc}.service" &>/dev/null \
            && [[ -n "$(systemctl list-unit-files "${svc}.service" --no-legend)" ]]; then
-            sudo systemctl enable "$svc" &>/dev/null && success "enabled ${svc}"
+            if sudo systemctl enable "$svc" &>/dev/null; then
+                success "enabled ${svc}"
+            else
+                error "failed to enable ${svc}"
+            fi
         else
             warn "unit ${svc}.service not found, skipping"
         fi

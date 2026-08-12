@@ -131,3 +131,9 @@ setup() {
     run needs_grub_install "$TMP/esp"
     [ "$status" -eq 1 ]
 }
+
+@test "setup_shell fails when the target user cannot be determined" {
+    USER="" SUDO_USER="" run setup_shell --check-only
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot determine the target user"* ]]
+}
