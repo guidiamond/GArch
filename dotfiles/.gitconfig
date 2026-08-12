@@ -1,0 +1,23 @@
+[user]
+	email = guilherme.batista770@gmail.com
+	name = guidiamond
+
+# Git alias ⬇️
+[alias]
+  # Resets everything in the current branch to remote
+  nah = "!f(){ git reset --hard; git clean -df; if [ -d ".git/rebase-apply" ] || [ -d ".git/rebase-merge" ]; then git rebase --abort; fi; }; f"
+  # Deletes gone branches (branches that were deleted on the remote repository)
+  forget="!git fetch -p && git branch -vv | awk '/: gone]/{print $1}' | xargs git branch -D"
+  # List branches to be deleted with git forget
+  forgetlist="!git fetch -p && git branch -vv | awk '/: gone]/{print $1}'"
+  # Helpful if you haven't pushed code to a remote repository and you want to remove the commit
+  uncommit = reset --soft HEAD~1
+[includeIf "gitdir:~/dodo/"]
+	path = ~/.gitconfig-dodo
+
+[credential "https://github.com"]
+	helper = 
+	helper = !/usr/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/usr/bin/gh auth git-credential
