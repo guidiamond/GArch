@@ -5,6 +5,10 @@
 .netrc
 .npmrc
 
+# Per-session X cookie. Was tracked, which made switching branches add or
+# remove the live $XAUTHORITY out from under the running session.
+dotfiles/.Xauthority
+
 plugged/
 
 
