@@ -96,3 +96,101 @@ plan_render() {
         done
     done < <(plan_disks)
 }
+
+plan_execute() {
+    local disk entry e_disk e_role e_type e_label e_size n partdev size_flag
+    while read -r disk; do
+        [[ -z "$disk" ]] && continue
+        info "Partitioning ${disk}..."
+        run_cmd sgdisk --zap-all "$disk"
+        n=0
+        for entry in "${PART_PLAN[@]}"; do
+            IFS='|' read -r e_disk e_role e_type e_label e_size <<< "$entry"
+            [[ "$e_disk" != "$disk" ]] && continue
+            n=$((n + 1))
+            size_flag=$(size_to_sgdisk "$e_size") || return 1
+            run_cmd sgdisk -n "${n}:0:${size_flag}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
+            partdev=$(part_device "$disk" "$n")
+            # PART_ROOT_RAW is consumed by luks_format/luks_open, not by
+            # anything in this file.
+            # shellcheck disable=SC2034
+            case "$e_role" in
+                efi)  PART_EFI="$partdev" ;;
+                root) PART_ROOT_RAW="$partdev" ;;
+            esac
+        done
+        run_cmd partprobe "$disk"
+        [[ "$DRY_RUN" == true ]] || sleep 1
+        success "Partitioned ${disk}"
+    done < <(plan_disks)
+}
+
+# Passphrase is fed on stdin so it never reaches the process table.
+luks_format() {
+    local part=$1 passphrase=$2
+    [[ -n "$passphrase" ]] || { error "luks_format: empty passphrase"; return 1; }
+    info "Creating LUKS2 container on ${part}..."
+    if [[ "$DRY_RUN" == true ]]; then
+        run_cmd "cryptsetup luksFormat --type luks2 --batch-mode ${part} (passphrase on stdin)"
+        return 0
+    fi
+    printf '%s' "$passphrase" | cryptsetup luksFormat --type luks2 --batch-mode "$part" -
+}
+
+luks_open() {
+    local part=$1 name=$2 passphrase=$3
+    [[ -n "$passphrase" ]] || { error "luks_open: empty passphrase"; return 1; }
+    info "Opening ${part} as /dev/mapper/${name}..."
+    if [[ "$DRY_RUN" == true ]]; then
+        run_cmd "cryptsetup open ${part} ${name} (passphrase on stdin)"
+        LUKS_UUID="00000000-0000-0000-0000-000000000000"
+        PART_ROOT="/dev/mapper/${name}"
+        LUKS_ENABLED=true
+        return 0
+    fi
+    printf '%s' "$passphrase" | cryptsetup open "$part" "$name" -
+    # LUKS_UUID and PART_ROOT are consumed by later tasks (crypttab
+    # generation, btrfs mounting in install.sh), not by anything in this file.
+    # shellcheck disable=SC2034
+    LUKS_UUID=$(blkid -s UUID -o value "$part")
+    # shellcheck disable=SC2034
+    PART_ROOT="/dev/mapper/${name}"
+    LUKS_ENABLED=true
+}
+
+luks_close() {
+    [[ "$LUKS_ENABLED" == true ]] || return 0
+    cryptsetup close "$LUKS_NAME" 2>/dev/null || true
+}
+
+btrfs_create_subvols() {
+    local dev=$1 entry name
+    info "Creating Btrfs subvolumes on ${dev}..."
+    run_cmd mkfs.btrfs -f -L archroot "$dev"
+    run_cmd mount "$dev" /mnt
+    for entry in "${BTRFS_SUBVOLS[@]}"; do
+        name="${entry%%:*}"
+        run_cmd btrfs subvolume create "/mnt/${name}"
+    done
+    run_cmd umount /mnt
+}
+
+btrfs_mount_all() {
+    local dev=$1 target=$2 entry name mountpoint full
+    info "Mounting Btrfs subvolumes..."
+    run_cmd mount -o "${BTRFS_MOUNT_OPTS},subvol=@" "$dev" "$target"
+    for entry in "${BTRFS_SUBVOLS[@]}"; do
+        name="${entry%%:*}"
+        mountpoint="${entry##*:}"
+        [[ "$name" == "@" ]] && continue
+        full="${target}${mountpoint}"
+        run_cmd mkdir -p "$full"
+        run_cmd mount -o "${BTRFS_MOUNT_OPTS},subvol=${name}" "$dev" "$full"
+    done
+}
+
+mount_esp() {
+    local target=$1
+    run_cmd mkdir -p "${target}/boot"
+    run_cmd mount "$PART_EFI" "${target}/boot"
+}

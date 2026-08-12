@@ -66,3 +66,48 @@ setup() {
     [[ "$output" == *"/dev/nvme0n1p2"* ]]
     [[ "$output" == *"WILL BE WIPED"* ]]
 }
+
+@test "plan_execute under DRY_RUN issues sgdisk but runs nothing" {
+    DRY_RUN=true
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdz root 8300 Root rest
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+    [[ "$output" == *"-n 1:0:+1G"* ]]
+    [[ "$output" == *"-t 1:ef00"* ]]
+    [[ "$output" == *"-n 2:0:0"* ]]
+    [[ "$output" == *"-t 2:8300"* ]]
+}
+
+@test "plan_execute under DRY_RUN assigns the role globals" {
+    DRY_RUN=true
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdz root 8300 Root rest
+    plan_execute
+    [ "$PART_EFI" = "/dev/sdz1" ]
+    [ "$PART_ROOT_RAW" = "/dev/sdz2" ]
+}
+
+@test "btrfs_create_subvols under DRY_RUN creates all four subvolumes" {
+    DRY_RUN=true
+    run btrfs_create_subvols /dev/mapper/cryptroot
+    [[ "$output" == *"subvolume create /mnt/@"* ]]
+    [[ "$output" == *"subvolume create /mnt/@home"* ]]
+    [[ "$output" == *"subvolume create /mnt/@snapshots"* ]]
+    [[ "$output" == *"subvolume create /mnt/@var_log"* ]]
+}
+
+@test "btrfs_mount_all mounts @ first with compression" {
+    DRY_RUN=true
+    run btrfs_mount_all /dev/sdz2 /mnt
+    [[ "$output" == *"noatime,compress=zstd,subvol=@ /dev/sdz2 /mnt"* ]]
+    [[ "$output" == *"subvol=@home /dev/sdz2 /mnt/home"* ]]
+    [[ "$output" == *"subvol=@var_log /dev/sdz2 /mnt/var/log"* ]]
+}
+
+@test "luks_open refuses an empty passphrase" {
+    DRY_RUN=true
+    run luks_open /dev/sdz2 cryptroot ""
+    [ "$status" -ne 0 ]
+}
