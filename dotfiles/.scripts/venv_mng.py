@@ -80,7 +80,11 @@ class VenvManager:
         # find and replace the python_env export
         for l in range(len(types_content)):
             if types_content[l].find("export PYTHON_ENV") != -1:
-                types_content[l] = 'export PYTHON_ENV="{0}"\n'.format(venv_dir)
+                # Write $HOME literally so zshrc stays portable across users;
+                # zsh expands it at source time.
+                types_content[l] = 'export PYTHON_ENV="$HOME/.virtualenv/{0}"\n'.format(
+                    env_name
+                )
         # save file
         with open(self.zshrc_file, "w") as file:
             file.writelines(types_content)
