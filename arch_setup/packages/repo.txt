@@ -15,6 +15,9 @@ xorg-xauth
 xorg-xdpyinfo
 xorg-xset
 xorg-xmessage
+# Bound to XF86MonBrightness{Up,Down} in sxhkdrc. A leaf package -- nothing
+# else pulls it in, so omitting it silently breaks the brightness keys.
+xorg-xbacklight
 xorg-fonts-misc
 xorg-mkfontscale
 xorg-font-util

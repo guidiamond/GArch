@@ -8,6 +8,7 @@ datagrip
 insomnia
 postman-bin
 slack-desktop
+# discord is in extra, not the AUR, despite the header above
 discord
 teams-for-linux-bin
 notion-app-electron
