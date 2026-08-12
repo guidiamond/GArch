@@ -39,6 +39,12 @@ ask() {
 
 ask_yes_no() {
     local prompt=$1 default=${2:-y} input hint
+    # A default that is not y/n can never satisfy the case below, so on EOF
+    # (stdin closed, e.g. a non-interactive run) the loop would spin forever.
+    case "$default" in
+        y|n) ;;
+        *) error "ask_yes_no: default must be 'y' or 'n', got '${default}'"; return 2 ;;
+    esac
     [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
     while true; do
         read -rp "$(echo -e "${BOLD}${prompt}${RESET} ${hint}: ")" input
@@ -51,17 +57,31 @@ ask_yes_no() {
     done
 }
 
+# ask_password <output-var-name> [prompt]
+#
+# Locals carry an _ap_ prefix because `printf -v` assigns in this function's
+# scope: a caller asking for its own variable named `prompt` or `pass1` would
+# have the password written to our local and silently lose it on return.
 ask_password() {
-    local varname=$1 prompt=${2:-Password} pass1 pass2
+    local _ap_varname=$1 _ap_prompt=${2:-Password} _ap_pass1 _ap_pass2
+    if [[ -z "$_ap_varname" ]]; then
+        error "ask_password: no output variable name given"
+        return 1
+    fi
+    case "$_ap_varname" in
+        _ap_varname|_ap_prompt|_ap_pass1|_ap_pass2)
+            error "ask_password: '${_ap_varname}' collides with an internal local"
+            return 1 ;;
+    esac
     while true; do
-        read -rsp "$(echo -e "${BOLD}${prompt}${RESET}: ")" pass1; echo ""
-        read -rsp "$(echo -e "${BOLD}Confirm ${prompt}${RESET}: ")" pass2; echo ""
-        if [[ "$pass1" != "$pass2" ]]; then
+        read -rsp "$(echo -e "${BOLD}${_ap_prompt}${RESET}: ")" _ap_pass1; echo ""
+        read -rsp "$(echo -e "${BOLD}Confirm ${_ap_prompt}${RESET}: ")" _ap_pass2; echo ""
+        if [[ "$_ap_pass1" != "$_ap_pass2" ]]; then
             warn "Passwords do not match. Try again."
-        elif [[ -z "$pass1" ]]; then
+        elif [[ -z "$_ap_pass1" ]]; then
             warn "Password cannot be empty."
         else
-            printf -v "$varname" '%s' "$pass1"
+            printf -v "$_ap_varname" '%s' "$_ap_pass1"
             return 0
         fi
     done

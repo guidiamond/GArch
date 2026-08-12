@@ -52,8 +52,10 @@ modules_line() {
 grub_cmdline_add() {
     local file=$1 kv=$2 key=${2%%=*} current new tokens=() t
 
-    # & means "the whole match" in a sed replacement, and | is the delimiter.
-    if [[ "$kv" =~ [\&\|\\] ]]; then
+    # sed would mangle these: & means "the whole match" in a replacement, | is
+    # the delimiter, and a backslash starts an escape. A kernel command-line
+    # token never legitimately contains them, so refuse rather than escape.
+    if [[ "$kv" == *'&'* || "$kv" == *'|'* || "$kv" == *'\'* ]]; then
         error "grub_cmdline_add: '${kv}' contains a sed metacharacter (& | \\)"
         return 1
     fi
