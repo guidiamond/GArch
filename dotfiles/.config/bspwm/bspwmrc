@@ -3,8 +3,7 @@ USERNAME=$(echo $USER)
 # Startup #{{{
 "/home/${USERNAME}/.config/polybar_ex/launch.sh" & \
 "/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
-  sxhkd & \
-  xmodmap "/home/${USERNAME}/.Xmodmap"
+  sxhkd &
 #}}}
 # /home/diamond/.config/polybar/launch.sh &
 
