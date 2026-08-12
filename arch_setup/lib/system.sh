@@ -55,7 +55,7 @@ grub_cmdline_add() {
     # sed would mangle these: & means "the whole match" in a replacement, | is
     # the delimiter, and a backslash starts an escape. A kernel command-line
     # token never legitimately contains them, so refuse rather than escape.
-    if [[ "$kv" == *'&'* || "$kv" == *'|'* || "$kv" == *'\'* ]]; then
+    if [[ "$kv" == *'&'* || "$kv" == *'|'* || "$kv" == *"\\"* ]]; then
         error "grub_cmdline_add: '${kv}' contains a sed metacharacter (& | \\)"
         return 1
     fi
