@@ -111,3 +111,12 @@ setup() {
     run luks_open /dev/sdz2 cryptroot ""
     [ "$status" -ne 0 ]
 }
+
+@test "luks_close under DRY_RUN goes through run_cmd instead of really closing" {
+    DRY_RUN=true
+    LUKS_ENABLED=true
+    run luks_close
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"cryptsetup close cryptroot"* ]]
+}

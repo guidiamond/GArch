@@ -160,7 +160,7 @@ luks_open() {
 
 luks_close() {
     [[ "$LUKS_ENABLED" == true ]] || return 0
-    cryptsetup close "$LUKS_NAME" 2>/dev/null || true
+    run_cmd cryptsetup close "$LUKS_NAME" 2>/dev/null || true
 }
 
 btrfs_create_subvols() {
