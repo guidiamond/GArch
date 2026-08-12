@@ -288,3 +288,9 @@ cython_debug/
 #.idea/
 
 # End of https://www.toptal.com/developers/gitignore/api/python
+
+# arch_setup ships its own lib/ of shell modules; don't let the generic
+# Python-template `lib/` rule above swallow it. Must stay after that rule
+# to win (gitignore uses last-match-wins ordering).
+!arch_setup/lib/
+!arch_setup/lib/**
