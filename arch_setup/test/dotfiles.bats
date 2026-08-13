@@ -222,6 +222,185 @@ make_repo_with_conflict() {
     [[ "$output" != *"cloned to"* ]]
 }
 
+# --- clone first, authenticate only if that fails --------------------------
+#
+# The repository is public, so the ordinary run needs no credentials at all.
+# ensure_github_auth used to run unconditionally *before* the clone, which
+# demanded a PAT nobody needs and failed stage 2 outright for an operator at
+# a bare console who cannot produce one.
+#
+# clone_stub <fail-first-n> [leave-partial]
+#
+# A `git` stub on PATH, standing in for the only invocation this module ever
+# makes: `git clone <repo> <dest>`. It reproduces the parts of real git these
+# cases turn on, each measured against git 2.55.0:
+#
+#   * every invocation is recorded, so call *counts* and call *order* are
+#     assertable -- which is what separates "clone, then authenticate" from
+#     "authenticate, then clone";
+#   * a destination that already exists and is not empty is refused, exactly
+#     as real git refuses it;
+#   * with `leave-partial`, a failing invocation leaves the destination
+#     behind with a .git inside it first. Real git cleans up after an orderly
+#     failure (repository-not-found, connection refused), but a clone killed
+#     mid-transfer cannot -- verified: SIGKILL during object transfer leaves
+#     <dest>/.git, and the next clone then dies with "destination path
+#     already exists and is not an empty directory".
+clone_stub() {
+    local fail_n=$1 partial=${2:-}
+    mkdir -p "$TMP/bin"
+    cat > "$TMP/bin/git" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "${TMP}/gitcalls"
+n=\$(wc -l < "${TMP}/gitcalls")
+dest=\$3
+if [ -d "\$dest" ] && [ -n "\$(ls -A "\$dest" 2>/dev/null)" ]; then
+    echo "fatal: destination path '\$dest' already exists and is not an empty directory." >&2
+    exit 128
+fi
+if [ "\$n" -le ${fail_n} ]; then
+    if [ -n "${partial}" ]; then mkdir -p "\$dest/.git"; fi
+    echo "fatal: repository not found" >&2
+    exit 128
+fi
+mkdir -p "\$dest/.git"
+exit 0
+EOF
+    chmod +x "$TMP/bin/git"
+    : > "$TMP/gitcalls"
+}
+
+# ensure_github_auth is left REAL here, with no ~/.netrc and stdin at EOF, so
+# reaching it at all cannot succeed quietly -- `ask` reports the EOF and the
+# empty-token guard returns non-zero. That is deliberately the strongest form
+# of "was not consulted": the case fails whether the old code merely asked or
+# actually got an answer.
+@test "dotfiles_clone clones a public repo without prompting for credentials" {
+    clone_stub 0
+    DOTFILES_DIR="$TMP/clone-target"
+    PATH="$TMP/bin:$PATH" run dotfiles_clone </dev/null
+    [ "$status" -eq 0 ]
+    [ -d "$TMP/clone-target/.git" ]
+    [[ "$output" == *"cloned to"* ]]
+    [[ "$output" != *"GitHub username"* ]]
+}
+
+# The sentinel is the whole point: netrc_has_github is stubbed to return 0, so
+# on the old code ensure_github_auth short-circuits and every *other*
+# observable -- exit status, output, the cloned directory -- is identical
+# between the two versions. Nothing but the sentinel can tell them apart, so
+# nothing but the sentinel can be what fails.
+@test "dotfiles_clone does not read ~/.netrc when the clone needs no credentials" {
+    clone_stub 0
+    DOTFILES_DIR="$TMP/clone-target"
+    netrc_has_github() { : > "$TMP/netrc_read"; return 0; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/netrc_read" ]
+}
+
+# The repository going private is the case the retained auth functions exist
+# for. `clone_stub 1` fails the first attempt without leaving anything behind,
+# so this pins the fallback on its own, with the partial-clone cleanup below
+# held out as a separate case.
+@test "dotfiles_clone falls back to authentication when the clone fails" {
+    clone_stub 1
+    DOTFILES_DIR="$TMP/clone-target"
+    ensure_github_auth() { : > "$TMP/auth_called"; return 0; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -eq 0 ]
+    [ -e "$TMP/auth_called" ]
+    [ "$(wc -l < "$TMP/gitcalls")" -eq 2 ]
+    [[ "$output" == *"cloned to"* ]]
+}
+
+# The exit status alone does NOT discriminate here -- the old code also
+# returns non-zero, just for the opposite reason (it gave up on the auth
+# without ever attempting a clone). The call count is what pins the ordering.
+@test "dotfiles_clone attempts the clone before authenticating, and fails when both fail" {
+    clone_stub 99
+    DOTFILES_DIR="$TMP/clone-target"
+    ensure_github_auth() { return 1; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"cloned to"* ]]
+    [ "$(wc -l < "$TMP/gitcalls")" -eq 1 ]
+}
+
+# A failed first attempt can leave a partial destination behind (see
+# clone_stub), and real git then refuses the retry outright -- so the retry
+# would be dead on arrival without the cleanup, and the "trying authenticated"
+# message would be followed by a failure that has nothing to do with auth.
+@test "dotfiles_clone clears the partial clone it created before retrying" {
+    clone_stub 1 leave-partial
+    DOTFILES_DIR="$TMP/clone-target"
+    ensure_github_auth() { return 0; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"already exists"* ]]
+}
+
+# The other side of that cleanup, and the reason it is conditional rather than
+# an unguarded `rm -rf "$DOTFILES_DIR"`: a directory that was already there
+# when the function started is the user's, holds whatever they put in it, and
+# is left exactly as found however badly the clone goes.
+@test "dotfiles_clone never deletes a DOTFILES_DIR it did not create" {
+    clone_stub 99
+    DOTFILES_DIR="$TMP/clone-target"
+    mkdir -p "$DOTFILES_DIR"
+    printf 'mine\n' > "$DOTFILES_DIR/KEEP"
+    ensure_github_auth() { return 1; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -ne 0 ]
+    [ -f "$DOTFILES_DIR/KEEP" ]
+}
+
+@test "dotfiles_clone short-circuits when the dotfiles are already present" {
+    clone_stub 99
+    DOTFILES_DIR="$TMP/clone-target"
+    mkdir -p "$DOTFILES_DIR/.git"
+    ensure_github_auth() { : > "$TMP/auth_called"; return 0; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/auth_called" ]
+    [ "$(wc -l < "$TMP/gitcalls")" -eq 0 ]
+}
+
+# NOT `run dotfiles_clone`: bats' own `run` turns errexit off inside the run,
+# which is the setting under test. A separate shell instead, running the
+# function directly under `set -euo pipefail` -- not inside an `if`, which
+# would suspend errexit for the whole call and hide exactly what this checks.
+# The guard clause at the top of the function used to be a bare
+# `[[ -d ... ]] && { ...; return 0; }`, whose status on the common path (no
+# clone yet) is 1 with nothing exempting it, so such a caller aborted on line
+# one and the clone never happened at all.
+@test "dotfiles_clone runs to completion under a caller's set -e" {
+    clone_stub 0
+    run env PATH="$TMP/bin:$PATH" HOME="$HOME" DOTFILES_DIR="$TMP/clone-target" \
+        bash -c "set -euo pipefail
+                 source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+                 source '${BATS_TEST_DIRNAME}/../lib/dotfiles.sh'
+                 dotfiles_clone
+                 echo REACHED-END" </dev/null
+    [[ "$output" == *"REACHED-END"* ]]
+    [ -d "$TMP/clone-target/.git" ]
+}
+
+# The mirror image: invoked the way provision.sh's step() invokes it, as an
+# `if` condition. Bash suspends errexit for the whole dynamic extent of a
+# condition context, so the function cannot lean on the file's `set -e` to
+# stop it -- it has to check its own commands and return non-zero itself.
+@test "dotfiles_clone reports failure to a caller that has suspended errexit" {
+    clone_stub 99
+    run env PATH="$TMP/bin:$PATH" HOME="$HOME" DOTFILES_DIR="$TMP/clone-target" \
+        bash -c "set -euo pipefail
+                 source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+                 source '${BATS_TEST_DIRNAME}/../lib/dotfiles.sh'
+                 if dotfiles_clone; then echo VERDICT-OK; else echo VERDICT-FAIL; fi" </dev/null
+    [[ "$output" == *"VERDICT-FAIL"* ]]
+    [ "$(wc -l < "$TMP/gitcalls")" -ge 1 ]
+}
+
 # `guidiamond/.dotfiles` -- the dot-prefixed name this used to carry -- does
 # not exist: it 404s for the owner's own authenticated token. The local
 # *directory* is .dotfiles; the repository is not, and conflating the two is

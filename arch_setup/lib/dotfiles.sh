@@ -130,10 +130,73 @@ ensure_github_auth() {
 
 # --- clone ---------------------------------------------------------------
 
+# Clones first and authenticates only if that fails. ensure_github_auth used
+# to run unconditionally, *before* the clone, which demanded a PAT for a
+# public repository and so failed provision.sh's phase 1 outright for anyone
+# who could not produce one -- including an operator at a bare console. The
+# auth path is kept for the day the repository goes private; only when it runs
+# has changed.
+#
+# `if`, not `[[ ... ]] && { ... }`: on the common path (no clone yet) that
+# guard's status is 1 with nothing exempting it, so a caller running under
+# `set -e` aborted on this very first line and never reached the clone at all.
+# Nothing below leans on errexit either -- provision.sh reaches this through
+# step()'s `if "$@"`, and bash suspends errexit for the whole dynamic extent
+# of a condition context, so every command here is checked explicitly.
 dotfiles_clone() {
-    [[ -d "${DOTFILES_DIR}/.git" ]] && { success "dotfiles already present at ${DOTFILES_DIR}"; return 0; }
-    ensure_github_auth || return 1
+    if [[ -d "${DOTFILES_DIR}/.git" ]]; then
+        success "dotfiles already present at ${DOTFILES_DIR}"
+        return 0
+    fi
+
+    # Whether the destination was already there before this function touched
+    # anything. It is the only thing that makes the cleanup below safe.
+    local preexisting=0
+    if [[ -e "$DOTFILES_DIR" ]]; then
+        preexisting=1
+    fi
+
+    # No netrc check in front of this. When ~/.netrc already holds a
+    # github.com entry, this attempt is not "anonymous" in the first place --
+    # git's HTTP transport reads netrc on its own, so it IS the authenticated
+    # attempt, and there is nothing for a netrc branch to skip ahead to. (The
+    # old code relied on that same behaviour: ensure_github_auth only ever
+    # wrote the file, and never handed a credential to git.) The one cost is
+    # on a private repo whose stored credential has gone stale, where the
+    # retry below re-runs an identical clone once. That is a wasted round
+    # trip, not a wrong answer, and it buys a single code path.
     info "Cloning dotfiles..."
+    if git clone "$DOTFILES_REPO" "$DOTFILES_DIR"; then
+        success "cloned to ${DOTFILES_DIR}"
+        return 0
+    fi
+
+    # An orderly git failure cleans up after itself -- repository-not-found,
+    # auth refused and connection-refused all leave nothing behind (measured,
+    # git 2.55.0). A clone killed mid-transfer cannot: it leaves the
+    # destination with a .git inside it, and the retry below would then die
+    # with "destination path already exists and is not an empty directory",
+    # reporting an auth problem that isn't one.
+    #
+    # Removed ONLY when this function is what just created it. A directory
+    # that was already there when we started is the user's, holds whatever
+    # they put in it, and is left exactly as found -- an unguarded `rm -rf
+    # "$DOTFILES_DIR"` here would be a data-loss bug, not a cleanup.
+    if (( ! preexisting )) && [[ -d "$DOTFILES_DIR" ]]; then
+        rm -rf "$DOTFILES_DIR" || {
+            error "failed to clear the partial clone at ${DOTFILES_DIR}"
+            return 1
+        }
+    fi
+
+    # Say what is actually being attempted. A clone can fail for reasons no
+    # credential can fix -- no network, dead DNS, a GitHub outage -- and a
+    # bare "trying authenticated" would send that user hunting for a PAT that
+    # cannot help.
+    warn "could not clone ${DOTFILES_REPO} without credentials"
+    warn "expected if the repository is now private; if the network or DNS is down instead, no token will help"
+    info "Retrying with GitHub authentication..."
+    ensure_github_auth || return 1
     git clone "$DOTFILES_REPO" "$DOTFILES_DIR" || { error "failed to clone ${DOTFILES_REPO}"; return 1; }
     success "cloned to ${DOTFILES_DIR}"
 }
