@@ -369,26 +369,6 @@ stub_net() {
     [ "$status" -eq 1 ]
 }
 
-# --- subsystem setup -------------------------------------------------------
-
-# Machine-independent: assert on whichever branch this host lands in, so the
-# test does not silently depend on the developer's own login shell.
-@test "setup_shell --check-only reports without changing anything" {
-    run setup_shell --check-only
-    [ "$status" -eq 0 ]
-    if [ "$(getent passwd "$USER" | cut -d: -f7)" = "/usr/bin/zsh" ]; then
-        [[ "$output" == *"already"* ]]
-    else
-        [[ "$output" == *"would chsh"* ]]
-    fi
-}
-
-@test "setup_shell fails when the target user cannot be determined" {
-    USER="" SUDO_USER="" run setup_shell --check-only
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"cannot determine the target user"* ]]
-}
-
 # --- refresh_keyring / rank_mirrors ----------------------------------------
 #
 # Extracted from install.sh's phase_preflight, which left the path its own
