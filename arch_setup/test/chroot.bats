@@ -1,24 +1,13 @@
 #!/usr/bin/env bats
 
+load helpers
+
 setup() {
     source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
     source "${BATS_TEST_DIRNAME}/../lib/system.sh"
     source "${BATS_TEST_DIRNAME}/../lib/chroot.sh"
     TMP="$BATS_TEST_TMPDIR"
     mkdir -p "$TMP/root"
-}
-
-# A bare `! grep ...` mid-test is INERT: bash exempts !-inverted pipelines
-# from set -e, so it only ever fails a test when it happens to be the last
-# command in the body. Every negative assertion goes through this instead --
-# a function returning non-zero is a plain command, and does stop the test.
-assert_absent() {
-    local pattern=$1 file=$2
-    if grep -qE -- "$pattern" "$file"; then
-        printf 'unexpectedly found /%s/ in %s:\n' "$pattern" "$file" >&2
-        grep -nE -- "$pattern" "$file" >&2
-        return 1
-    fi
 }
 
 # --- chroot_write_config ---------------------------------------------------

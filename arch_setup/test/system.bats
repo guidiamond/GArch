@@ -1,5 +1,7 @@
 #!/usr/bin/env bats
 
+load helpers
+
 DEFAULT_HOOKS='HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
 
 setup() {
@@ -69,7 +71,7 @@ setup() {
     printf 'GRUB_CMDLINE_LINUX="cryptdevice=UUID=old:cryptroot"\n' > "$TMP/grub"
     grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=new:cryptroot"
     grep -q 'cryptdevice=UUID=new:cryptroot' "$TMP/grub"
-    ! grep -q 'UUID=old' "$TMP/grub"
+    assert_absent 'UUID=old' "$TMP/grub"
 }
 
 # --- require_vars ----------------------------------------------------------
@@ -229,7 +231,7 @@ make_zoneinfo() {
     printf 'GRUB_TIMEOUT=5\n' > "$TMP/grub"
     run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
     [ "$status" -ne 0 ]
-    ! grep -q 'cryptdevice' "$TMP/grub"
+    assert_absent 'cryptdevice' "$TMP/grub"
 }
 
 @test "grub_cmdline_add fails loudly on a single-quoted line" {
