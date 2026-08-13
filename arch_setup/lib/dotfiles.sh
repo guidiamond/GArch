@@ -8,7 +8,13 @@
 # writes under the <target-root> it is handed, never $HOME.
 # shellcheck shell=bash
 
-DOTFILES_REPO="https://github.com/guidiamond/.dotfiles.git"
+# The repository is NOT named after the directory it clones into, which is the
+# whole trap here: this used to say guidiamond/.dotfiles, which does not exist
+# -- it 404s for the owner's own authenticated token. The local *directory* is
+# .dotfiles; the repository's canonical current name is GArch, and it is
+# public (an anonymous git-upload-pack against it answers 200). DOTFILES_DIR
+# below is what keeps the clone landing in ~/.dotfiles regardless.
+DOTFILES_REPO="https://github.com/guidiamond/GArch.git"
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 STOW_PACKAGE="dotfiles"
 

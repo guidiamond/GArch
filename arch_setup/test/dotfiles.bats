@@ -222,6 +222,15 @@ make_repo_with_conflict() {
     [[ "$output" != *"cloned to"* ]]
 }
 
+# `guidiamond/.dotfiles` -- the dot-prefixed name this used to carry -- does
+# not exist: it 404s for the owner's own authenticated token. The local
+# *directory* is .dotfiles; the repository is not, and conflating the two is
+# what produced a DOTFILES_REPO nobody could ever clone. GArch is the
+# repository's canonical current name, and it is public.
+@test "DOTFILES_REPO names a repository that exists" {
+    [ "$DOTFILES_REPO" = "https://github.com/guidiamond/GArch.git" ]
+}
+
 # --- stow_conflicts: scanning --------------------------------------------
 
 @test "stow_conflicts lists a real file that blocks a link" {

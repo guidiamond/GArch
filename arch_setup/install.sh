@@ -2,8 +2,12 @@
 # Stage 1: Arch install from the live ISO. Root only. Destructive.
 #
 #   pacman -Sy --noconfirm git
-#   git clone https://github.com/guidiamond/.dotfiles
+#   git clone https://github.com/guidiamond/GArch.git .dotfiles
 #   cd .dotfiles/arch_setup && ./install.sh
+#
+# The repository is GArch, the directory is .dotfiles -- hence the explicit
+# destination on the clone, without which git would create GArch/ and the next
+# line would have nothing to cd into. Public, so no credentials are needed.
 #
 # Run `./install.sh --help` for the flags; usage() below is the one copy.
 set -euo pipefail

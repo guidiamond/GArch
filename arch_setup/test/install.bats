@@ -61,6 +61,20 @@ in_install() {
     assert_absent '(^|[;&|][[:space:]]*)[[:space:]]*run[[:space:]]+[a-z]' "$INSTALL_SH"
 }
 
+# The header's three lines are the only instructions an operator has at a bare
+# console on the live ISO, so they have to work as typed. Two ways they did
+# not: `guidiamond/.dotfiles` does not exist (it 404s for the owner's own
+# token -- the local *directory* is .dotfiles, the repository is not), and a
+# `git clone <url>` with no destination names the new directory after the
+# *repository*, so with the real name it would create GArch/ and the very next
+# line's `cd .dotfiles/arch_setup` would fail. The explicit destination is
+# what keeps the two lines consistent.
+@test "install.sh's bootstrap clones a real repo into the directory the next line enters" {
+    assert_absent 'guidiamond/\.dotfiles' "$INSTALL_SH"
+    grep -qF 'git clone https://github.com/guidiamond/GArch.git .dotfiles' "$INSTALL_SH"
+    grep -qF 'cd .dotfiles/arch_setup' "$INSTALL_SH"
+}
+
 # The same collision class, one level up: bats owns these names, and install.sh
 # is a file test/install.bats sources.
 @test "install.sh defines no function whose name bats reserves" {

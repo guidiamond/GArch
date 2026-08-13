@@ -279,17 +279,18 @@ qemu_run() {
 cmd_boot() {
     [[ -f "$ISO" ]]  || die "no ISO -- run './test/vm.sh fetch' first"
     [[ -f "$DISK" ]] || die "no disk image -- run './test/vm.sh create' first"
-    # The clone URL is guidiamond/dotfiles, NOT the guidiamond/.dotfiles that
-    # install.sh's own header and lib/dotfiles.sh's DOTFILES_REPO both name.
-    # Checked against GitHub rather than copied: the dot-prefixed name 404s for
-    # the owner's own token, while this one answers an *anonymous* git-upload-
-    # pack with 200. So the repo is public, the clone needs no credentials, and
-    # printing the header's URL here would hand the operator a dead link.
+    # The repository is guidiamond/GArch; the *directory* it clones into is
+    # .dotfiles. Hence the explicit destination below -- without it git names
+    # the new directory after the repo and the next line has nothing to cd
+    # into. Checked against GitHub rather than copied from anywhere: the
+    # dot-prefixed guidiamond/.dotfiles this used to name 404s for the owner's
+    # own token, while GArch answers an *anonymous* git-upload-pack with 200.
+    # So the repo is public and the clone needs no credentials.
     cat <<'EOF'
 Booting the Arch ISO. Inside the VM:
 
   pacman -Sy --noconfirm git
-  git clone https://github.com/guidiamond/dotfiles .dotfiles
+  git clone https://github.com/guidiamond/GArch.git .dotfiles
   cd .dotfiles/arch_setup
   ./install.sh --dry-run    # rehearse the whole prompt flow, write nothing
   ./install.sh              # the real run
