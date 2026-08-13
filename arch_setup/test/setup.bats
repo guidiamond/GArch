@@ -299,6 +299,19 @@ EOF
     [[ "$output" == *"2 of 3"* ]]
 }
 
+# The numerator excludes units that were not installed, by design, so the
+# denominator has to as well. The real call is
+# `enable_services NetworkManager lightdm docker bluetooth cups`, and on a
+# --skip-packages machine three of those five are legitimately absent -- so
+# counting against $# turned "every unit that exists failed" into "1 of 5",
+# which reads like a 20% problem and is a 100% one.
+@test "enable_services counts against the units that existed, not the ones asked for" {
+    stub_systemd "alpha" "alpha"
+    PATH="$TMP/bin:$PATH" run enable_services alpha docker bluetooth cups
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"1 of 1"* ]]
+}
+
 # Not a failure, deliberately: provision.sh asks for docker, bluetooth and cups
 # on every run, and a machine provisioned with --skip-packages, or one whose
 # operator declined the optional group, legitimately has none of them. A red
@@ -313,11 +326,23 @@ EOF
     assert_absent '^cups$' "$TMP/enabled"
 }
 
-# `systemctl list-unit-files ... | grep -q .` reports 141 for a unit that DOES
-# exist once the output outgrows the pipe buffer: grep -q closes the pipe on
-# its first hit, systemctl takes SIGPIPE, and provision.sh's `set -o pipefail`
-# surfaces it. The same trap test/install.bats documents for keymap_listed, at
-# the same threshold. Capturing the output has no pipe and no threshold.
+# A guard against a refactor, not a regression test: enable_services has never
+# been written as a pipe -- every version back to its introduction used a
+# command substitution -- so nothing here is being re-fixed. What this pins is
+# that nobody tidies the probe into the obvious shorter form.
+#
+# `systemctl list-unit-files "${svc}.service" --no-legend | grep -q .` reports
+# 141 for a unit that DOES exist, once the output outgrows the pipe buffer:
+# grep -q closes the pipe on its first hit, systemctl takes SIGPIPE, and
+# provision.sh's `set -o pipefail` surfaces it. Under 64 KB it behaves
+# perfectly, which is why it would survive review -- the same trap
+# test/install.bats documents for keymap_listed, where the thresholds were
+# measured. Capturing the output has no pipe and no threshold.
+#
+# Checked by mutation rather than assumed: with the probe rewritten to that
+# pipe, this case fails on the "enabled alpha" assertion -- the existing unit
+# is reported as absent and silently skipped -- and every other case in this
+# file still passes, so this is the only thing standing in front of it.
 @test "enable_services does not depend on systemctl's output fitting in a pipe" {
     stub_systemd "alpha" "__none__" 20000
     run bash -c "set -euo pipefail

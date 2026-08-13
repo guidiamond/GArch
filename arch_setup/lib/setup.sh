@@ -181,19 +181,23 @@ setup_gpu() {
 # enable NetworkManager -- no network on the next boot -- and still return 0
 # because cups happened to be fine.
 enable_services() {
-    local svc listed failed=0
+    local svc listed existing=0 failed=0
     for svc in "$@"; do
-        # One call, and its output captured rather than piped into a `grep -q`:
-        # grep -q closes the pipe on its first match, systemctl takes SIGPIPE,
-        # and `set -o pipefail` in the caller surfaces it as a failure on the
-        # units that DID exist. `list-unit-files <pattern>` exits 0 for a
-        # pattern matching nothing, so the emptiness of the output is the only
-        # real answer here.
+        # One systemctl call, not two. This used to be
+        #   systemctl list-unit-files X &>/dev/null && [[ -n "$(systemctl ... --no-legend)" ]]
+        # and the first half never decided anything: `list-unit-files <pattern>`
+        # exits 0 for a pattern that matches nothing, so the emptiness of the
+        # output was already the whole answer. The `|| listed=""` is the part
+        # that carries meaning -- it says what a systemctl that genuinely FAILS
+        # means here, and the answer is "treat it as absent and skip", because
+        # the alternative is a run that reports five service failures when what
+        # actually broke was one call to systemctl.
         listed=$(systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null) || listed=""
         if [[ -z "$listed" ]]; then
             warn "unit ${svc}.service not found, skipping"
             continue
         fi
+        existing=$((existing + 1))
         if sudo systemctl enable "$svc" &>/dev/null; then
             success "enabled ${svc}"
         else
@@ -202,7 +206,12 @@ enable_services() {
         fi
     done
     if (( failed )); then
-        error "enable_services: ${failed} of $# unit(s) could not be enabled"
+        # Counted against the units that EXISTED, not against $#. The skipped
+        # ones are excluded from the numerator by design, so including them in
+        # the denominator understates: on a --skip-packages machine, where
+        # three of the five units provision.sh asks for are legitimately
+        # absent, "every unit that exists failed" printed as "1 of 5".
+        error "enable_services: ${failed} of ${existing} installed unit(s) could not be enabled"
         return 1
     fi
 }
