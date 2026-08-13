@@ -14,9 +14,16 @@ git clone https://github.com/guidiamond/GArch.git .dotfiles
 cd .dotfiles/arch_setup && ./install.sh
 ```
 
-The repository is public, so the clone asks for no credentials. That clone is
-copied into the new system at `/home/<user>/.dotfiles`, so stage 2 starts with
-the repo already there.
+The repository is public, so the clone asks for no credentials. The explicit
+`.dotfiles` destination is not decoration: the repository is named GArch, so
+without it git makes a `GArch/` and the next line has nothing to cd into. That
+clone is copied into the new system at `/home/<user>/.dotfiles`, so stage 2
+starts with the repo already there.
+
+The clone above takes the default branch, which must therefore be a branch that
+actually carries this installer -- `install.sh`, `lib/`, `packages/`. Until this
+work is merged, add `-b arch-installer` to the clone, and push the branch first:
+a fresh machine can only fetch what the remote has.
 
 Five phases: preflight (UEFI, network, NTP, keyring, mirrors), locale, disk,
 pacstrap, chroot. Produces a minimal bootable system -- LUKS2 (prompted,
