@@ -167,7 +167,7 @@ HELPERS
         # because the artifact's audience is an operator at a TTY in a
         # half-installed system, who has no repo to cross-reference:
         #
-        # - The sudoers drop-in follows lib/system.sh's setup_lightdm, which
+        # - The sudoers drop-in follows lib/setup.sh's setup_lightdm, which
         #   declines to install a file for the same reason -- not marking a
         #   pacman-owned file locally modified.
         # - The includedir check is fatal on the strength of etc/sudoers
