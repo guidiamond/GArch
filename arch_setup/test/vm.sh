@@ -31,15 +31,20 @@ VM_BRANCH="${VM_BRANCH:-arch-installer}"
 
 # Sized to the job, not to the round number a desktop reaches for. Stage 1
 # writes roughly 6-8G -- a 2G ESP, plus base, base-devel, linux, linux-headers
-# and linux-firmware -- so 12G is that plus half again, and it is stage 1 this
-# harness exists to exercise.
+# and linux-firmware -- so 10G is that plus a couple of gigabytes of margin,
+# and it is stage 1 this harness exists to exercise.
 #
-# The plan's 40G was not just generous, it was unusable: what has to fit on
-# the host is the *virtual* size (see require_space), and 40G exceeds the free
-# space here several times over, so every `create` would have been refused. A
-# stage 2 run on top needs more than 12G -- ask for it explicitly with
+# 12G was the default and did not fit. What has to fit on the host is the
+# *virtual* size (see require_space), and measured in the order the commands
+# are actually run -- fetch, then create -- 12G was refused outright: ~18.6G
+# free, the ISO takes ~1.5G of it and RESERVE keeps 5G, leaving about 12G
+# usable and the guard short by tens of megabytes. Free space here drifted
+# 18744 -> 18667 MiB across one afternoon, so 11G would have been a coin
+# flip. 10G leaves room for that drift.
+#
+# A stage 2 run on top needs more than this -- ask for it explicitly with
 # DISK_SIZE=, and the guard will say whether it fits.
-DISK_SIZE="${DISK_SIZE:-12G}"
+DISK_SIZE="${DISK_SIZE:-10G}"
 # Free space no VM image may eat into. $VM_DIR sits under $HOME, which on this
 # machine is the same filesystem as the desktop's; filling it does a great deal
 # more damage than failing to start a VM does.
@@ -47,8 +52,13 @@ RESERVE="${RESERVE:-5G}"
 RAM="${RAM:-4G}"
 SMP="${SMP:-4}"
 VM_DISPLAY="${VM_DISPLAY:-gtk}"
-# The ISO is ~1.3G today. Allowing 2G covers a release or two of growth; it
-# only ever sizes the pre-download space check.
+# The fallback size of the ISO, for the space check that has to run before
+# there is a file to measure. Measured at 1597014016 bytes -- 1.5G, not the
+# 1.3G this said before, which is the whole problem with writing the number
+# down: it had already drifted. 2G covers a release or two more of that.
+#
+# Kept as a constant because `create` must not depend on the network. `fetch`
+# is online by definition and asks the mirror instead -- see iso_download_mib.
 ISO_MIB=2048
 
 die()  { echo "vm.sh: $*" >&2; exit 1; }
@@ -87,15 +97,37 @@ free_mib() {
 # MiB -> "12.3G". For messages only; nothing branches on this.
 as_gib() { awk -v m="$1" 'BEGIN { printf "%.1fG", m / 1024 }'; }
 
-# The largest whole-GiB virtual disk that would pass require_space right now.
+# What `create` must set aside for an ISO that is not on disk yet.
+#
+# require_space reads *live* free space, so without this the answer depended
+# on the order the two commands were run in. `create` before `fetch` looked at
+# a filesystem the ISO had not landed on, passed, and left the download to eat
+# into RESERVE; `fetch` before `create` saw the same ISO on disk and refused
+# the identical image. Two orderings, two verdicts, and a headroom figure that
+# meant nothing. Counting the absent ISO against the image's budget makes both
+# orderings agree.
+pending_iso_mib() {
+    if [[ -f "$ISO" ]]; then
+        echo 0
+    else
+        echo "$ISO_MIB"
+    fi
+}
+
+# The largest whole-GiB virtual disk that would pass require_space right now,
+# or non-zero when no whole-GiB image would.
+#
+# It used to floor the answer at 1G, which on a host with less free space than
+# RESERVE meant printing "DISK_SIZE=1G" as the way out of a refusal that would
+# refuse 1G just the same -- advice that cannot work, offered at the moment
+# the operator is least placed to notice. Failing instead lets the caller say
+# something true.
 suggest_size() {
     local avail_mib reserve_mib gib
-    avail_mib=$(free_mib "$VM_DIR")  || { echo "10G"; return 0; }
+    avail_mib=$(free_mib "$VM_DIR")    || return 1
     reserve_mib=$(size_mib "$RESERVE") || reserve_mib=0
-    gib=$(( (avail_mib - reserve_mib) / 1024 ))
-    if (( gib < 1 )); then
-        gib=1
-    fi
+    gib=$(( (avail_mib - reserve_mib - $(pending_iso_mib)) / 1024 ))
+    (( gib >= 1 )) || return 1
     echo "${gib}G"
 }
 
@@ -193,6 +225,29 @@ verify_iso() {
     echo "sha256 OK"
 }
 
+# What the download is about to need, asked of the mirror rather than assumed.
+#
+# ISO_MIB is a guess that ages: it said 1.3G for an ISO that is 1.5G today,
+# and a guard that under-reserves is a guard that passes a fetch which then
+# fills the disk. `fetch` is the one caller that is online by definition, so
+# it can just ask. Falls back to the constant on any answer it cannot use --
+# no Content-Length, a mirror that refuses HEAD, no network at all -- because
+# a space check is not worth failing a download over.
+#
+# The last Content-Length wins: -L follows redirects and each hop contributes
+# a header. Plus 64 MiB for the filesystem's own overhead on a file this size.
+iso_download_mib() {
+    local len
+    len=$(curl -fsIL --max-time 20 "$ISO_URL" 2>/dev/null \
+              | tr -d '\r' \
+              | awk 'tolower($1) == "content-length:" { n = $2 } END { print n }') || len=""
+    if [[ "$len" =~ ^[0-9]+$ ]] && (( len > 0 )); then
+        echo $(( (len + 1048575) / 1048576 + 64 ))
+    else
+        echo "$ISO_MIB"
+    fi
+}
+
 cmd_fetch() {
     need curl
     # `if`, not `[[ ... ]] && { ...; return 0; }`: that form leaves a non-zero
@@ -204,7 +259,9 @@ cmd_fetch() {
         echo "ISO already at ${ISO}"
         return 0
     fi
-    require_space "$ISO_MIB" "the Arch ISO" \
+    local need_mib
+    need_mib=$(iso_download_mib)
+    require_space "$need_mib" "the Arch ISO" \
         "Free some space, or point VM_DIR at another filesystem."
     mkdir -p "$VM_DIR"
 
@@ -213,7 +270,7 @@ cmd_fetch() {
     # every later run's `[[ -f "$ISO" ]]` reports as complete -- a broken ISO
     # that never re-downloads itself. -C - resumes one instead. -f so an HTTP
     # error page is not saved as if it were the ISO.
-    echo "Downloading the Arch ISO (~1.3G)..."
+    echo "Downloading the Arch ISO (about $(as_gib "$need_mib"))..."
     curl -fL -C - -o "${ISO}.part" "$ISO_URL" \
         || die "download failed; the partial file is kept at ${ISO}.part -- re-run 'fetch' to resume"
     verify_iso "${ISO}.part"
@@ -244,12 +301,29 @@ cmd_create() {
         die "${VARS} already exists -- './test/vm.sh reset' to start over"
     fi
 
-    local want_mib
+    local want_mib iso_mib what suggested
+    local -a hints
     want_mib=$(size_mib "$DISK_SIZE") \
         || die "invalid DISK_SIZE: '${DISK_SIZE}' (want e.g. 20G)"
-    require_space "$want_mib" "a ${DISK_SIZE} virtual disk" \
-        "Retry with a smaller image:  DISK_SIZE=$(suggest_size) ${0} create" \
-        "Stage 1 needs roughly 8G, so free space first if that suggestion is smaller."
+
+    # The ISO is part of this budget whether or not it has been downloaded --
+    # `boot` needs both on the same filesystem, so an image that only fits
+    # while the ISO is missing does not fit.
+    iso_mib=$(pending_iso_mib)
+    what="a ${DISK_SIZE} virtual disk"
+    if (( iso_mib > 0 )); then
+        what="${what} and the ISO still to fetch"
+    fi
+
+    if suggested=$(suggest_size); then
+        hints=("Retry with a smaller image:  DISK_SIZE=${suggested} ${0} create"
+               "Stage 1 needs roughly 8G, so free space first if that is smaller.")
+    else
+        hints=("No image fits at all: the free space is already inside the ${RESERVE} reserve."
+               "Free some space, lower RESERVE, or point VM_DIR at another filesystem.")
+    fi
+
+    require_space "$(( want_mib + iso_mib ))" "$what" "${hints[@]}"
 
     mkdir -p "$VM_DIR"
     qemu-img create -f qcow2 "$DISK" "$DISK_SIZE"
@@ -380,7 +454,7 @@ A QEMU + OVMF harness for running install.sh end to end against a fake disk.
 
 Environment:
   VM_DIR             where everything lives (default ~/.cache/arch-installer-vm)
-  DISK_SIZE          virtual disk size (default 12G, enough for stage 1)
+  DISK_SIZE          virtual disk size (default 10G, enough for stage 1)
   RESERVE            free space kept for the host (default 5G)
   RAM, SMP           guest memory and vCPUs (default 4G, 4)
   VM_DISPLAY         qemu -display backend (default gtk)
