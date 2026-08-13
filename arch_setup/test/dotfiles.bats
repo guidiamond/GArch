@@ -190,10 +190,11 @@ make_repo_with_conflict() {
     netrc_has_github() { return 1; }
     github_verify_creds() { : > "$TMP/verify_called"; return 0; }
     # Explicit </dev/null: under a real tty (unlike bats' usual inherited
-    # /dev/null stdin) `ask`'s bare `read -rp` would otherwise block
-    # forever waiting for a username that's never coming. EOF makes `ask`
-    # fall back to its default and leaves the token empty either way, so
-    # both assertions below still hold.
+    # /dev/null stdin) `ask`'s `read -rp` would otherwise block forever
+    # waiting for a username that's never coming. At EOF `ask` reports the
+    # failure and returns non-zero, which `run` (errexit off) lets fall
+    # through to the PAT read -- also EOF, also empty -- so the empty-token
+    # guard is still what returns non-zero and both assertions hold.
     run ensure_github_auth </dev/null
     [ "$status" -ne 0 ]
     [ ! -e "$TMP/verify_called" ]

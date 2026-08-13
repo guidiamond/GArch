@@ -24,15 +24,50 @@ banner() {
     printf '%b%s%b\n\n' "${CYAN}${BOLD}" "$line" "$RESET"
 }
 
+# _ask_read <varname> <prompt> [--silent] -- read one line, non-zero on EOF.
+#
+# EOF is a failure, not an empty answer. install.sh wraps these in "ask,
+# validate, re-ask" loops, and a closed stdin used to make `ask` hand back the
+# default (or "") forever, so the loop spun printing prompts nobody could
+# answer. Returning non-zero lets the caller's `set -e` stop the run instead.
+#
+# The locals carry a __ prefix for the reason ask_password documents: `read`
+# assigns in this function's scope, so a caller asking for its own variable
+# named `prompt` would have the answer written to our local and lose it.
+_ask_read() {
+    local __var=$1 __prompt=$2 __silent=${3:-} __rc=0
+    if [[ "$__silent" == "--silent" ]]; then
+        read -rsp "$__prompt" "${__var?}" || __rc=$?
+    else
+        read -rp "$__prompt" "${__var?}" || __rc=$?
+    fi
+    # A failed read that still filled the variable is a last line with no
+    # trailing newline -- an answer, not EOF. `read` assigns the partial input
+    # before returning non-zero, and assigns "" when there was none at all.
+    (( __rc == 0 )) || [[ -n "${!__var}" ]]
+    # NOTE for anyone refactoring the branch above: dropping the -s from the
+    # silent read echoes the root and LUKS passwords to the console, and no
+    # behavioural test in this suite can catch it -- terminal echo is the
+    # terminal's, so it does not appear in captured output, and `script -qec`
+    # with piped stdin produces byte-identical output with and without -s
+    # (measured). test/ui.bats pins it structurally instead.
+}
+
 # Prompts on stderr so the answer is the only thing on stdout and
 # `x=$(ask ...)` captures cleanly.
 ask() {
     local prompt=$1 default=${2:-} input
     if [[ -n "$default" ]]; then
-        read -rp "$(echo -e "${BOLD}${prompt}${RESET} [${default}]: ")" input
+        if ! _ask_read input "$(echo -e "${BOLD}${prompt}${RESET} [${default}]: ")"; then
+            error "ask: end of input while reading '${prompt}'"
+            return 1
+        fi
         echo "${input:-$default}"
     else
-        read -rp "$(echo -e "${BOLD}${prompt}${RESET}: ")" input
+        if ! _ask_read input "$(echo -e "${BOLD}${prompt}${RESET}: ")"; then
+            error "ask: end of input while reading '${prompt}'"
+            return 1
+        fi
         echo "$input"
     fi
 }
@@ -74,8 +109,22 @@ ask_password() {
             return 1 ;;
     esac
     while true; do
-        read -rsp "$(echo -e "${BOLD}${_ap_prompt}${RESET}: ")" _ap_pass1; echo ""
-        read -rsp "$(echo -e "${BOLD}Confirm ${_ap_prompt}${RESET}: ")" _ap_pass2; echo ""
+        # Same EOF rule as `ask`, and it matters more here: the retry loop has
+        # no default to fall back on, so a closed stdin used to spin forever
+        # re-prompting for a password (verified: `ask_password OUT </dev/null`
+        # under `timeout 5` exited 124). install.sh calls this three times.
+        if ! _ask_read _ap_pass1 "$(echo -e "${BOLD}${_ap_prompt}${RESET}: ")" --silent; then
+            echo ""
+            error "ask_password: end of input while reading '${_ap_prompt}'"
+            return 1
+        fi
+        echo ""
+        if ! _ask_read _ap_pass2 "$(echo -e "${BOLD}Confirm ${_ap_prompt}${RESET}: ")" --silent; then
+            echo ""
+            error "ask_password: end of input while reading '${_ap_prompt}'"
+            return 1
+        fi
+        echo ""
         if [[ "$_ap_pass1" != "$_ap_pass2" ]]; then
             warn "Passwords do not match. Try again."
         elif [[ -z "$_ap_pass1" ]]; then
