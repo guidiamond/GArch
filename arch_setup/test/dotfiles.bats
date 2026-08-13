@@ -189,7 +189,12 @@ make_repo_with_conflict() {
 @test "ensure_github_auth refuses an empty PAT instead of asking GitHub" {
     netrc_has_github() { return 1; }
     github_verify_creds() { : > "$TMP/verify_called"; return 0; }
-    run ensure_github_auth
+    # Explicit </dev/null: under a real tty (unlike bats' usual inherited
+    # /dev/null stdin) `ask`'s bare `read -rp` would otherwise block
+    # forever waiting for a username that's never coming. EOF makes `ask`
+    # fall back to its default and leaves the token empty either way, so
+    # both assertions below still hold.
+    run ensure_github_auth </dev/null
     [ "$status" -ne 0 ]
     [ ! -e "$TMP/verify_called" ]
 }
