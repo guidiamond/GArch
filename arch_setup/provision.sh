@@ -180,20 +180,37 @@ open_log() {
 # ---------------- keeping sudo alive ----------------
 
 # `sudo -v` in main authenticates once; sudo's timestamp then expires after
-# whatever timestamp_timeout says (15 minutes by default on Arch). lib/setup.sh
-# runs sudo thirteen times, pkg_install_repo runs `sudo pacman` over ~250
-# packages and yay/makepkg run their own sudo inside the AUR builds, so a
-# provisioning run routinely outlives the timestamp. Every sudo after that
-# re-prompts from behind `tee` -- and a script waiting on a password looks
-# exactly like a script that has hung, which is the whole reason main
-# authenticates before open_log in the first place.
+# timestamp_timeout, which `man 5 sudoers` on this host gives as FIVE minutes
+# by default. lib/setup.sh runs sudo thirteen times, pkg_install_repo runs
+# `sudo pacman` over ~150 packages and yay/makepkg run their own sudo inside the
+# AUR builds, so a provisioning run outlives the timestamp comfortably, and
+# every sudo after that stops to ask for a password again.
 #
-# So refresh it in the background instead. `sudo -n` never prompts, so if the
-# timestamp is somehow gone the loop exits quietly rather than blocking on a
-# password read that nothing is watching; the next real sudo then prompts, the
-# same as it would have without any of this. stdio goes to /dev/null so the
-# loop cannot write into the log and cannot hold the `tee` pipe open after the
-# script exits.
+# So refresh it in the background. `sudo -n` never prompts, so if the timestamp
+# is gone anyway the loop exits quietly rather than blocking on a password read
+# that nothing is watching; the next real sudo then prompts, the same as it
+# would have without any of this. stdio goes to /dev/null so the loop cannot
+# write into the log and cannot hold the `tee` pipe open after the script exits.
+#
+# WHAT IS AND IS NOT ESTABLISHED ABOUT THIS -- sudo keeps a SEPARATE timestamp
+# record per terminal by default (timestamp_type=tty, per man 5 sudoers), so
+# whether this helps at all depends on the loop sharing a record with the
+# foreground pacman/yay:
+#
+#   - MEASURED here, under a real pty: the loop's `sudo -n` and a foreground
+#     `sudo pacman` from the same script run on the SAME controlling terminal
+#     (both pts/N), and with DIFFERENT parent process ids (the loop's parent is
+#     the background subshell, not the script).
+#   - So under the default tty records they share one record and this works;
+#     under timestamp_type=ppid they cannot, by construction -- any background
+#     loop has a pid of its own. tty records also degrade to ppid behaviour
+#     when there is no terminal at all, where nobody could type a password
+#     anyway and sudo fails instead of waiting.
+#   - NOT verified: sudo's actual record keying, which would mean running sudo
+#     for real. This is a best-effort refresh, not a guarantee. What guarantees
+#     the operator is not left staring at a blank screen is that sudo's prompt
+#     goes to /dev/tty, so it is visible even where output is redirected -- see
+#     the note on that in lib/packages.sh's pkg_install_aur.
 start_sudo_keepalive() {
     ( while sudo -n true; do sleep 60; done ) >/dev/null 2>&1 &
     SUDO_KEEPALIVE_PID=$!
