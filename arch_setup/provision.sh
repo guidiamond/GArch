@@ -1,6 +1,10 @@
 #!/bin/bash
 # Stage 2: provision a booted Arch system. Run as your normal user.
-# Idempotent -- safe to re-run at any time to re-sync this machine.
+# Idempotent -- safe to re-run at any time to re-apply this configuration.
+#
+# It does NOT re-sync the repository, though: dotfiles_clone clones only when
+# there is no .git yet and never pulls, so a re-run applies whatever is in the
+# working tree. `git pull` first if you want the newest.
 #
 #   ~/.dotfiles/arch_setup/provision.sh
 #
@@ -37,11 +41,24 @@ HELP=false
 # on this rather than prompting into a closed stdin -- see main.
 INTERACTIVE=true
 TOTAL_PHASES=8
+# The phase currently being entered, set by `phase` below. The summary reports
+# it, so a run that died in phase 5 cannot announce eight completed phases.
+PHASE=0
+# Set immediately before main's own print_summary call, and only there. Unset
+# when print_summary runs means it ran from the EXIT trap, i.e. the run died
+# somewhere above -- which the summary then has to say.
+MAIN_COMPLETED=false
 STEPS_OK=(); STEPS_FAILED=()
 # Empty means "this run is not being logged", which open_log says out loud.
 LOG=""
 SUMMARY_PRINTED=false
 KEEP_LOGS=10
+# Candidate log directories, most preferred first. Empty means "work it out",
+# which is what every real run does; the tests set it so the "nothing is
+# writable" path can be exercised without an unwritable /tmp.
+LOG_DIRS=()
+# PID of the background `sudo -n true` loop, empty when none is running.
+SUDO_KEEPALIVE_PID=""
 
 usage() {
     cat <<'USAGE'
@@ -50,7 +67,9 @@ Usage: provision.sh [--skip-packages] [--skip-gpu] [--no-optional]
 Stage 2 of the Arch install: installs the package set, stows the dotfiles,
 sets the login shell, installs the keyboard layout and enables the services.
 Run as your normal user on a booted system. Idempotent -- re-run it any time
-to re-sync this machine. Stage 1 is arch_setup/install.sh.
+to re-apply this configuration. It does not update the checkout: an existing
+one is used as-is, so `git pull` first if you want the newest. Stage 1 is
+arch_setup/install.sh.
 
   --skip-packages  skip the pacman/yay steps (fast config-only re-run)
   --skip-gpu       skip the GPU phase -- it rebuilds the initramfs and
@@ -90,16 +109,34 @@ parse_args() {
 # screen, and no log file anywhere. So nothing downstream can notice, and
 # "Logging to ~/arch-provision-....log" would be a lie the operator only
 # discovers when they go looking for the file.
+#
+# /tmp is listed on its own rather than as `${TMPDIR:-/tmp}`, because that form
+# substitutes only when TMPDIR is unset or empty: a TMPDIR that is *set and
+# unwritable* plus an unwritable HOME reported "no writable directory for a log
+# file" on a machine where /tmp was fine all along.
+#
+# The pid is in the name so two runs in the same second cannot collide under
+# the O_EXCL below. It goes after the fixed-width timestamp, so prune_logs'
+# `sort -r` still orders chronologically.
 log_path() {
     local dir probe name
-    name="arch-provision-$(date +%Y%m%d-%H%M%S).log"
-    for dir in "${HOME:-}" "${TMPDIR:-/tmp}"; do
+    local -a dirs=("${LOG_DIRS[@]}")
+    (( ${#dirs[@]} )) || dirs=("${HOME:-}" "${TMPDIR:-}" /tmp)
+    name="arch-provision-$(date +%Y%m%d-%H%M%S)-$$.log"
+    for dir in "${dirs[@]}"; do
         [[ -n "$dir" && -d "$dir" ]] || continue
         probe="${dir}/${name}"
         # umask in a subshell so it cannot leak into the rest of the run. The
         # log carries whatever pacman, git and yay print, which is not secret,
         # but it is nobody else's business either.
-        if ( umask 077; : > "$probe" ) 2>/dev/null; then
+        #
+        # noclobber, i.e. O_CREAT|O_EXCL, so this refuses to open a path that
+        # already exists -- including a symlink, which a plain `: >` follows.
+        # It matters on the /tmp fallback, where the directory is shared and
+        # the name was until now entirely predictable: a pre-planted
+        # /tmp/arch-provision-<timestamp>.log -> somewhere-else would have been
+        # truncated, and then written to, with the invoking user's rights.
+        if ( umask 077; set -o noclobber; : > "$probe" ) 2>/dev/null; then
             echo "$probe"
             return 0
         fi
@@ -109,8 +146,10 @@ log_path() {
 
 # One log per run, kept forever, is a $HOME that only grows -- and after a few
 # months of re-runs the useful one is buried. Deliberately narrow: regular
-# files only, this exact name shape only, and only in the directory the log was
-# just written to. `sort -r` is chronological here because the timestamp is
+# files only, this exact name shape only, files owned by the invoking user
+# only (the shape is not a permission on a shared /tmp, and rm'ing someone
+# else's file is not this script's business), and only in the directory the log
+# was just written to. `sort -r` is chronological here because the timestamp is
 # fixed-width.
 prune_logs() {
     local dir=${LOG%/*} old
@@ -118,7 +157,7 @@ prune_logs() {
     while IFS= read -r old; do
         [[ -n "$old" ]] || continue
         rm -f -- "${dir}/${old}" || warn "could not remove the old log ${dir}/${old}"
-    done < <(find "$dir" -maxdepth 1 -type f -name 'arch-provision-*.log' -printf '%f\n' 2>/dev/null \
+    done < <(find "$dir" -maxdepth 1 -type f -uid "$(id -u)" -name 'arch-provision-*.log' -printf '%f\n' 2>/dev/null \
              | sort -r | tail -n "+$((KEEP_LOGS + 1))")
 }
 
@@ -136,6 +175,37 @@ open_log() {
     exec > >(tee -a "$LOG") 2>&1
     info "Logging to ${LOG}"
     prune_logs
+}
+
+# ---------------- keeping sudo alive ----------------
+
+# `sudo -v` in main authenticates once; sudo's timestamp then expires after
+# whatever timestamp_timeout says (15 minutes by default on Arch). lib/setup.sh
+# runs sudo thirteen times, pkg_install_repo runs `sudo pacman` over ~250
+# packages and yay/makepkg run their own sudo inside the AUR builds, so a
+# provisioning run routinely outlives the timestamp. Every sudo after that
+# re-prompts from behind `tee` -- and a script waiting on a password looks
+# exactly like a script that has hung, which is the whole reason main
+# authenticates before open_log in the first place.
+#
+# So refresh it in the background instead. `sudo -n` never prompts, so if the
+# timestamp is somehow gone the loop exits quietly rather than blocking on a
+# password read that nothing is watching; the next real sudo then prompts, the
+# same as it would have without any of this. stdio goes to /dev/null so the
+# loop cannot write into the log and cannot hold the `tee` pipe open after the
+# script exits.
+start_sudo_keepalive() {
+    ( while sudo -n true; do sleep 60; done ) >/dev/null 2>&1 &
+    SUDO_KEEPALIVE_PID=$!
+}
+
+# Called from the EXIT trap. `wait` reaps the loop so bash cannot print a
+# "Terminated" job line after the summary.
+stop_sudo_keepalive() {
+    [[ -n "$SUDO_KEEPALIVE_PID" ]] || return 0
+    kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    wait "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    SUDO_KEEPALIVE_PID=""
 }
 
 # ---------------- where the dotfiles are ----------------
@@ -174,10 +244,12 @@ resolve_dotfiles_dir() {
 # so a subshell would silently empty the "packages that failed to build" line
 # while still looking like it worked. The one thing a subshell buys -- catching
 # an `exit` from die (and so from confirm_step, which dies when you decline) --
-# is covered two other ways instead: no lib/ function any step can reach calls
-# either, which test/provision.bats pins as a transitive property rather than a
-# promise; and print_summary runs from an EXIT trap, so even an exit nobody
-# predicted leaves a partial report rather than silence.
+# is covered two other ways instead: nothing a step can reach ends the process,
+# which test/provision.bats pins as a transitive property rather than a promise
+# (die, confirm_step, and a bare `exit` outside a subshell, all three -- an exit
+# is an exit however it is spelled); and print_summary runs from an EXIT trap,
+# so even an exit nobody predicted leaves a report that says the run stopped
+# rather than silence.
 #
 # NOTE for anything invoked through here: `if "$@"` puts the callee in a
 # condition context, and bash suspends errexit for the WHOLE DYNAMIC EXTENT of
@@ -197,19 +269,38 @@ step() {
     fi
 }
 
+# Enters a phase: records how far the run has got, then prints the banner. The
+# recording is what lets an aborted run's summary say where it stopped.
+phase() {
+    PHASE=$1
+    banner "$1" "$TOTAL_PHASES" "$2"
+}
+
 # Idempotent, because it is called both from main's tail (the normal path) and
 # from the EXIT trap (the abnormal one), and exactly one of them should print.
 #
-# It must not run `exit` and must not end on a failing command: an EXIT trap
-# leaves the shell's status alone unless it does one of those. See install.sh's
-# cleanup() for where that was measured.
+# It must not run `exit`: that is what makes an EXIT trap replace the shell's
+# status. (Ending on a failing command does NOT -- measured on bash 5.3.15, a
+# trap whose last command is `false` still leaves `exit 7` as 7. The `return 0`
+# below is kept for the caller's sake, since main calls this directly too.)
+#
+# The two callers are distinguished by MAIN_COMPLETED, and they must be: from
+# the trap this used to print `[8/8] Summary` over a green list of the steps
+# that had run, so a run that died in phase 5 reported eight completed phases,
+# said nothing about having stopped, and -- on an errexit abort rather than a
+# die -- did not even have an error line above it. That is the same "no network
+# on the next boot" failure the enable_services fix was about, reported as
+# success.
 print_summary() {
     if [[ "$SUMMARY_PRINTED" == true ]]; then
         return 0
     fi
     SUMMARY_PRINTED=true
     echo ""
-    banner "$TOTAL_PHASES" "$TOTAL_PHASES" "Summary"
+    banner "$PHASE" "$TOTAL_PHASES" "Summary"
+    if [[ "$MAIN_COMPLETED" != true ]]; then
+        error "run aborted before completion -- phases after ${PHASE} did not run"
+    fi
     local s
     # "${empty[@]}" expands to nothing under `set -u` on bash 4.4 and later
     # (verified on 5.3); older bash aborted on it, which is why this looks like
@@ -251,25 +342,28 @@ main() {
     # here costs nothing.
     sudo -v || die "sudo is required"
 
+    # Armed here rather than further down, so that it also covers the keepalive
+    # started on the next line -- and still after the flags are parsed, so
+    # `--help` and an unknown flag do not print an empty summary. See
+    # print_summary for why it exists at all.
+    trap 'stop_sudo_keepalive; print_summary' EXIT
+    start_sudo_keepalive
+
     open_log
     resolve_dotfiles_dir
 
-    # Armed after the flags are parsed, so `--help` and an unknown flag do not
-    # print an empty summary. See print_summary for why this exists at all.
-    trap print_summary EXIT
-
-    banner 1 "$TOTAL_PHASES" "Dotfiles"
+    phase 1 "Dotfiles"
     step "dotfiles-clone" dotfiles_clone
     step "stow"           stow_apply "$DOTFILES_DIR" "$HOME"
 
-    banner 2 "$TOTAL_PHASES" "AUR Helper"
+    phase 2 "AUR Helper"
     if [[ "$SKIP_PACKAGES" == true ]]; then
         info "skipping (--skip-packages)"
     else
         step "yay" ensure_yay
     fi
 
-    banner 3 "$TOTAL_PHASES" "Packages"
+    phase 3 "Packages"
     if [[ "$SKIP_PACKAGES" == true ]]; then
         info "skipping (--skip-packages)"
     else
@@ -284,14 +378,14 @@ main() {
         fi
     fi
 
-    banner 4 "$TOTAL_PHASES" "Shell"
+    phase 4 "Shell"
     step "zsh-dirs"  setup_zsh_dirs
     step "zsh-shell" setup_shell
 
-    banner 5 "$TOTAL_PHASES" "Keyboard"
+    phase 5 "Keyboard"
     step "xkb" setup_xkb
 
-    banner 6 "$TOTAL_PHASES" "Graphics"
+    phase 6 "Graphics"
     # The only phase that touches the bootloader and the initramfs, and the only
     # one whose failure mode is a machine that does not boot. It is therefore
     # the only one that refuses to run itself: --skip-gpu turns it off, and with
@@ -307,21 +401,58 @@ main() {
         warn "and there is no terminal here to confirm the driver. Re-run"
         warn "interactively if this machine needs its GPU driver configured."
     else
-        local detected choice
+        local detected choice=""
         detected=$(detect_gpu)
         info "Detected GPU: ${detected}"
         warn "This phase rebuilds the initramfs and grub.cfg."
-        choice=$(ask "GPU driver (nvidia / amd / intel / none)" "$detected")
-        step "gpu" setup_gpu "$choice"
+        # Ask, validate, re-ask -- and treat EOF the way the branch above
+        # treats a missing terminal. Two separate things were wrong with the
+        # bare `choice=$(ask ...)` this replaces, and both of them bit on a
+        # tty, which the INTERACTIVE guard above does nothing about:
+        #
+        #   - `ask` fails at EOF whether or not stdin is a terminal, and Ctrl-D
+        #     is the natural "I would rather not answer this" keystroke at a
+        #     free-text prompt. Under errexit the failed command substitution
+        #     took the whole run down between phases 6 and 7, so lightdm and
+        #     the services never ran -- no NetworkManager on the next boot --
+        #     while the EXIT-trap summary printed eight green steps.
+        #   - the answer went to setup_gpu unvalidated, and `NVIDIA` (which is
+        #     what the "Detected GPU: nvidia" line above invites you to type)
+        #     was silently accepted as "no GPU driver selected", green.
+        #
+        # gpu_packages now rejects an unrecognised value, so a typo that got
+        # this far would be a failed step rather than a green no-op; re-asking
+        # is better still, since the operator is right there. The loop cannot
+        # spin: `ask` only ever fails at EOF, and EOF breaks out.
+        while true; do
+            if ! choice=$(ask "GPU driver (nvidia / amd / intel / none)" "$detected"); then
+                choice=""
+                warn "no answer at the GPU prompt; skipping the graphics phase."
+                warn "Re-run interactively if this machine needs its GPU driver configured."
+                break
+            fi
+            case "$choice" in
+                nvidia|amd|intel|none) break ;;
+                *) warn "answer nvidia, amd, intel or none (got '${choice}')" ;;
+            esac
+        done
+        if [[ -n "$choice" ]]; then
+            step "gpu" setup_gpu "$choice"
+        fi
     fi
 
-    banner 7 "$TOTAL_PHASES" "Display Manager"
+    phase 7 "Display Manager"
     step "lightdm" setup_lightdm
 
-    banner 8 "$TOTAL_PHASES" "Services"
+    phase 8 "Services"
     step "zram"     setup_zram
     step "services" enable_services NetworkManager lightdm docker bluetooth cups
 
+    # Immediately before the call, and nowhere else: everything above has now
+    # run, so the summary about to be printed is a complete one. Anything that
+    # aborts the run before this line leaves it false, and print_summary says so
+    # rather than reporting the phases that never ran as done.
+    MAIN_COMPLETED=true
     print_summary
 
     if (( ${#STEPS_FAILED[@]} )); then

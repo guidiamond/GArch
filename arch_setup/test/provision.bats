@@ -107,11 +107,32 @@ in_provision() {
 
 # The property step's comment relies on, checked rather than asserted: walk the
 # call graph out from every function provision.sh hands to step and confirm
-# none of them can reach die (which exits the process) or confirm_step (which
-# dies when you decline). If one ever can, step cannot catch it and the run
-# dies mid-phase -- so this is the thing to know before adding a confirmation
-# prompt to a setup_* function.
-@test "no function reachable from a step can reach die or confirm_step" {
+# that nothing it reaches can end the process. If one ever can, step cannot
+# catch it and the run dies mid-phase -- so this is the thing to know before
+# adding a confirmation prompt to a setup_* function.
+#
+# Three ways out, not one: `die` (which exits), `confirm_step` (which dies when
+# you decline), and a bare `exit`. The walk used to look for the first two
+# only, which made it one refactor away from missing the very thing it exists
+# for -- lib/dotfiles.sh's netrc_write already contains two `exit 1`s.
+#
+# Those two are safe and must not fail this: they sit inside a `( ... ) ||
+# return 1` subshell, where exit ends the subshell and the function returns
+# normally. So `exit` is looked for only OUTSIDE parenthesised subshells, which
+# is what strip_subshells below removes -- innermost-first, so nesting is
+# handled, and iterated to a fixed point.
+strip_subshells() {
+    # Newlines are swapped for \001 first: a subshell spans lines (netrc_write's
+    # does), and sed works one line at a time, so without this the pattern below
+    # never matches the thing it is written for -- and the carve-out would be
+    # inert, which is a green test asserting nothing.
+    printf '%s' "$1" \
+        | tr '\n' '\001' \
+        | sed -E ':a; s/\([^()]*\)//g; ta' \
+        | tr '\001' '\n'
+}
+
+@test "no function reachable from a step can reach die, confirm_step or exit" {
     source "${ARCH_SETUP}/lib/ui.sh"
     source "${ARCH_SETUP}/lib/packages.sh"
     source "${ARCH_SETUP}/lib/dotfiles.sh"
@@ -126,7 +147,7 @@ in_provision() {
     [ "${#seeds[@]}" -ge 10 ]
 
     local -A seen=()
-    local f w body
+    local f w body outer
     queue=("${seeds[@]}")
     while (( ${#queue[@]} )); do
         f=${queue[0]}; queue=("${queue[@]:1}")
@@ -136,8 +157,16 @@ in_provision() {
         # declare -f strips comments, so a comment mentioning die cannot
         # trigger this and a real call cannot hide behind one.
         body=$(declare -f "$f")
+        # die and confirm_step are looked for in the whole body, subshells
+        # included -- deliberately stricter than the exit rule below, because
+        # neither belongs anywhere under a step even where it would be
+        # survivable.
         if grep -qE '(^|[^[:alnum:]_])(die|confirm_step)([[:space:];&|)]|$)' <<< "$body"; then
             bad+=("$f")
+        fi
+        outer=$(strip_subshells "$body")
+        if grep -qE '(^|[^[:alnum:]_])exit([[:space:];&|)]|$)' <<< "$outer"; then
+            bad+=("${f} (bare exit)")
         fi
         while IFS= read -r w; do
             declare -F "$w" >/dev/null && queue+=("$w")
@@ -148,7 +177,7 @@ in_provision() {
     # helpers the step functions call.
     [ "${#seen[@]}" -ge 20 ]
     [ "${#bad[@]}" -eq 0 ] || {
-        echo "these step-reachable functions can reach die/confirm_step: ${bad[*]}" >&2
+        echo "these step-reachable functions can end the process: ${bad[*]}" >&2
         return 1
     }
 }
@@ -174,18 +203,53 @@ in_provision() {
     [[ "$output" == "${TMP}/fallback/arch-provision-"*".log" ]]
 }
 
-@test "log_path fails when nothing is writable, and open_log says so instead of lying" {
+# `${TMPDIR:-/tmp}` substitutes only when TMPDIR is unset or empty, so a TMPDIR
+# that is SET and unwritable used to mean "no log" on a machine whose /tmp was
+# fine. /tmp is a candidate in its own right now.
+@test "log_path falls back to /tmp when both HOME and TMPDIR are unwritable" {
     mkdir -p "$TMP/ro"
     chmod 500 "$TMP/ro"
     run env HOME="$TMP/ro" TMPDIR="$TMP/ro" bash -c "source '${PROVISION}'; log_path"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "/tmp/arch-provision-"*".log" ]]
+    [ -f "$output" ]
+    rm -f "$output"
+}
+
+# The real candidate list ends in /tmp, which is writable on any machine this
+# suite can run on, so the "nothing is writable" path is reachable only by
+# supplying the list. That is what LOG_DIRS is for.
+@test "log_path fails when nothing is writable, and open_log says so instead of lying" {
+    mkdir -p "$TMP/ro"
+    chmod 500 "$TMP/ro"
+    run env HOME="$TMP/ro" bash -c "source '${PROVISION}'; LOG_DIRS=('${TMP}/ro'); log_path"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
 
-    run env HOME="$TMP/ro" TMPDIR="$TMP/ro" bash -c "source '${PROVISION}'; open_log; printf 'LOG[%s]' \"\$LOG\""
+    run env HOME="$TMP/ro" bash -c "source '${PROVISION}'; LOG_DIRS=('${TMP}/ro'); open_log; printf 'LOG[%s]' \"\$LOG\""
     [ "$status" -eq 0 ]
     [[ "$output" == *"will not be logged"* ]]
     [[ "$output" == *"LOG[]"* ]]
     [[ "$output" != *"Logging to"* ]]
+}
+
+# O_EXCL, so a pre-planted symlink at the (previously entirely predictable)
+# path in a shared /tmp is not followed and truncated. The next candidate is
+# used instead.
+@test "log_path refuses a path that is already a symlink" {
+    mkdir -p "$TMP/first" "$TMP/second"
+    echo precious > "$TMP/victim"
+    # date is stubbed so the planted name and the probed name cannot disagree
+    # by a second.
+    run env HOME="$TMP" bash -c "
+        source '${PROVISION}'
+        date(){ echo 19700101-000000; }
+        LOG_DIRS=('${TMP}/first' '${TMP}/second')
+        ln -s '${TMP}/victim' \"${TMP}/first/arch-provision-19700101-000000-\$\$.log\"
+        log_path"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "${TMP}/second/arch-provision-"*".log" ]]
+    [ "$(cat "$TMP/victim")" = "precious" ]
 }
 
 @test "prune_logs keeps the newest KEEP_LOGS and touches nothing else" {
@@ -280,31 +344,66 @@ in_provision() {
 # redirect and every step function are replaced, so this runs the control flow
 # and nothing else. HOME is $BATS_TEST_TMPDIR throughout.
 
-# stub_main <extra shell code> -- everything provision.sh's main would touch,
-# replaced with a recorder. Defined after the source so it wins.
+# Everything provision.sh's main would touch, replaced with a recorder.
+# Defined after the source so it wins. Shared by both drivers below so that the
+# pty cases and the non-terminal cases cannot drift apart.
+stub_prelude() {
+    cat <<'STUBS'
+sudo(){ :; }
+open_log(){ LOG=''; }
+resolve_dotfiles_dir(){ :; }
+dotfiles_clone(){ :; }
+stow_apply(){ :; }
+ensure_yay(){ :; }
+pkg_install_repo(){ :; }
+pkg_install_aur(){ echo "PKG_INSTALL_AUR[$1]"; }
+setup_zsh_dirs(){ :; }
+setup_shell(){ :; }
+setup_xkb(){ :; }
+setup_lightdm(){ :; }
+setup_zram(){ :; }
+enable_services(){ echo "ENABLE_SERVICES_CALLED[$*]"; }
+detect_gpu(){ echo nvidia; }
+setup_gpu(){ echo "SETUP_GPU_CALLED[$1]"; }
+STUBS
+}
+
+# stubbed_main <extra shell code> [args] -- main with stdin closed, i.e.
+# INTERACTIVE=false. Every case that needs a terminal uses pty_main below.
 stubbed_main() {
     local extra=${1:-} args=${2:-}
     HOME="$TMP" bash -c "
         source '${PROVISION}'
-        sudo(){ :; }
-        open_log(){ LOG=''; }
-        resolve_dotfiles_dir(){ :; }
-        dotfiles_clone(){ :; }
-        stow_apply(){ :; }
-        ensure_yay(){ :; }
-        pkg_install_repo(){ :; }
-        pkg_install_aur(){ :; }
-        setup_zsh_dirs(){ :; }
-        setup_shell(){ :; }
-        setup_xkb(){ :; }
-        setup_lightdm(){ :; }
-        setup_zram(){ :; }
-        enable_services(){ :; }
-        detect_gpu(){ echo nvidia; }
-        setup_gpu(){ echo \"SETUP_GPU_CALLED[\$1]\"; }
+        $(stub_prelude)
         ${extra}
         main ${args}
     " </dev/null
+}
+
+# pty_main <extra shell code> [args] [input] -- the same, on a REAL terminal.
+#
+# Without this there was no coverage of either interactive branch of main at
+# all: stubbed_main always runs `</dev/null`, so `[[ -t 0 ]]` is false and both
+# the optional-group question and the GPU prompt are skipped every time. That
+# blind spot is exactly where the Ctrl-D abort and the unvalidated-answer no-op
+# lived.
+#
+# `script -qec` is the established way to get a pty here (see test/ui.bats).
+# Feeding it a pipe gives the child a terminal on stdin AND lets the case
+# supply keystrokes; \004 is Ctrl-D, which is what makes an EOF at a prompt
+# reproducible without closing anything. `timeout` because a prompt loop that
+# regresses into a spin would otherwise hang the whole suite rather than fail
+# this case.
+pty_main() {
+    local extra=${1:-} args=${2:-} input=${3:-}
+    {
+        echo "source '${PROVISION}'"
+        stub_prelude
+        printf '%s\n' "$extra"
+        echo "main ${args}"
+    } > "${TMP}/pty-stub.sh"
+    printf '%s' "$input" \
+        | HOME="$TMP" timeout 60 script -qec "bash '${TMP}/pty-stub.sh'" /dev/null
 }
 
 @test "a clean non-interactive run reaches every phase and exits 0" {
@@ -378,6 +477,13 @@ stubbed_main() {
 # before step regains control. The EXIT trap is why that leaves a partial
 # report rather than silence between the last banner and nothing. The
 # reachability test above is what keeps this hypothetical.
+#
+# "Honest" is asserted, not assumed. The trap-printed summary used to be
+# indistinguishable from a successful one: `banner "$TOTAL_PHASES"` hard-coded
+# [8/8], so a run that died in phase 5 announced eight completed phases over a
+# list of green steps and said nothing about having stopped. The absence of the
+# phase-7 banner (below) proves the run stopped; it does not make the summary
+# say so.
 @test "an exit from inside a step still prints a summary, from the EXIT trap" {
     run stubbed_main 'setup_xkb(){ die "declined"; }'
     [ "$status" -eq 1 ]
@@ -385,7 +491,137 @@ stubbed_main() {
     [[ "$output" == *"Summary"* ]]
     # Everything before the die is reported...
     [[ "$output" == *"zsh-dirs"* ]]
-    # ...and it is honest about having stopped there.
+    # ...the phases after it did not run...
     [[ "$output" != *"[7/8]"* ]]
     [[ "$output" != *"Provisioning complete"* ]]
+    # ...and the summary says both which phase it got to and that it stopped.
+    [[ "$output" == *"[5/8] Summary"* ]]
+    [[ "$output" != *"[8/8]"* ]]
+    [[ "$output" == *"run aborted before completion -- phases after 5 did not run"* ]]
+}
+
+# The same honesty for an errexit abort rather than a die, which is the harder
+# case: there is no error line above the summary at all, so the summary is the
+# only thing that can say anything went wrong.
+@test "an errexit abort mid-run is reported as an abort, not as a green summary" {
+    # A failure OUTSIDE a step, where errexit is in force -- unlike a step
+    # callee, which runs in a condition context. main dies on the spot with
+    # nothing printed.
+    run stubbed_main 'real_phase(){ PHASE=$1; banner "$1" "$TOTAL_PHASES" "$2"; }
+                      phase(){ [[ "$1" == 7 ]] && return 1; real_phase "$@"; }'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"[6/8] Summary"* ]]
+    [[ "$output" == *"phases after 6 did not run"* ]]
+    [[ "$output" == *"run aborted before completion"* ]]
+    [[ "$output" != *"[8/8] Summary"* ]]
+    [[ "$output" != *"Provisioning complete"* ]]
+}
+
+# A completed run must NOT carry the abort line -- the assertion above is
+# worthless if the message is unconditional.
+@test "a completed run says nothing about having been aborted" {
+    run stubbed_main
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"[8/8] Summary"* ]]
+    [[ "$output" != *"aborted"* ]]
+}
+
+# --- main on a real terminal -----------------------------------------------
+#
+# Both branches the non-terminal cases above can never reach.
+
+# C1: `ask` fails at EOF whether or not stdin is a tty, and Ctrl-D is the
+# natural "I do not want to answer this" keystroke at a free-text prompt.
+# Against the bare `choice=$(ask ...)` this replaces, the failed command
+# substitution took the whole run down under errexit between phases 6 and 7 --
+# so lightdm and the services never ran, NetworkManager was not enabled, and
+# the EXIT-trap summary printed `[8/8]` over eight green steps.
+@test "Ctrl-D at the GPU prompt skips the phase and the run still finishes" {
+    run pty_main '' '' 'n
+'"$(printf '\004')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no answer at the GPU prompt"* ]]
+    [[ "$output" != *"SETUP_GPU_CALLED"* ]]
+    # The phases after it ran -- this is the part that was actually broken.
+    [[ "$output" == *"[7/8]"* ]]
+    [[ "$output" == *"ENABLE_SERVICES_CALLED"* ]]
+    [[ "$output" == *"NetworkManager"* ]]
+    [[ "$output" == *"Provisioning complete"* ]]
+}
+
+# I2: `NVIDIA` is what the "Detected GPU: nvidia" line above the prompt invites
+# you to type. It used to reach setup_gpu, come back from gpu_packages as an
+# empty package list, and print "no GPU driver selected" as a green step.
+@test "an unrecognised GPU answer is re-asked, not silently accepted" {
+    run pty_main '' '' 'n
+NVIDIA
+amd
+'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"answer nvidia, amd, intel or none (got 'NVIDIA')"* ]]
+    [[ "$output" == *"SETUP_GPU_CALLED[amd]"* ]]
+    [[ "$output" != *"SETUP_GPU_CALLED[NVIDIA]"* ]]
+    [[ "$output" == *"Provisioning complete"* ]]
+}
+
+# The interactive happy path, and the only coverage of the optional-group
+# question: answered yes here, so the optional list is installed.
+@test "an interactive run answers both prompts" {
+    run pty_main '' '' 'y
+intel
+'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PKG_INSTALL_AUR["*"optional.txt]"* ]]
+    [[ "$output" == *"SETUP_GPU_CALLED[intel]"* ]]
+    [[ "$output" == *"[8/8] Summary"* ]]
+    [[ "$output" != *"aborted"* ]]
+}
+
+# --- the sudo keepalive ----------------------------------------------------
+#
+# `sudo -v` authenticates once and the timestamp expires (15 minutes by
+# default) long before ~250 packages and the AUR builds are done. Every sudo
+# after that re-prompts from behind tee, where a script waiting for a password
+# and a script that has hung look identical.
+
+@test "the sudo keepalive runs in the background and is killed on the way out" {
+    run in_provision 'sudo(){ :; }
+                      start_sudo_keepalive
+                      pid=$SUDO_KEEPALIVE_PID
+                      kill -0 "$pid" 2>/dev/null && echo ALIVE
+                      stop_sudo_keepalive
+                      kill -0 "$pid" 2>/dev/null && echo STILL_RUNNING
+                      printf "PID[%s]" "$SUDO_KEEPALIVE_PID"'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ALIVE"* ]]
+    [[ "$output" != *"STILL_RUNNING"* ]]
+    [[ "$output" == *"PID[]"* ]]
+}
+
+# It must never block on a password read that nothing is watching: `sudo -n`
+# fails instead of prompting, and the loop then exits rather than spinning.
+@test "the keepalive exits quietly when sudo can no longer refresh unprompted" {
+    run in_provision 'sudo(){ return 1; }
+                      start_sudo_keepalive
+                      pid=$SUDO_KEEPALIVE_PID
+                      wait "$pid" 2>/dev/null || true
+                      kill -0 "$pid" 2>/dev/null && echo STILL_RUNNING
+                      echo DONE'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DONE"* ]]
+    [[ "$output" != *"STILL_RUNNING"* ]]
+}
+
+# Pinned structurally: main's trap is what kills the loop on every exit path,
+# and it has to be armed BEFORE the loop starts, or a failure in between leaks
+# it. Behaviourally this is a race -- the background loop may not have been
+# scheduled at all before a fully stubbed main is over -- so the ordering is
+# asserted on the source instead.
+@test "main arms the killing trap before it starts the keepalive" {
+    local trap_line start_line
+    trap_line=$(grep -n "^ *trap 'stop_sudo_keepalive; print_summary' EXIT$" "$PROVISION" | cut -d: -f1)
+    start_line=$(grep -n '^ *start_sudo_keepalive$' "$PROVISION" | cut -d: -f1)
+    [ -n "$trap_line" ]
+    [ -n "$start_line" ]
+    [ "$trap_line" -lt "$start_line" ]
 }
