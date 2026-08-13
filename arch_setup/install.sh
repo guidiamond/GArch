@@ -275,8 +275,9 @@ phase_locale() {
 }
 
 # ---------------- phase 3: disk -- FIRST DESTRUCTIVE PHASE ----------------
-# Everything before this point is reversible by pressing ctrl-c. From the
-# Type-YES gate below onward it is not.
+# Nothing on any disk is written until the Type-YES gate below. Phase 1 does
+# touch the ISO's own pacman database and mirrorlist, but those live on tmpfs
+# and are gone at reboot.
 phase_disk() {
     banner 3 "$TOTAL_PHASES" "Disk Setup"
     info "Available disks:"

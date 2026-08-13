@@ -1,8 +1,8 @@
 #!/bin/bash
-# Shared transforms, host probes and one idempotent function per subsystem.
+# Shared transforms, host probes and actions, and one idempotent function per subsystem.
 # Requires lib/ui.sh.
 #
-# COUPLING: everything in the first three sections below -- hooks_line,
+# COUPLING: everything in the first four sections below -- hooks_line,
 # modules_line, gpu_packages, require_vars, grub_cmdline_add,
 # locale_gen_uncomment, locale_listed, link_timezone, detect_ucode, detect_gpu,
 # needs_grub_install, list_keymaps, net_check, refresh_keyring, rank_mirrors
@@ -251,6 +251,32 @@ net_check() {
     curl -sSf --max-time 10 -o /dev/null https://archlinux.org/
 }
 
+detect_gpu() {
+    local vga
+    vga=$(lspci -mm 2>/dev/null | grep -iE 'VGA|3D controller' || true)
+    case "${vga,,}" in
+        *nvidia*) echo nvidia ;;
+        *"advanced micro devices"*|*amd*|*ati*) echo amd ;;
+        *intel*) echo intel ;;
+        *) echo none ;;
+    esac
+}
+
+# True (0) when GRUB still needs installing. Takes the ESP mountpoint.
+needs_grub_install() {
+    local esp=${1:-/boot}
+    [[ -f "${esp}/EFI/GRUB/grubx64.efi" ]] && return 1
+    return 0
+}
+
+# --- host actions (root, no sudo -- stage 1) --------------------------------
+#
+# These change the host rather than report on it: one syncs the pacman database
+# and installs a package, the other overwrites /etc/pacman.d/mirrorlist. Split
+# out of "host probes" above so that scanning the section tells you which it
+# is. Distinct from "subsystem setup" below too: that runs in stage 2 through
+# sudo, these run in stage 1 as root on the live ISO, where there is no sudo.
+
 # Refresh the package-signing keyring before anything is installed from a
 # mirror. Fatal for the caller: this fails often enough to matter on an ISO a
 # few months old, and pacstrap several phases later would then fail with
@@ -291,24 +317,6 @@ rank_mirrors() {
     if ! reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist >/dev/null 2>&1; then
         warn "reflector failed; keeping the ISO's mirrorlist"
     fi
-}
-
-detect_gpu() {
-    local vga
-    vga=$(lspci -mm 2>/dev/null | grep -iE 'VGA|3D controller' || true)
-    case "${vga,,}" in
-        *nvidia*) echo nvidia ;;
-        *"advanced micro devices"*|*amd*|*ati*) echo amd ;;
-        *intel*) echo intel ;;
-        *) echo none ;;
-    esac
-}
-
-# True (0) when GRUB still needs installing. Takes the ESP mountpoint.
-needs_grub_install() {
-    local esp=${1:-/boot}
-    [[ -f "${esp}/EFI/GRUB/grubx64.efi" ]] && return 1
-    return 0
 }
 
 # --- subsystem setup (needs sudo, host-only) -------------------------------
