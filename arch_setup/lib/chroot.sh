@@ -243,6 +243,12 @@ chmod 440 /etc/sudoers.d/10-wheel
 # Without it the administrator account has no sudo at all, which is not a
 # warning-grade outcome -- and failing here, before the initramfs and
 # bootloader stages, aborts cleanly instead of half-building a system.
+#
+# Fatal is safe on a stock install: the sudoers pacstrap lays down comes from
+# the sudo package, and in sudo-1.9.17.p2-6 line 139 is an uncommented
+# "@includedir /etc/sudoers.d". Verified by extracting etc/sudoers from the
+# package rather than from memory -- so this aborts only where the assumption
+# genuinely does not hold.
 if ! grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers; then
     error "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} would have no sudo"
     exit 1
