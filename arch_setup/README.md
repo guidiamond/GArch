@@ -139,9 +139,11 @@ than a target. Unprivileged, it fails loudly instead.
 ./test/vm.sh reset     # delete the image and the vars, then create again
 ```
 
-Needs `qemu`, `edk2-ovmf` and access to `/dev/kvm`. The image is 12G by
-default, which fits stage 1 (roughly 8G) and not much else; a stage 2 run on
-top wants more, so ask for it: `DISK_SIZE=20G ./test/vm.sh create`.
+Needs `qemu`, `edk2-ovmf` and access to `/dev/kvm`. The image is 10G by
+default, which fits stage 1 (roughly 6-8G) and not much else. Asking for more
+is `DISK_SIZE=20G ./test/vm.sh create` -- but check it fits first: on this
+machine 20G is short by 8G and the guard refuses it outright. Run `create` and
+read what it computes; the refusal names a size that works.
 
 `create` checks the *virtual* size against the host's free space and refuses
 rather than warns. qcow2 is sparse, so without that check `create` succeeds on
