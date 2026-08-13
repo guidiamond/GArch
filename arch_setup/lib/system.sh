@@ -75,6 +75,90 @@ grub_cmdline_add() {
         || { error "grub_cmdline_add: failed to write '${kv}' to ${file}"; return 1; }
 }
 
+# require_vars NAME... -- every named variable must exist and be non-empty.
+# Names them all at once so a caller running under `set -u` fails with one
+# readable list before it mutates anything, rather than dying on a bare
+# "unbound variable" partway through.
+require_vars() {
+    local name missing=()
+    for name in "$@"; do
+        # The `-` default is what makes this safe under `set -u`.
+        [[ -n "${!name-}" ]] || missing+=("$name")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        error "missing or empty required config value(s): ${missing[*]}"
+        return 1
+    fi
+}
+
+# locale_gen_uncomment <file> <locale> -- uncomment the locale.gen entry whose
+# locale name is exactly <locale>.
+#
+# The first field is compared as a fixed string rather than interpolating
+# <locale> into a regex: the value comes straight from an unvalidated prompt,
+# and in a regex the '.' of 'en_US.UTF-8' is a wildcard -- it leaves
+# '#en_USX.UTF-8' alone but does uncomment '#en_USxUTF-8'. Absence is an
+# error, not a no-op: sed and locale-gen both exit 0 having done nothing,
+# which leaves /etc/locale.conf naming a locale the system does not have.
+locale_gen_uncomment() {
+    local file=$1 locale=$2 tmp mode
+    [[ -n "$locale" ]] || { error "locale_gen_uncomment: empty locale"; return 1; }
+    [[ -f "$file" ]] || { error "locale_gen_uncomment: no such file: ${file}"; return 1; }
+
+    tmp=$(mktemp "${file}.XXXXXX") \
+        || { error "locale_gen_uncomment: cannot create a temp file next to ${file}"; return 1; }
+
+    if ! awk -v loc="$locale" '
+        !found {
+            probe = $0
+            sub(/^#[[:space:]]*/, "", probe)
+            split(probe, f, /[[:space:]]+/)
+            if (f[1] == loc) { print probe; found = 1; next }
+        }
+        { print }
+        END { exit(found ? 0 : 1) }
+    ' "$file" > "$tmp"; then
+        rm -f "$tmp"
+        error "locale_gen_uncomment: ${locale} is not listed in ${file}"
+        return 1
+    fi
+
+    # Moved into place, not copied over: a `cat` dying midway would leave the
+    # file truncated with the original already gone. mktemp makes 0600, so the
+    # original mode is captured first and restored after -- a locale.gen only
+    # root can read is a surprise nobody needs later.
+    mode=$(stat -c '%a' "$file") \
+        || { rm -f "$tmp"; error "locale_gen_uncomment: cannot stat ${file}"; return 1; }
+    if ! mv "$tmp" "$file"; then
+        rm -f "$tmp"
+        error "locale_gen_uncomment: failed to replace ${file}"
+        return 1
+    fi
+    chmod "$mode" "$file" || { error "locale_gen_uncomment: failed to restore mode ${mode} on ${file}"; return 1; }
+}
+
+# link_timezone <zoneinfo-dir> <tz> <localtime-path>
+#
+# -f, not -e: /usr/share/zoneinfo/America is a directory, and "America" is the
+# obvious half-typed form of the default "America/Sao_Paulo". Linking
+# /etc/localtime at a directory leaves the clock on UTC and says nothing.
+link_timezone() {
+    local zoneinfo=$1 tz=$2 localtime=$3 src
+    src="${zoneinfo}/${tz}"
+    if [[ ! -f "$src" ]]; then
+        error "link_timezone: no such timezone: ${src}"
+        return 1
+    fi
+    # -n matters on the retry, not the first run: if /etc/localtime is already
+    # a symlink to a *directory*, plain `ln -sf` dereferences it and creates
+    # the new link inside that directory instead, fails, and every subsequent
+    # attempt dies on the same line until someone removes /etc/localtime.
+    if ! ln -sfn "$src" "$localtime"; then
+        error "link_timezone: failed to link ${localtime} -> ${src}"
+        return 1
+    fi
+}
+
 detect_ucode() {
     if grep -qi 'GenuineIntel' /proc/cpuinfo; then echo "intel-ucode"; else echo "amd-ucode"; fi
 }

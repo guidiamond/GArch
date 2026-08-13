@@ -72,6 +72,143 @@ setup() {
     ! grep -q 'UUID=old' "$TMP/grub"
 }
 
+# --- require_vars ----------------------------------------------------------
+
+@test "require_vars passes when every name is set and non-empty" {
+    A=1 B=2
+    run require_vars A B
+    [ "$status" -eq 0 ]
+}
+
+@test "require_vars names every missing or empty value at once" {
+    A=1 B=""
+    unset C
+    run require_vars A B C
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"B"* ]]
+    [[ "$output" == *"C"* ]]
+}
+
+# The callers that matter run under `set -u`, where a bare ${!name} on an
+# unset name aborts instead of reporting.
+@test "require_vars survives set -u on an unset name" {
+    run bash -c "set -euo pipefail
+        $(declare -f error); RED=; RESET=
+        $(declare -f require_vars)
+        require_vars NOPE"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"NOPE"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+# --- locale_gen_uncomment --------------------------------------------------
+
+make_locale_gen() {
+    printf '#en_US.UTF-8 UTF-8  \n#en_US ISO-8859-1  \n#pt_BR.UTF-8 UTF-8  \n' \
+        > "$TMP/locale.gen"
+}
+
+@test "locale_gen_uncomment uncomments exactly the requested entry" {
+    make_locale_gen
+    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    grep -q '^en_US.UTF-8 UTF-8' "$TMP/locale.gen"
+    grep -q '^#en_US ISO-8859-1' "$TMP/locale.gen"
+    grep -q '^#pt_BR.UTF-8 UTF-8' "$TMP/locale.gen"
+}
+
+@test "locale_gen_uncomment is idempotent" {
+    make_locale_gen
+    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    first=$(cat "$TMP/locale.gen")
+    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    [ "$first" = "$(cat "$TMP/locale.gen")" ]
+}
+
+# locale-gen exits 0 having generated nothing when the entry is absent, and
+# /etc/locale.conf then names a locale that does not exist on the system.
+@test "locale_gen_uncomment fails when the locale is absent, leaving the file alone" {
+    make_locale_gen
+    before=$(cat "$TMP/locale.gen")
+    run locale_gen_uncomment "$TMP/locale.gen" nl_NL.UTF-8
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nl_NL.UTF-8"* ]]
+    [ "$before" = "$(cat "$TMP/locale.gen")" ]
+}
+
+# 'en_US.UTF-8' interpolated into a regex has '.' as a wildcard, which leaves
+# '#en_USX.UTF-8' alone but does uncomment '#en_USxUTF-8'.
+@test "locale_gen_uncomment does not treat . in the locale as a wildcard" {
+    printf '#en_USxUTF-8 UTF-8  \n' > "$TMP/locale.gen"
+    run locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"en_US.UTF-8"* ]]
+    grep -q '^#en_USxUTF-8' "$TMP/locale.gen"
+}
+
+@test "locale_gen_uncomment keeps the file's own permissions and leaves no temp file" {
+    make_locale_gen
+    chmod 644 "$TMP/locale.gen"
+    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    [ "$(stat -c '%a' "$TMP/locale.gen")" = "644" ]
+    [ "$(ls "$TMP" | grep -c '^locale.gen')" -eq 1 ]
+}
+
+@test "locale_gen_uncomment keeps a non-default mode too" {
+    make_locale_gen
+    chmod 640 "$TMP/locale.gen"
+    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
+    [ "$(stat -c '%a' "$TMP/locale.gen")" = "640" ]
+}
+
+# --- link_timezone ---------------------------------------------------------
+
+make_zoneinfo() {
+    mkdir -p "$TMP/zoneinfo/America"
+    printf 'TZif\n' > "$TMP/zoneinfo/America/Sao_Paulo"
+}
+
+@test "link_timezone links a real zone" {
+    make_zoneinfo
+    link_timezone "$TMP/zoneinfo" America/Sao_Paulo "$TMP/localtime"
+    [ "$(readlink "$TMP/localtime")" = "$TMP/zoneinfo/America/Sao_Paulo" ]
+}
+
+# 'America' is the obvious half-typed form of the default 'America/Sao_Paulo',
+# and it is a directory: -e would accept it, leaving the clock on UTC.
+@test "link_timezone refuses a zone that is a directory" {
+    make_zoneinfo
+    run link_timezone "$TMP/zoneinfo" America "$TMP/localtime"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"America"* ]]
+    [ ! -e "$TMP/localtime" ]
+}
+
+@test "link_timezone refuses a zone that does not exist" {
+    make_zoneinfo
+    run link_timezone "$TMP/zoneinfo" Mars/Olympus "$TMP/localtime"
+    [ "$status" -ne 0 ]
+    [ ! -e "$TMP/localtime" ]
+}
+
+# Without -n, ln dereferences an existing symlink-to-directory and writes the
+# new link *inside* it -- so a localtime left pointing at a directory makes
+# every later run die on this line until someone removes it by hand.
+@test "link_timezone recovers when localtime already points at a directory" {
+    make_zoneinfo
+    ln -s "$TMP/zoneinfo/America" "$TMP/localtime"
+    link_timezone "$TMP/zoneinfo" America/Sao_Paulo "$TMP/localtime"
+    [ "$(readlink "$TMP/localtime")" = "$TMP/zoneinfo/America/Sao_Paulo" ]
+    [ ! -e "$TMP/zoneinfo/America/Sao_Paulo/Sao_Paulo" ]
+    [ "$(ls "$TMP/zoneinfo/America")" = "Sao_Paulo" ]
+}
+
+@test "link_timezone is idempotent" {
+    make_zoneinfo
+    link_timezone "$TMP/zoneinfo" America/Sao_Paulo "$TMP/localtime"
+    link_timezone "$TMP/zoneinfo" America/Sao_Paulo "$TMP/localtime"
+    [ "$(readlink "$TMP/localtime")" = "$TMP/zoneinfo/America/Sao_Paulo" ]
+}
+
 @test "detect_ucode returns a real package name" {
     run detect_ucode
     [[ "$output" == "intel-ucode" || "$output" == "amd-ucode" ]]

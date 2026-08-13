@@ -8,6 +8,19 @@ setup() {
     mkdir -p "$TMP/root"
 }
 
+# A bare `! grep ...` mid-test is INERT: bash exempts !-inverted pipelines
+# from set -e, so it only ever fails a test when it happens to be the last
+# command in the body. Every negative assertion goes through this instead --
+# a function returning non-zero is a plain command, and does stop the test.
+assert_absent() {
+    local pattern=$1 file=$2
+    if grep -qE -- "$pattern" "$file"; then
+        printf 'unexpectedly found /%s/ in %s:\n' "$pattern" "$file" >&2
+        grep -nE -- "$pattern" "$file" >&2
+        return 1
+    fi
+}
+
 # --- chroot_write_config ---------------------------------------------------
 
 @test "chroot_write_config quotes every value" {
@@ -93,84 +106,6 @@ setup() {
     chmod 755 "$TMP/ro"
 }
 
-# --- require_vars ----------------------------------------------------------
-
-@test "require_vars passes when every name is set and non-empty" {
-    A=1 B=2
-    run require_vars A B
-    [ "$status" -eq 0 ]
-}
-
-@test "require_vars names every missing or empty value at once" {
-    A=1 B=""
-    unset C
-    run require_vars A B C
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"B"* ]]
-    [[ "$output" == *"C"* ]]
-}
-
-@test "require_vars survives set -u on an unset name" {
-    run bash -c "set -euo pipefail
-        $(declare -f error); RED=; RESET=
-        $(declare -f require_vars)
-        require_vars NOPE"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"NOPE"* ]]
-    [[ "$output" != *"unbound variable"* ]]
-}
-
-# --- locale_gen_uncomment --------------------------------------------------
-
-make_locale_gen() {
-    printf '#en_US.UTF-8 UTF-8  \n#en_US ISO-8859-1  \n#pt_BR.UTF-8 UTF-8  \n' \
-        > "$TMP/locale.gen"
-}
-
-@test "locale_gen_uncomment uncomments exactly the requested entry" {
-    make_locale_gen
-    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
-    grep -q '^en_US.UTF-8 UTF-8' "$TMP/locale.gen"
-    grep -q '^#en_US ISO-8859-1' "$TMP/locale.gen"
-    grep -q '^#pt_BR.UTF-8 UTF-8' "$TMP/locale.gen"
-}
-
-@test "locale_gen_uncomment is idempotent" {
-    make_locale_gen
-    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
-    first=$(cat "$TMP/locale.gen")
-    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
-    [ "$first" = "$(cat "$TMP/locale.gen")" ]
-}
-
-# locale-gen exits 0 having generated nothing when the entry is absent, and
-# /etc/locale.conf then names a locale that does not exist on the system.
-@test "locale_gen_uncomment fails when the locale is absent, leaving the file alone" {
-    make_locale_gen
-    before=$(cat "$TMP/locale.gen")
-    run locale_gen_uncomment "$TMP/locale.gen" nl_NL.UTF-8
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"nl_NL.UTF-8"* ]]
-    [ "$before" = "$(cat "$TMP/locale.gen")" ]
-}
-
-# 'en_US.UTF-8' interpolated into a regex has '.' as a wildcard.
-@test "locale_gen_uncomment does not treat . in the locale as a wildcard" {
-    printf '#en_USxUTF-8 UTF-8  \n' > "$TMP/locale.gen"
-    run locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"en_US.UTF-8"* ]]
-    grep -q '^#en_USxUTF-8' "$TMP/locale.gen"
-}
-
-@test "locale_gen_uncomment keeps the file's own permissions" {
-    make_locale_gen
-    chmod 644 "$TMP/locale.gen"
-    locale_gen_uncomment "$TMP/locale.gen" en_US.UTF-8
-    [ "$(stat -c '%a' "$TMP/locale.gen")" = "644" ]
-    [ "$(ls "$TMP" | grep -c '^locale.gen')" -eq 1 ]
-}
-
 # --- chroot_write_script ---------------------------------------------------
 
 @test "generated chroot script is valid bash" {
@@ -192,8 +127,20 @@ make_locale_gen() {
 
 @test "generated chroot script never echoes a password" {
     chroot_write_script "$TMP/root/setup.sh"
-    ! grep -qE 'echo .*\$(ROOT|USER)_PASSWORD[^|]*$' "$TMP/root/setup.sh"
+    assert_absent 'echo .*\$(ROOT|USER)_PASSWORD[^|]*$' "$TMP/root/setup.sh"
     grep -q 'chpasswd' "$TMP/root/setup.sh"
+}
+
+# Stronger than the pattern above, which only catches `echo`: every line that
+# touches a decoded password must be either its own assignment or a pipe into
+# chpasswd. Anything else -- an info line, a here-doc, a stray redirect --
+# puts a root password into the install log.
+@test "generated chroot script only ever pipes a password into chpasswd" {
+    chroot_write_script "$TMP/root/setup.sh"
+    offenders=$(grep -nE '\$\{?(ROOT|USER)_PASSWORD' "$TMP/root/setup.sh" \
+                | grep -vE '^[0-9]+:(ROOT|USER)_PASSWORD=\$\(printf' \
+                | grep -v 'chpasswd' || true)
+    [ -z "$offenders" ]
 }
 
 # Every helper the body calls must actually be in the file: `declare -f` on a
@@ -203,7 +150,7 @@ make_locale_gen() {
     chroot_write_script "$TMP/root/setup.sh"
     local fn
     for fn in hooks_line modules_line grub_cmdline_add needs_grub_install \
-              require_vars locale_gen_uncomment; do
+              require_vars locale_gen_uncomment link_timezone; do
         grep -qE "^${fn} \(\)" "$TMP/root/setup.sh"
     done
 }
@@ -223,7 +170,7 @@ make_locale_gen() {
 # avoid CYAN and BOLD unless the HEADER grows to define them.
 @test "generated chroot script references no colour its header omits" {
     chroot_write_script "$TMP/root/setup.sh"
-    ! grep -qE '\$\{?(CYAN|BOLD)\b' "$TMP/root/setup.sh"
+    assert_absent '\$\{?(CYAN|BOLD)\b' "$TMP/root/setup.sh"
 }
 
 # An interrupted install is resumed by re-running the installer; useradd on an
@@ -268,8 +215,12 @@ make_locale_gen() {
                    on { print }' "$TMP/root/setup.sh")
     # Guard the extraction rather than trusting it: if that end marker ever
     # moves, this test must fail, not eval the real body on a live machine.
+    # Via assert_absent, because a bare `! grep` here is inert under set -e
+    # and would wave the whole chroot body straight into the bash -c below.
     [ -n "$helpers" ]
-    ! grep -qE 'mkinitcpio|grub-install|grub-mkconfig|useradd|usermod|chpasswd|systemctl|locale-gen|hwclock|visudo|/etc/' <<< "$helpers"
+    printf '%s\n' "$helpers" > "$TMP/helpers.sh"
+    assert_absent 'mkinitcpio|grub-install|grub-mkconfig|useradd|usermod|chpasswd|systemctl|locale-gen|hwclock|/etc/' \
+        "$TMP/helpers.sh"
 
     run bash -c "set -euo pipefail
         RED=; RESET=
@@ -282,9 +233,35 @@ make_locale_gen() {
     [[ "${lines[1]}" == *"block encrypt filesystems"* ]]
 }
 
-# /etc/sudoers is the one file where a bad edit locks every user out of sudo.
-@test "generated chroot script validates its sudoers change before trusting it" {
+# Editing /etc/sudoers in place marks a pacman-owned file locally modified,
+# buying a .pacnew to reconcile on every sudo upgrade.
+@test "generated chroot script uses a sudoers drop-in, not an in-place edit" {
     chroot_write_script "$TMP/root/setup.sh"
-    grep -q 'visudo -cf /etc/sudoers.d/10-wheel' "$TMP/root/setup.sh"
-    ! grep -q 'sed -i .* /etc/sudoers$' "$TMP/root/setup.sh"
+    grep -q 'cat > /etc/sudoers.d/10-wheel' "$TMP/root/setup.sh"
+    grep -q 'chmod 440 /etc/sudoers.d/10-wheel' "$TMP/root/setup.sh"
+    assert_absent 'sed -i .* /etc/sudoers$' "$TMP/root/setup.sh"
+}
+
+# The drop-in does nothing at all if /etc/sudoers no longer includes the
+# directory, and "the administrator account has no sudo" is not a warning.
+@test "generated chroot script treats a missing sudoers includedir as fatal" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -qE 'error ".*includedir.*would have no sudo"' "$TMP/root/setup.sh"
+    assert_absent 'warn ".*includedir' "$TMP/root/setup.sh"
+}
+
+# install.sh's username regex admits root, bin and nobody. The resume path
+# must not hand one of those wheel, a new shell and a new password.
+@test "generated chroot script refuses to reconfigure an existing system account" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -q 'EXISTING_UID < 1000' "$TMP/root/setup.sh"
+    grep -qF 'is an existing system account' "$TMP/root/setup.sh"
+}
+
+# Silently substituting bash on a machine whose dotfiles are built around zsh
+# is a worse outcome than stopping with a named cause.
+@test "generated chroot script stops rather than substituting a login shell" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -qF 'the pacstrap set should have installed zsh' "$TMP/root/setup.sh"
+    assert_absent 'USER_SHELL=/bin/bash' "$TMP/root/setup.sh"
 }

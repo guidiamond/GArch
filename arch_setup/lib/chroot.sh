@@ -3,8 +3,8 @@
 # Requires lib/ui.sh and lib/system.sh (for hooks_line / grub_cmdline_add).
 # shellcheck shell=bash
 
-# The four helpers lib/system.sh must provide, plus the two defined below, in
-# the order they are injected into the generated script.
+# The helpers injected into the generated script, all of them from
+# lib/system.sh so there is one home for the shared pure transforms.
 CHROOT_INJECTED=(
     hooks_line
     modules_line
@@ -12,71 +12,8 @@ CHROOT_INJECTED=(
     needs_grub_install
     require_vars
     locale_gen_uncomment
+    link_timezone
 )
-
-# --- helpers injected into the generated script ----------------------------
-#
-# These live here rather than inline in the body so the chroot runs code the
-# bats suite covers directly. Everything in CHROOT_INJECTED must stay within
-# what the generated HEADER defines -- see the comment at the injection site.
-
-# require_vars NAME... -- every named variable must exist and be non-empty.
-# Names them all at once, and before anything has been mutated: the generated
-# script runs under `set -u`, where the first missing key would otherwise
-# abort with a bare "unbound variable" partway through configuring the system.
-require_vars() {
-    local name missing=()
-    for name in "$@"; do
-        # The `-` default is what makes this safe under `set -u`.
-        [[ -n "${!name-}" ]] || missing+=("$name")
-    done
-    if (( ${#missing[@]} > 0 )); then
-        error "missing or empty required config value(s): ${missing[*]}"
-        return 1
-    fi
-}
-
-# locale_gen_uncomment <file> <locale> -- uncomment the locale.gen entry whose
-# locale name is exactly <locale>.
-#
-# The first field is compared as a fixed string rather than interpolating
-# <locale> into a regex: the value comes straight from an unvalidated prompt,
-# and in a regex the '.' of 'en_US.UTF-8' is a wildcard that can match an
-# unrelated entry. Absence is an error, not a no-op -- `sed` and `locale-gen`
-# both exit 0 having done nothing, which leaves /etc/locale.conf naming a
-# locale the system does not have and every program falling back to C.
-locale_gen_uncomment() {
-    local file=$1 locale=$2 tmp
-    [[ -n "$locale" ]] || { error "locale_gen_uncomment: empty locale"; return 1; }
-    [[ -f "$file" ]] || { error "locale_gen_uncomment: no such file: ${file}"; return 1; }
-
-    tmp=$(mktemp "${file}.XXXXXX") \
-        || { error "locale_gen_uncomment: cannot create a temp file next to ${file}"; return 1; }
-
-    if ! awk -v loc="$locale" '
-        !found {
-            probe = $0
-            sub(/^#[[:space:]]*/, "", probe)
-            split(probe, f, /[[:space:]]+/)
-            if (f[1] == loc) { print probe; found = 1; next }
-        }
-        { print }
-        END { exit(found ? 0 : 1) }
-    ' "$file" > "$tmp"; then
-        rm -f "$tmp"
-        error "locale_gen_uncomment: ${locale} is not listed in ${file}"
-        return 1
-    fi
-
-    # Copied over the original rather than moved onto it: mktemp creates 0600,
-    # and a /etc/locale.gen that only root can read is a silent surprise later.
-    if ! cat "$tmp" > "$file"; then
-        rm -f "$tmp"
-        error "locale_gen_uncomment: failed to write ${file}"
-        return 1
-    fi
-    rm -f "$tmp"
-}
 
 # --- the generator ---------------------------------------------------------
 
@@ -229,13 +166,9 @@ USER_PASSWORD=$(printf '%s' "$USER_PASS_B64" | base64 -d)
 
 # ---- time, locale, hostname ----
 info "Setting timezone to ${TIMEZONE}..."
-# ln -sf on a typo'd zone happily creates a dangling symlink and the system
-# stays on UTC for good, with nothing said about it.
-if [[ ! -e "/usr/share/zoneinfo/${TIMEZONE}" ]]; then
-    error "no such timezone: /usr/share/zoneinfo/${TIMEZONE}"
+if ! link_timezone /usr/share/zoneinfo "$TIMEZONE" /etc/localtime; then
     exit 1
 fi
-ln -sf "/usr/share/zoneinfo/${TIMEZONE}" /etc/localtime
 hwclock --systohc
 
 info "Generating locale ${LOCALE}..."
@@ -259,43 +192,61 @@ info "Setting the root password..."
 printf 'root:%s\n' "$ROOT_PASSWORD" | chpasswd
 
 USER_SHELL=/usr/bin/zsh
+# zsh is in packages/base.txt and pacstrap fails loudly if it cannot install
+# it, so this should be unreachable. Stop rather than substitute /bin/bash:
+# these dotfiles are built around zsh, and quietly handing the operator a
+# different login shell is a worse outcome than a named failure here.
 if [[ ! -x "$USER_SHELL" ]]; then
-    # zsh is in packages/base.txt, so this should not fire -- but a login
-    # shell that does not exist locks the user out of their own machine at
-    # the greeter, so degrade instead of trusting the package list.
-    warn "${USER_SHELL} is missing; falling back to /bin/bash for ${USERNAME_VAR}"
-    USER_SHELL=/bin/bash
+    error "${USER_SHELL} is missing -- the pacstrap set should have installed zsh"
+    exit 1
 fi
 
 groupadd -f docker
 # An interrupted install is resumed by re-running install.sh, and useradd on
-# an existing user exits non-zero -- which `set -e` would turn into an abort
-# on every retry, at the same point, forever.
-if id -u "$USERNAME_VAR" >/dev/null 2>&1; then
-    info "user ${USERNAME_VAR} already exists, updating groups and shell..."
+# an existing user exits non-zero, which set -e would turn into an abort at
+# the same point on every retry. But "already exists" also covers root, bin
+# and nobody, all of which install.sh's username regex admits: handing one of
+# those the wheel group, a new shell and a new password is far worse than the
+# abort being replaced, so only a real user account takes the resume path.
+if EXISTING_UID=$(id -u "$USERNAME_VAR" 2>/dev/null); then
+    if (( EXISTING_UID < 1000 )); then
+        error "${USERNAME_VAR} is an existing system account (uid ${EXISTING_UID}); refusing to give it wheel, a new shell and a new password"
+        exit 1
+    fi
+    info "user ${USERNAME_VAR} already exists (uid ${EXISTING_UID}), updating groups and shell..."
     usermod -aG wheel,docker,video,audio,input,storage -s "$USER_SHELL" "$USERNAME_VAR"
+    # No -m on this path: usermod -m *moves* an existing home, and an account
+    # this installer did not create having no home is not something to fix
+    # silently. Say it, because the dotfiles chown at the end would otherwise
+    # just skip.
+    EXISTING_HOME=$(getent passwd "$USERNAME_VAR" | cut -d: -f6)
+    [[ -d "$EXISTING_HOME" ]] \
+        || warn "${USERNAME_VAR} has no home directory at ${EXISTING_HOME} -- dotfiles will not be handed over"
 else
     info "Creating ${USERNAME_VAR}..."
     useradd -m -G wheel,docker,video,audio,input,storage -s "$USER_SHELL" "$USERNAME_VAR"
 fi
 printf '%s:%s\n' "$USERNAME_VAR" "$USER_PASSWORD" | chpasswd
 
-# A drop-in validated by visudo, not an in-place edit of /etc/sudoers: a sed
-# that matches nothing leaves wheel without sudo and says so nowhere, and a
-# sed that matches wrongly breaks sudo for everyone including root's rescue
-# path. visudo -cf refuses the file before it can take effect.
+# A drop-in rather than an in-place edit of /etc/sudoers: /etc/sudoers is
+# pacman-owned, and editing it marks it locally modified, which buys a .pacnew
+# to reconcile on every sudo upgrade. lib/system.sh's setup_lightdm declines
+# to install a file for exactly that reason. No visudo -c here -- the content
+# is one hardcoded line from a quoted heredoc with nothing interpolated, so
+# validating it only asks whether visudo itself works.
 mkdir -p /etc/sudoers.d
 cat > /etc/sudoers.d/10-wheel <<'WHEEL'
 %wheel ALL=(ALL:ALL) ALL
 WHEEL
 chmod 440 /etc/sudoers.d/10-wheel
-if ! visudo -cf /etc/sudoers.d/10-wheel >/dev/null; then
-    rm -f /etc/sudoers.d/10-wheel
-    error "the wheel sudoers drop-in failed visudo validation"
+# The drop-in only does anything if /etc/sudoers still includes the directory.
+# Without it the administrator account has no sudo at all, which is not a
+# warning-grade outcome -- and failing here, before the initramfs and
+# bootloader stages, aborts cleanly instead of half-building a system.
+if ! grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers; then
+    error "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} would have no sudo"
     exit 1
 fi
-grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers \
-    || warn "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} will have no sudo"
 success "user ${USERNAME_VAR} configured"
 
 # ---- initramfs ----
