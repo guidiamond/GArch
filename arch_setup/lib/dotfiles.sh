@@ -24,23 +24,58 @@ netrc_write() {
     [[ -n "$user"  ]] || { error "netrc_write: empty username"; return 1; }
     [[ -n "$token" ]] || { error "netrc_write: empty token"; return 1; }
 
+    # umask is process-wide and this file is sourced (not exec'd), so an
+    # unrestored umask would silently tighten every file this process
+    # creates for the rest of the run -- always restore it, success or not.
+    # Set *before* the backup below, not just before the final write: a
+    # loose ambient umask at backup-creation time would otherwise let the
+    # old credentials sit briefly at a looser mode before the explicit
+    # chmod caught up.
+    old_umask=$(umask)
+    umask 077
+
     # This is a whole-file overwrite below, and detection above can be
     # wrong (or netrc_write can be called directly). Never let a working
     # credential file -- for github.com or any other unrelated host -- just
     # disappear: copy whatever is already there aside first. Bail without
-    # touching the original if the backup itself can't be made.
-    if [[ -e "$HOME/.netrc" ]]; then
-        backup="$HOME/.netrc.bak-$(date +%Y%m%d-%H%M%S)"
-        cp "$HOME/.netrc" "$backup" || { error "netrc_write: failed to back up existing ${HOME}/.netrc"; return 1; }
-        chmod 600 "$backup" || { error "netrc_write: failed to chmod backup ${backup}"; return 1; }
-        warn "backed up existing ${HOME}/.netrc -> ${backup}"
+    # touching the original if the backup itself can't be made. `-L` as
+    # well as `-e`: a *dangling* symlink fails `-e`, so without this it
+    # would fall through untouched and the `cat >` below would follow it,
+    # writing the token to whatever arbitrary path it points at instead of
+    # $HOME/.netrc.
+    if [[ -e "$HOME/.netrc" || -L "$HOME/.netrc" ]]; then
+        if [[ -L "$HOME/.netrc" && ! -e "$HOME/.netrc" ]]; then
+            # Nothing real behind the link to back up.
+            rm -f "$HOME/.netrc" || { umask "$old_umask"; error "netrc_write: failed to remove dangling symlink at ${HOME}/.netrc"; return 1; }
+            warn "removed dangling symlink at ${HOME}/.netrc"
+        else
+            # A name that can never collide with a previous run's backup,
+            # even one made in the same second: two same-second calls
+            # (a retry, or two provisioning runs) must not let the second
+            # backup overwrite the first with the file it already replaced.
+            if ! backup=$(mktemp "$HOME/.netrc.bak-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
+                umask "$old_umask"
+                error "netrc_write: failed to create a backup path for ${HOME}/.netrc"
+                return 1
+            fi
+            if ! cp "$HOME/.netrc" "$backup"; then
+                umask "$old_umask"
+                error "netrc_write: failed to back up existing ${HOME}/.netrc"
+                rm -f "$backup"
+                return 1
+            fi
+            chmod 600 "$backup" || { umask "$old_umask"; error "netrc_write: failed to chmod backup ${backup}"; return 1; }
+            warn "backed up existing ${HOME}/.netrc -> ${backup}"
+            # A *valid* symlink must be removed too, so the write below
+            # creates a plain regular file at $HOME/.netrc itself rather
+            # than following the link and overwriting whatever real file
+            # it happens to point at.
+            if [[ -L "$HOME/.netrc" ]]; then
+                rm -f "$HOME/.netrc" || { umask "$old_umask"; error "netrc_write: failed to remove existing symlink at ${HOME}/.netrc"; return 1; }
+            fi
+        fi
     fi
 
-    # umask is process-wide and this file is sourced (not exec'd), so an
-    # unrestored umask would silently tighten every file this process
-    # creates for the rest of the run -- always restore it, success or not.
-    old_umask=$(umask)
-    umask 077
     if ! cat > "$HOME/.netrc" <<EOF
 machine github.com
   login ${user}
@@ -96,6 +131,12 @@ dotfiles_clone() {
 # directory in the repo colliding with a real directory at the target is
 # not a conflict either, for the same folding reason, and needs no special
 # case: the leaf-file granularity of this scan already matches it.
+# One case is deliberately left unhandled: a real *file* blocking a
+# symlink-to-directory repo entry (rather than a real directory blocking
+# it). This scan stays silent about it -- verified as the right trade --
+# and lets the real `stow` command refuse that one link with its own
+# actionable message rather than have this function guess whether to
+# relocate the blocking file. Do not "fix" this back to flagging it.
 stow_conflicts() {
     local repo=$1 target=$2 pkgdir rel abs listing
     pkgdir="${repo}/${STOW_PACKAGE}"
@@ -127,8 +168,7 @@ stow_conflicts() {
 }
 
 stow_apply() {
-    local repo=$1 target=$2 backup rel conflicts
-    backup="${target}/.dotfiles-backup-$(date +%Y%m%d-%H%M%S)"
+    local repo=$1 target=$2 backup="" rel conflicts
 
     # Captured via command substitution: `done < <(stow_conflicts ...)`
     # would only expose the while loop's own status, not stow_conflicts'
@@ -140,17 +180,31 @@ stow_apply() {
 
     while IFS= read -r rel; do
         [[ -z "$rel" ]] && continue
+        if [[ -z "$backup" ]]; then
+            # Created lazily, on the first real conflict, and named so it
+            # can never collide with another run's backup dir even in the
+            # same second: a same-second retry must not let the second
+            # run's mv overwrite the first run's already-backed-up file
+            # inside what would otherwise be the identical directory name.
+            if ! backup=$(mktemp -d "${target}/.dotfiles-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
+                error "stow_apply: failed to create a backup dir under ${target}"
+                return 1
+            fi
+        fi
         # Stop at the first failure instead of limping on: with several
         # conflicts, continuing past a failed mkdir/mv would relocate the
         # ones that did succeed while stow (below) still aborts wholesale,
         # stranding files in the backup dir with nothing linked and a
-        # "backed up" message that was never true for the failed one.
+        # "backed up" message that was never true for the failed one. Name
+        # the backup dir in both messages: a user reading "failed to back
+        # up .b" has no way to know ".a" (backed up before the failure) is
+        # already sitting there with nothing linked, unless we say where.
         if ! mkdir -p "${backup}/$(dirname "$rel")"; then
-            error "stow_apply: failed to create backup dir for ${rel}"
+            error "stow_apply: failed to create backup dir for ${rel} under ${backup}"
             return 1
         fi
         if ! mv "${target}/${rel}" "${backup}/${rel}"; then
-            error "stow_apply: failed to back up ${rel}"
+            error "stow_apply: failed to back up ${rel} (earlier files, if any, are under ${backup})"
             return 1
         fi
         warn "backed up ${rel} -> ${backup}/${rel}"
