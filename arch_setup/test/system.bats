@@ -191,6 +191,104 @@ make_zoneinfo() {
     [ "$(stat -c '%a' "$TMP/locale.gen")" = "640" ]
 }
 
+# --- locale_listed ---------------------------------------------------------
+#
+# The read-only counterpart of locale_gen_uncomment, and tested next to it on
+# purpose: the two must agree about what "listed" means, and the whole point of
+# locale_listed is to answer at the prompt what locale_gen_uncomment would
+# answer in the chroot, on a wiped disk.
+
+@test "locale_listed finds both a commented and an uncommented entry" {
+    printf '#en_US.UTF-8 UTF-8\npt_BR.UTF-8 UTF-8\n' > "$TMP/locale.gen"
+    run locale_listed "$TMP/locale.gen" en_US.UTF-8
+    [ "$status" -eq 0 ]
+    run locale_listed "$TMP/locale.gen" pt_BR.UTF-8
+    [ "$status" -eq 0 ]
+}
+
+# The trap locale_gen_uncomment documents: in a regex the '.' of 'en_US.UTF-8'
+# is a wildcard, so a regex match accepts an 'en_USxUTF-8' line. Approving that
+# at the prompt is worse than not checking at all -- it waves through exactly
+# the value locale_gen_uncomment then rejects in phase 5.
+#
+# The fixture deliberately omits the exact line: with both present the awk
+# stops at the exact one first and a regex implementation passes anyway. That
+# is how the first draft of this test passed against a regex version.
+@test "locale_listed compares as a fixed string, not a regex" {
+    printf '#en_USxUTF-8 ISO-8859-1\npt_BR.UTF-8 UTF-8\n' > "$TMP/locale.gen"
+    run locale_listed "$TMP/locale.gen" 'en_US.UTF-8'
+    [ "$status" -eq 1 ]
+    # ...and the literal line is still found, so this is not "rejects anything".
+    run locale_listed "$TMP/locale.gen" 'en_USxUTF-8'
+    [ "$status" -eq 0 ]
+}
+
+@test "locale_listed rejects a locale the file does not list" {
+    make_locale_gen
+    run locale_listed "$TMP/locale.gen" 'xx_YY.UTF-8'
+    [ "$status" -eq 1 ]
+}
+
+# Status 2 is "cannot answer", and install.sh accepts the value unchecked on a
+# 2 rather than looping on a question it can never answer. Collapsing this into
+# 1 would make an installer that cannot read /etc/locale.gen reject every
+# locale its operator types.
+@test "locale_listed says 'cannot answer', not 'absent', for an unreadable file" {
+    run locale_listed "$TMP/no-such-locale.gen" en_US.UTF-8
+    [ "$status" -eq 2 ]
+}
+
+# --- list_keymaps / net_check ----------------------------------------------
+
+# A host probe, so this asserts the probe works here rather than unit-testing
+# it. A host with neither localectl nor /usr/share/kbd is legitimate and is
+# what the non-zero return exists for, so it skips rather than fails.
+@test "list_keymaps enumerates this host's keymaps" {
+    run list_keymaps
+    [ "$status" -eq 0 ] || skip "this host cannot enumerate keymaps"
+    [ "$(grep -cx us <<< "$output")" -eq 1 ]
+}
+
+# Stubbed on PATH rather than as shell functions, for two reasons: net_check
+# reaches curl through `command -v`, which does not see a shell function the
+# way a bare call would; and a test host with real network access would
+# otherwise let a real `ping archlinux.org` decide the result, so every case
+# below would pass whatever net_check did. Each stub records that it ran, and
+# the tests assert on that -- a status alone cannot tell "fell back to HTTPS"
+# from "ICMP answered after all".
+stub_net() {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\ntouch %s/ping_ran\nexit %s\n' "$TMP" "$1" > "$TMP/bin/ping"
+    printf '#!/bin/sh\ntouch %s/curl_ran\nexit %s\n' "$TMP" "$2" > "$TMP/bin/curl"
+    chmod +x "$TMP/bin/ping" "$TMP/bin/curl"
+}
+
+@test "net_check succeeds on ICMP alone, without reaching for curl" {
+    stub_net 0 1
+    PATH="$TMP/bin:$PATH" run net_check
+    [ "$status" -eq 0 ]
+    [ -e "$TMP/ping_ran" ]
+    [ ! -e "$TMP/curl_ran" ]
+}
+
+# The reason the fallback exists: ICMP is filtered on plenty of networks, and
+# "no internet connection" on a host that can reach the mirrors perfectly well
+# is a dead end for the operator.
+@test "net_check falls back to HTTPS when ICMP is filtered" {
+    stub_net 1 0
+    PATH="$TMP/bin:$PATH" run net_check
+    [ "$status" -eq 0 ]
+    [ -e "$TMP/ping_ran" ]
+    [ -e "$TMP/curl_ran" ]
+}
+
+@test "net_check fails when neither ICMP nor HTTPS answers" {
+    stub_net 1 1
+    PATH="$TMP/bin:$PATH" run net_check
+    [ "$status" -ne 0 ]
+    [ -e "$TMP/curl_ran" ]
+}
+
 # --- link_timezone ---------------------------------------------------------
 
 @test "link_timezone links a real zone" {

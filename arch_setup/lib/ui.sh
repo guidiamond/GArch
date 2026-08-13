@@ -72,6 +72,18 @@ ask() {
     fi
 }
 
+# WARNING: unlike `ask` and `ask_password`, this ANSWERS WITH ITS DEFAULT AT
+# EOF rather than failing -- verified, and deliberate. Every alternative is
+# worse: returning non-zero makes install.sh's `if ask_yes_no "Encrypt...?"`
+# silently install *unencrypted* when it cannot ask, and `die` breaks the
+# reboot prompt, where declining must not make a successful install exit
+# non-zero. confirm_step defaults to yes, so it proceeds on a closed stdin too.
+#
+# So: NOTHING DESTRUCTIVE MAY SIT BEHIND THIS FUNCTION OR confirm_step. What
+# actually protects install.sh is that `ask` fails at EOF whether or not it has
+# a default, so a closed stdin dies at the first prompt of phase 2, long before
+# anything is written; and the gate immediately in front of `plan_execute` is a
+# bare `read` that fails closed. test/install.bats asserts both.
 ask_yes_no() {
     local prompt=$1 default=${2:-y} input hint
     # A default that is not y/n can never satisfy the case below, so on EOF

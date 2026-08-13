@@ -23,6 +23,11 @@ source "${ARCH_SETUP_DIR}/lib/system.sh"
 source "${ARCH_SETUP_DIR}/lib/chroot.sh"
 # shellcheck source=lib/packages.sh
 source "${ARCH_SETUP_DIR}/lib/packages.sh"
+# For stage_dotfiles only. Sourcing this sets DOTFILES_DIR from $HOME, which is
+# root's on the ISO -- harmless here, since stage 1 takes its paths as
+# arguments and never touches $HOME. It is stage 2 that uses DOTFILES_DIR.
+# shellcheck source=lib/dotfiles.sh
+source "${ARCH_SETUP_DIR}/lib/dotfiles.sh"
 
 DEFAULT_HOSTNAME="archlinux"
 DEFAULT_USERNAME="damn"
@@ -156,47 +161,6 @@ username_is_system() {
     (( uid < 1000 ))
 }
 
-# locale_listed <locale.gen> <locale> -- 0 listed, 1 absent, 2 cannot answer.
-#
-# Mirrors lib/system.sh's locale_gen_uncomment exactly: strip a leading comment
-# marker, then compare the *first whitespace-separated field* as a fixed
-# string. Not a regex, for the reason documented there -- the '.' in
-# 'en_US.UTF-8' is a wildcard, so a regex match accepts 'en_USxUTF-8'.
-#
-# The file consulted is the live ISO's /etc/locale.gen, which comes from the
-# same glibc package pacstrap installs into /mnt. So a locale that passes here
-# is one locale_gen_uncomment will find in the chroot. Without this the only
-# check is inside the chroot, where locale_gen_uncomment hard-errors on an
-# unlisted locale and takes the whole run down with a wiped disk behind it.
-locale_listed() {
-    local file=$1 locale=$2
-    [[ -n "$locale" ]] || return 1
-    [[ -f "$file" ]] || return 2
-    awk -v loc="$locale" '
-        { probe = $0
-          sub(/^#[[:space:]]*/, "", probe)
-          split(probe, f, /[[:space:]]+/)
-          if (f[1] == loc) { found = 1; exit }
-        }
-        END { exit(found ? 0 : 1) }
-    ' "$file"
-}
-
-# localectl is the documented interface but talks to systemd-localed over dbus;
-# the kbd tree it reads is the fallback for a console where that is not up.
-list_keymaps() {
-    local out
-    out=$(localectl list-keymaps --no-pager 2>/dev/null) || out=""
-    if [[ -n "$out" ]]; then
-        printf '%s\n' "$out"
-        return 0
-    fi
-    out=$(find /usr/share/kbd/keymaps -type f -name '*.map*' -printf '%f\n' 2>/dev/null \
-          | sed -e 's/\.map\(\.gz\)\?$//' | sort -u) || out=""
-    [[ -n "$out" ]] || return 1
-    printf '%s\n' "$out"
-}
-
 # keymap_listed <keymap> -- 0 listed, 1 absent, 2 cannot answer.
 keymap_listed() {
     local keymap=$1 all
@@ -216,15 +180,6 @@ keymap_listed() {
 # what a size is.
 valid_size() {
     size_to_sgdisk "$1" >/dev/null 2>&1
-}
-
-# ICMP is filtered on plenty of networks, and "no internet connection" on a host
-# that can reach the mirrors perfectly well is a dead end for the operator. Fall
-# back to the HTTPS the installer actually needs.
-net_check() {
-    ping -c1 -W3 archlinux.org >/dev/null 2>&1 && return 0
-    command -v curl >/dev/null 2>&1 || return 1
-    curl -sSf --max-time 10 -o /dev/null https://archlinux.org/
 }
 
 # ---------------- phase 1: preflight ----------------
@@ -510,42 +465,6 @@ chroot_dry_run() {
     success "[dry-run] chroot config and script generate cleanly"
 }
 
-# Copied after arch-chroot, not before it. `useradd -m` does nothing at all to a
-# home directory that already exists -- no chown, no mode, no /etc/skel -- so
-# pre-creating /mnt/home/<user> to copy into leaves the operator logging in to a
-# root-owned $HOME. Copying afterwards lets useradd build the home properly and
-# reduces this to one chown.
-#
-# Nothing here is fatal: the machine already boots by this point, and stage 2
-# can clone the repo itself. Every failure path says what to do instead.
-stage_dotfiles() {
-    local repo_root dest="/mnt/home/${USERNAME_VAR}/.dotfiles"
-    if [[ ! -d "/mnt/home/${USERNAME_VAR}" ]]; then
-        warn "/home/${USERNAME_VAR} does not exist in the new root; stage 2 will need a fresh clone"
-        return 0
-    fi
-    if [[ -e "$dest" ]]; then
-        warn "${dest} already exists; leaving it alone"
-        return 0
-    fi
-    repo_root=$(cd "${ARCH_SETUP_DIR}/.." && pwd) || {
-        warn "cannot resolve the repository root; stage 2 will need a fresh clone"
-        return 0
-    }
-    info "Copying this clone to /home/${USERNAME_VAR}/.dotfiles..."
-    if ! cp -a "$repo_root" "$dest"; then
-        warn "could not copy the repository; clone it as ${USERNAME_VAR} before stage 2"
-        return 0
-    fi
-    # cp -a preserves the live ISO's ownership, and the ISO's uid numbering is
-    # not the new root's. Chowned through the chroot so the name resolves
-    # against the new root's passwd rather than the ISO's.
-    arch-chroot /mnt chown -R "${USERNAME_VAR}:${USERNAME_VAR}" \
-        "/home/${USERNAME_VAR}/.dotfiles" \
-        || warn "could not chown /home/${USERNAME_VAR}/.dotfiles to ${USERNAME_VAR}"
-    success "dotfiles staged at /home/${USERNAME_VAR}/.dotfiles"
-}
-
 phase_chroot() {
     banner 5 "$TOTAL_PHASES" "System Configuration"
     local -a args
@@ -591,7 +510,11 @@ phase_chroot() {
     chroot_write_script /mnt/root/chroot_setup.sh
     arch-chroot /mnt /root/chroot_setup.sh
 
-    stage_dotfiles
+    # After the chroot, never before: see stage_dotfiles in lib/dotfiles.sh for
+    # what `useradd -m` does (nothing) to a home directory that already exists.
+    local repo_root
+    repo_root=$(cd "${ARCH_SETUP_DIR}/.." && pwd) || repo_root=""
+    stage_dotfiles /mnt "$USERNAME_VAR" "$repo_root"
     success "system configured"
 }
 

@@ -127,6 +127,55 @@ dotfiles_clone() {
     success "cloned to ${DOTFILES_DIR}"
 }
 
+# --- staging into a freshly installed root ---------------------------------
+
+# stage_dotfiles <target-root> <username> <repo-root>
+#
+# Copies the clone install.sh is running from into the new system, so stage 2
+# needs no second GitHub authentication. Takes its paths rather than reading
+# install.sh's globals: every other lib/ function does (btrfs_mount_all,
+# link_timezone), and a hardcoded /mnt is untestable.
+#
+# MUST run *after* arch-chroot has created the user. `useradd -m` does nothing
+# at all to a home directory that already exists -- verified: it warns "the
+# home directory ... already exists. Not copying any file from skel directory
+# into it", and it resets neither the owner nor the mode. So staging first
+# leaves the operator with a root-owned $HOME on whatever mode the copy
+# happened to make, and no /etc/skel.
+#
+# Nothing here is fatal. By this point the machine boots and stage 2 can clone
+# the repo itself, so every failure path warns with what to do instead rather
+# than taking down a working install.
+stage_dotfiles() {
+    local target=$1 username=$2 repo_root=$3
+    local home="${target}/home/${username}" dest="${target}/home/${username}/.dotfiles"
+
+    if [[ ! -d "$home" ]]; then
+        warn "${home} does not exist -- stage 2 will need a fresh clone"
+        return 0
+    fi
+    if [[ -e "$dest" ]]; then
+        warn "${dest} already exists; leaving it alone"
+        return 0
+    fi
+    if [[ -z "$repo_root" || ! -d "$repo_root" ]]; then
+        warn "no repository to copy from ('${repo_root}') -- stage 2 will need a fresh clone"
+        return 0
+    fi
+
+    info "Copying ${repo_root} to /home/${username}/.dotfiles..."
+    if ! cp -a "$repo_root" "$dest"; then
+        warn "could not copy the repository; clone it as ${username} before stage 2"
+        return 0
+    fi
+    # cp -a preserves the source's ownership, and the live ISO's uid numbering
+    # is not the new root's. Chowned through the chroot so the name resolves
+    # against the new root's passwd rather than the ISO's.
+    arch-chroot "$target" chown -R "${username}:${username}" "/home/${username}/.dotfiles" \
+        || warn "could not chown /home/${username}/.dotfiles to ${username}"
+    success "dotfiles staged at /home/${username}/.dotfiles"
+}
+
 # --- stow ------------------------------------------------------------------
 
 # Real files (not symlinks) that stow would refuse to overwrite, plus repo

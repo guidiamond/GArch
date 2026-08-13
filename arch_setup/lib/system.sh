@@ -161,6 +161,40 @@ locale_gen_uncomment() {
     chmod "$mode" "$file" || { error "locale_gen_uncomment: failed to restore mode ${mode} on ${file}"; return 1; }
 }
 
+# locale_listed <locale.gen> <locale> -- 0 listed, 1 absent, 2 cannot answer.
+#
+# The read-only counterpart of locale_gen_uncomment above, and it lives beside
+# it deliberately: it exists only to answer "would locale_gen_uncomment find
+# this?" before anything is committed to, and the two must agree exactly. Split
+# across files they drift, and the divergence surfaces inside the chroot on a
+# wiped disk -- which is the failure this function was written to prevent.
+#
+# So the matching rule is copied from there verbatim: strip a leading comment
+# marker, then compare the *first whitespace-separated field* as a fixed
+# string. Not a regex, for the reason documented there -- the '.' in
+# 'en_US.UTF-8' is a wildcard, and a regex match accepts 'en_USxUTF-8'.
+#
+# install.sh calls this against the live ISO's /etc/locale.gen, which comes
+# from the same glibc package pacstrap installs into /mnt, so a locale that
+# passes at the prompt is one locale_gen_uncomment will find in the chroot.
+#
+# Status 2 is "cannot answer" and is deliberately distinct from 1: a caller
+# that cannot read the file must be able to accept the value unchecked rather
+# than reject every locale its operator types.
+locale_listed() {
+    local file=$1 locale=$2
+    [[ -n "$locale" ]] || return 1
+    [[ -f "$file" ]] || return 2
+    awk -v loc="$locale" '
+        { probe = $0
+          sub(/^#[[:space:]]*/, "", probe)
+          split(probe, f, /[[:space:]]+/)
+          if (f[1] == loc) { found = 1; exit }
+        }
+        END { exit(found ? 0 : 1) }
+    ' "$file"
+}
+
 # link_timezone <zoneinfo-dir> <tz> <localtime-path>
 #
 # -f, not -e: /usr/share/zoneinfo/America is a directory, and "America" is the
@@ -187,6 +221,33 @@ link_timezone() {
 
 detect_ucode() {
     if grep -qi 'GenuineIntel' /proc/cpuinfo; then echo "intel-ucode"; else echo "amd-ucode"; fi
+}
+
+# Every console keymap this host knows, one per line. Non-zero when it cannot
+# say -- callers distinguish "no such keymap" from "cannot enumerate keymaps".
+#
+# localectl is the documented interface but talks to systemd-localed over dbus;
+# the kbd tree it reads is the fallback for a console where that is not up.
+list_keymaps() {
+    local out
+    out=$(localectl list-keymaps --no-pager 2>/dev/null) || out=""
+    if [[ -n "$out" ]]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    out=$(find /usr/share/kbd/keymaps -type f -name '*.map*' -printf '%f\n' 2>/dev/null \
+          | sed -e 's/\.map\(\.gz\)\?$//' | sort -u) || out=""
+    [[ -n "$out" ]] || return 1
+    printf '%s\n' "$out"
+}
+
+# ICMP is filtered on plenty of networks, and "no internet connection" on a host
+# that can reach the mirrors perfectly well is a dead end for the operator. Fall
+# back to the HTTPS the installer actually needs.
+net_check() {
+    ping -c1 -W3 archlinux.org >/dev/null 2>&1 && return 0
+    command -v curl >/dev/null 2>&1 || return 1
+    curl -sSf --max-time 10 -o /dev/null https://archlinux.org/
 }
 
 detect_gpu() {

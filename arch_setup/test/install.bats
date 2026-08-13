@@ -2,9 +2,14 @@
 #
 # install.sh is an orchestrator: prompts, ordering and destructive commands.
 # Most of it cannot be tested without a disk, and nothing here pretends
-# otherwise -- no phase_* function is called. What is testable is everything
-# that was pulled out of the prompt loops into named predicates, plus the
-# structural facts that keep the file safe to source.
+# otherwise. What is testable is everything pulled out of the prompt loops into
+# named predicates, plus the structural facts that keep the file safe to
+# source.
+#
+# One case does call a phase_* function: "phase_disk never reaches
+# plan_execute on a closed stdin". It runs with DRY_RUN=true and with
+# plan_execute stubbed, so the assertion is about where control gets to, not
+# about anything being written. No other case calls a phase.
 
 load helpers
 
@@ -35,7 +40,14 @@ in_install() {
 # The `if [[ "${BASH_SOURCE[0]}" == "$0" ]]` guard at the bottom is what makes
 # every other test in this file safe. Without it, sourcing install.sh parses
 # flags, arms an EXIT trap that runs `umount -R /mnt`, and enters phase 1.
-@test "sourcing install.sh starts no phase, arms no EXIT trap and says nothing" {
+#
+# Named for exactly what it guarantees and no more. Sourcing is NOT free of
+# side effects: it also turns on `set -euo pipefail` in the sourcing shell
+# (measured: SHELLOPTS goes from "hBc" to "ehuBc"). That is harmless here
+# because in_install uses a `bash -c` subshell per case, but it means
+# `load install` from a bats file would change how every later assertion
+# behaves. Source it in a subshell, not into the test process.
+@test "sourcing install.sh runs no phase and arms no EXIT trap" {
     run bash -c "source '${INSTALL_SH}'; printf 'TRAP[%s]' \"\$(trap -p EXIT)\""
     [ "$status" -eq 0 ]
     [ "$output" = "TRAP[]" ]
@@ -151,65 +163,12 @@ in_install() {
     [ "$status" -ne 0 ]
 }
 
-# --- locale_listed ---------------------------------------------------------
-
-locale_fixture() {
-    cat > "${TMP}/locale.gen" <<'GEN'
-# Configuration file for locale-gen
-#
-#en_GB.UTF-8 UTF-8
-#en_US.UTF-8 UTF-8
-pt_BR.UTF-8 UTF-8
-#en_USxUTF-8 ISO-8859-1
-GEN
-}
-
-@test "locale_listed finds both a commented and an uncommented entry" {
-    locale_fixture
-    run in_install "locale_listed '${TMP}/locale.gen' en_US.UTF-8"
-    [ "$status" -eq 0 ]
-    run in_install "locale_listed '${TMP}/locale.gen' pt_BR.UTF-8"
-    [ "$status" -eq 0 ]
-}
-
-# The same trap locale_gen_uncomment documents: in a regex the '.' of
-# 'en_US.UTF-8' is a wildcard, so a regex match accepts an 'en_USxUTF-8' line.
-# Waving that through at the prompt would be worse than not checking at all --
-# it would approve exactly the value locale_gen_uncomment then rejects in the
-# chroot, in phase 5, with the disk wiped behind it.
-#
-# The fixture deliberately omits the exact line: with both present the awk
-# stops at the exact one first and a regex implementation passes anyway. That
-# is how the first draft of this test passed against a regex version.
-@test "locale_listed compares as a fixed string, not a regex" {
-    cat > "${TMP}/wildcard.gen" <<'GEN'
-# Configuration file for locale-gen
-#en_USxUTF-8 ISO-8859-1
-pt_BR.UTF-8 UTF-8
-GEN
-    run in_install "locale_listed '${TMP}/wildcard.gen' 'en_US.UTF-8'"
-    [ "$status" -eq 1 ]
-    # The literal line is still found, so this is not just "rejects everything".
-    run in_install "locale_listed '${TMP}/wildcard.gen' 'en_USxUTF-8'"
-    [ "$status" -eq 0 ]
-}
-
-@test "locale_listed rejects a locale the file does not list" {
-    locale_fixture
-    run in_install "locale_listed '${TMP}/locale.gen' 'xx_YY.UTF-8'"
-    [ "$status" -eq 1 ]
-}
-
-# Status 2 is "cannot answer", and phase_locale accepts the value unchecked on
-# a 2 rather than looping on a question it can never answer. Collapsing this
-# into 1 would make an installer that cannot read /etc/locale.gen reject every
-# locale the operator types.
-@test "locale_listed says 'cannot answer', not 'absent', for an unreadable file" {
-    run in_install "locale_listed '${TMP}/no-such-locale.gen' en_US.UTF-8"
-    [ "$status" -eq 2 ]
-}
-
 # --- keymap_listed ---------------------------------------------------------
+#
+# keymap_listed stays here while list_keymaps lives in lib/system.sh, for the
+# same reason valid_size stays here while size_to_sgdisk lives in lib/disk.sh:
+# the probe is work, the predicate over it is prompt flow. Its 0/1/2 contract
+# is what phase_locale branches on, so it is tested against a stubbed list.
 
 @test "keymap_listed matches a whole line only" {
     run in_install 'list_keymaps() { printf "%s\n" us br-abnt2 uk; }; keymap_listed us'
@@ -240,16 +199,6 @@ GEN
     [ "$status" -eq 2 ]
     run in_install 'list_keymaps() { printf "%s\n" us; }; keymap_listed ""'
     [ "$status" -eq 1 ]
-}
-
-# Not a unit test: it asserts the real probe works on the host running the
-# suite. A host with neither localectl nor /usr/share/kbd is legitimate, and is
-# what status 2 exists for, so it skips rather than fails.
-@test "the live host's keymap list contains us" {
-    run in_install 'list_keymaps'
-    [ "$status" -eq 0 ] || skip "this host cannot enumerate keymaps"
-    run in_install 'keymap_listed us'
-    [ "$status" -eq 0 ]
 }
 
 # --- valid_size ------------------------------------------------------------
@@ -358,4 +307,53 @@ with_answers() {
     # anything has been wiped.
     run in_install "config_safe 'en_US\$(id).UTF-8'"
     [ "$status" -ne 0 ]
+}
+
+# --- the gate in front of plan_execute -------------------------------------
+#
+# Two individually plausible cleanups -- "ask has a default, why error at
+# EOF?" and "we have two confirmation styles, unify them" -- were each
+# survivable by the rest of this suite, and together reached plan_execute on a
+# closed stdin with nobody having typed anything. These two cases are what make
+# that combination fail.
+
+# ask_yes_no answers with its default at EOF (deliberately -- see the warning
+# above it in lib/ui.sh), and confirm_step's default is yes. So this gate has
+# to stay a bare `read`: it is the last thing between a closed stdin and
+# sgdisk --zap-all, and it is the only one of the three that fails closed.
+@test "the disk-wipe gate is a bare read, not ask_yes_no or confirm_step" {
+    grep -qF 'Type YES to wipe' "$INSTALL_SH"
+    grep -qE 'read -rp .*Type YES to wipe.* confirm \|\| confirm=""' "$INSTALL_SH"
+    assert_absent 'confirm_step .*[Ww]ipe' "$INSTALL_SH"
+}
+
+# The behavioural counterpart, and the one that fires on the consequence rather
+# than the edit. DRY_RUN=true so that nothing downstream of the gate could act
+# even if a future change let control past it; plan_execute is stubbed so the
+# assertion has something to name.
+#
+# Mutation-tested, and the results are worth writing down because they are not
+# what they look like. Reverting only `ask`'s DEFAULTED branch does not reach
+# plan_execute even with the wipe gate unified into confirm_step: the disk
+# prompt is the one `ask` call with no default, so control still dies there.
+# What this case actually catches is
+#   - the whole of `ask` reverted: the disk prompt loops, timeout 124, caught
+#     by the `-ne 124` assertion (a regression here hangs, it does not fail);
+#   - that, plus a default added to the disk prompt: plan_execute genuinely
+#     reached on a closed stdin with nobody having typed anything.
+# The second is the one worth fearing, and it is two innocuous-looking edits
+# away -- "give the disk prompt a sensible default" is a plausible commit on
+# its own.
+@test "phase_disk never reaches plan_execute on a closed stdin" {
+    run timeout 5 env DRY_RUN=true bash -c "
+        source '${INSTALL_SH}'
+        banner(){ :; }; lsblk(){ printf 'FAKE 1G DISK\n'; }
+        plan_reset(){ :; }; plan_add(){ :; }; plan_render(){ :; }
+        plan_execute(){ echo 'PLAN_EXECUTE_REACHED'; }
+        phase_disk
+    " </dev/null
+    # 124 would mean it hung re-prompting instead of stopping.
+    [ "$status" -ne 124 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"PLAN_EXECUTE_REACHED"* ]]
 }

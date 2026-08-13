@@ -425,3 +425,69 @@ make_repo_with_conflict() {
     [ "$status" -ne 0 ]
     [ "$(wc -l < "$TMP/mvcalls")" -eq 1 ]
 }
+
+# --- stage_dotfiles --------------------------------------------------------
+#
+# Called by install.sh with /mnt as the target root. Everything here works
+# against a fake target root under $TMP instead, which is the reason the
+# function takes its paths as arguments rather than reading install.sh's
+# globals -- a hardcoded /mnt could only be tested on a real install.
+#
+# arch-chroot is stubbed on PATH: it is the one command in the function that
+# needs a real installed system, and stubbing it is what makes the happy path
+# reachable at all. It records its arguments so the chown can be asserted.
+stage_fixture() {
+    mkdir -p "$TMP/mnt/home/damn" "$TMP/repo/.git"
+    printf 'repo file\n' > "$TMP/repo/README"
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/chroot_calls\n' "$TMP" > "$TMP/bin/arch-chroot"
+    chmod +x "$TMP/bin/arch-chroot"
+}
+
+@test "stage_dotfiles copies the repo and hands it to the user" {
+    stage_fixture
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ -f "$TMP/mnt/home/damn/.dotfiles/README" ]
+    # The copy is only half the job: cp -a preserves the ISO's ownership, whose
+    # uid numbering is not the new root's, so the chown has to happen and has
+    # to happen through the chroot.
+    grep -qF 'chown -R damn:damn /home/damn/.dotfiles' "$TMP/chroot_calls"
+}
+
+# The ordering guard. install.sh must call this after arch-chroot has created
+# the user; if it ever runs first there is no home directory, and the right
+# answer is to say so rather than to mkdir one -- a pre-created home makes
+# `useradd -m` skip the owner, the mode and /etc/skel entirely.
+@test "stage_dotfiles refuses to create a home directory that useradd should own" {
+    stage_fixture
+    rm -rf "$TMP/mnt/home/damn"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/mnt/home/damn" ]
+    [[ "$output" == *"fresh clone"* ]]
+    [ ! -e "$TMP/chroot_calls" ]
+}
+
+# `cp -a src dest` where dest exists copies *into* it, leaving
+# .dotfiles/.dotfiles. Skip instead, and say so.
+@test "stage_dotfiles leaves an existing .dotfiles alone" {
+    stage_fixture
+    mkdir -p "$TMP/mnt/home/damn/.dotfiles"
+    printf 'mine\n' > "$TMP/mnt/home/damn/.dotfiles/KEEP"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ -f "$TMP/mnt/home/damn/.dotfiles/KEEP" ]
+    [ ! -e "$TMP/mnt/home/damn/.dotfiles/.dotfiles" ]
+    [ ! -e "$TMP/mnt/home/damn/.dotfiles/README" ]
+}
+
+# Non-fatal by design: the machine boots by this point and stage 2 can clone,
+# so a missing repo must not take down a working install.
+@test "stage_dotfiles warns rather than failing when there is no repo to copy" {
+    stage_fixture
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/no-such-repo"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"fresh clone"* ]]
+    [ ! -e "$TMP/mnt/home/damn/.dotfiles" ]
+}

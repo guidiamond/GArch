@@ -65,6 +65,22 @@ setup() {
     [[ "$output" == *"end of input"* ]]
 }
 
+# `ask` has two branches and the test above only covers the no-default one.
+# The defaulted branch is what every phase-2 prompt uses, and it is the one
+# with an obvious-looking "simplification": it HAS a default, so why not just
+# return it at EOF? Because that is what made the re-ask loops spin, and
+# because it is what keeps a closed stdin from ever reaching a confirm_step or
+# the encrypt prompt -- both of which answer yes at EOF by design.
+@test "ask fails at EOF even when it has a default" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; ask 'Keymap' 'us'" </dev/null
+    [ "$status" -ne 0 ]
+    # The default must not be echoed as though it had been chosen. `read -rp`
+    # writes no prompt when stdin is not a terminal, and stdin here is
+    # /dev/null regardless of whether the suite itself runs under a pty, so
+    # the only way "us" appears is if ask returned it.
+    [[ "$output" != *"us"* ]]
+}
+
 # Same loop, no default to fall back on at all: verified to exit 124 before
 # this fix. install.sh calls ask_password three times.
 @test "ask_password fails at EOF instead of looping forever" {
