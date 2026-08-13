@@ -101,7 +101,10 @@ chroot_write_script() {
         set -e
         cat <<'HEADER'
 #!/bin/bash
-set -euo pipefail
+# -E, not just -e: a plain errexit does not propagate the ERR trap into shell
+# functions, command substitutions or subshells, and the failures most worth
+# reporting here happen inside the injected helpers and inside $(...).
+set -Eeuo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
 info()    { echo -e "${BLUE}[*]${RESET} $*"; }
@@ -109,13 +112,21 @@ warn()    { echo -e "${YELLOW}[!]${RESET} $*"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 success() { echo -e "${GREEN}[OK]${RESET} $*"; }
 
-# Both files go on *every* exit path, not just the happy one. The config
-# holds the root and user passwords, and base64 is encoding, not encryption:
-# a run that dies after the bootloader is written still leaves a machine that
-# boots, with the passwords sitting in /root. The cost is that a failed run
-# cannot be resumed by re-running this script by hand -- re-run install.sh,
-# which regenerates both files.
-trap 'rm -f /root/chroot_setup.sh /root/chroot_config.sh' EXIT
+# A dozen bare commands run under set -e here and most tools say something
+# when they fail -- but the greps that read HOOKS= and MODULES= out of
+# mkinitcpio.conf exit non-zero printing nothing at all. Without this the
+# operator sees a phase banner and then silence.
+trap 'error "chroot_setup.sh failed at line ${LINENO}: ${BASH_COMMAND}"' ERR
+
+# The config holds the root and user passwords and base64 is encoding, not
+# encryption, so it goes on every exit path -- a run that dies after the
+# bootloader is written still leaves a machine that boots, with the passwords
+# sitting in /root. This script holds no secret, so it is removed at the end
+# instead: deleting it here would take away both the line number just
+# reported and the file needed to look it up. A failed run therefore leaves a
+# 0700 root-owned script in /root, which is a far smaller cost than an
+# unbootable machine with nothing to read.
+trap 'rm -f /root/chroot_config.sh' EXIT
 
 if [[ ! -r /root/chroot_config.sh ]]; then
     error "/root/chroot_config.sh is missing or unreadable"
@@ -136,10 +147,28 @@ HEADER
         # this list for that reason. Anything added to CHROOT_INJECTED must
         # reference neither, or the HEADER has to grow to define them.
         # test/chroot.bats enforces this on the generated file.
+        # declare -f strips comments and reflows, so this is the one large
+        # region of the artifact with nothing explaining itself. Label it.
+        cat <<'HELPERS'
+
+# ---- helpers (generated from arch_setup/lib/system.sh -- the "why" comments
+# live there; declare -f strips them) ----
+HELPERS
         for fn in "${CHROOT_INJECTED[@]}"; do
             declare -f "$fn"
         done
 
+        # Notes for whoever maintains the body below, kept out of the heredoc
+        # because the artifact's audience is an operator at a TTY in a
+        # half-installed system, who has no repo to cross-reference:
+        #
+        # - The sudoers drop-in follows lib/system.sh's setup_lightdm, which
+        #   declines to install a file for the same reason -- not marking a
+        #   pacman-owned file locally modified.
+        # - The includedir check is fatal on the strength of etc/sudoers
+        #   extracted from the sudo-1.9.17.p2-6 package, where line 139 is an
+        #   uncommented "@includedir /etc/sudoers.d". Checked against the
+        #   package, not from memory.
         cat <<'BODY'
 
 # ---- preflight ----
@@ -228,31 +257,25 @@ else
 fi
 printf '%s:%s\n' "$USERNAME_VAR" "$USER_PASSWORD" | chpasswd
 
-# A drop-in rather than an in-place edit of /etc/sudoers: /etc/sudoers is
-# pacman-owned, and editing it marks it locally modified, which buys a .pacnew
-# to reconcile on every sudo upgrade. lib/system.sh's setup_lightdm declines
-# to install a file for exactly that reason. No visudo -c here -- the content
-# is one hardcoded line from a quoted heredoc with nothing interpolated, so
-# validating it only asks whether visudo itself works.
+# A drop-in file rather than an edit of /etc/sudoers, which is pacman-owned:
+# editing it marks it locally modified and buys a .pacnew to reconcile on
+# every sudo upgrade.
+#
+# The precondition first: the drop-in does nothing at all unless /etc/sudoers
+# still includes the directory, and an administrator account with no sudo is
+# not a warning-grade outcome. Stock installs have the line, so this only
+# fires where the assumption genuinely fails -- and failing here, before the
+# initramfs and bootloader stages, aborts cleanly rather than half-building a
+# system.
+if ! grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers; then
+    error "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} would have no sudo"
+    exit 1
+fi
 mkdir -p /etc/sudoers.d
 cat > /etc/sudoers.d/10-wheel <<'WHEEL'
 %wheel ALL=(ALL:ALL) ALL
 WHEEL
 chmod 440 /etc/sudoers.d/10-wheel
-# The drop-in only does anything if /etc/sudoers still includes the directory.
-# Without it the administrator account has no sudo at all, which is not a
-# warning-grade outcome -- and failing here, before the initramfs and
-# bootloader stages, aborts cleanly instead of half-building a system.
-#
-# Fatal is safe on a stock install: the sudoers pacstrap lays down comes from
-# the sudo package, and in sudo-1.9.17.p2-6 line 139 is an uncommented
-# "@includedir /etc/sudoers.d". Verified by extracting etc/sudoers from the
-# package rather than from memory -- so this aborts only where the assumption
-# genuinely does not hold.
-if ! grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoers; then
-    error "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} would have no sudo"
-    exit 1
-fi
 success "user ${USERNAME_VAR} configured"
 
 # ---- initramfs ----
@@ -308,7 +331,10 @@ if [[ -d "/home/${USERNAME_VAR}/.dotfiles" ]]; then
     success "dotfiles handed to ${USERNAME_VAR}"
 fi
 
-# The EXIT trap removes this script and the config.
+# Only on success: a failed run leaves this script in place so the line number
+# the ERR trap reported can actually be looked up. The EXIT trap has the
+# config, which carries the passwords, on every path.
+rm -f /root/chroot_setup.sh
 success "chroot configuration complete"
 BODY
     ) > "$tmp"; then

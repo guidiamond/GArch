@@ -10,6 +10,18 @@ setup() {
     TMP="$BATS_TEST_TMPDIR"
 }
 
+make_locale_gen() {
+    printf '#en_US.UTF-8 UTF-8  \n#en_US ISO-8859-1  \n#pt_BR.UTF-8 UTF-8  \n' \
+        > "$TMP/locale.gen"
+}
+
+make_zoneinfo() {
+    mkdir -p "$TMP/zoneinfo/America"
+    printf 'TZif\n' > "$TMP/zoneinfo/America/Sao_Paulo"
+}
+
+# --- hooks_line / modules_line ---------------------------------------------
+
 @test "hooks_line adds microcode after autodetect when not encrypting" {
     run hooks_line "$DEFAULT_HOOKS" false
     [[ "$output" == *"autodetect microcode modconf"* ]]
@@ -48,6 +60,8 @@ setup() {
     [ "$output" = 'MODULES=(btrfs nvidia)' ]
 }
 
+# --- grub_cmdline_add ------------------------------------------------------
+
 @test "grub_cmdline_add appends to an empty cmdline" {
     printf 'GRUB_CMDLINE_LINUX=""\n' > "$TMP/grub"
     grub_cmdline_add "$TMP/grub" "nvidia-drm.modeset=1"
@@ -72,6 +86,26 @@ setup() {
     grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=new:cryptroot"
     grep -q 'cryptdevice=UUID=new:cryptroot' "$TMP/grub"
     assert_absent 'UUID=old' "$TMP/grub"
+}
+
+@test "grub_cmdline_add fails loudly when the line is absent" {
+    printf 'GRUB_TIMEOUT=5\n' > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
+    [ "$status" -ne 0 ]
+    assert_absent 'cryptdevice' "$TMP/grub"
+}
+
+@test "grub_cmdline_add fails loudly on a single-quoted line" {
+    printf "GRUB_CMDLINE_LINUX='quiet'\n" > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
+    [ "$status" -ne 0 ]
+}
+
+@test "grub_cmdline_add fails loudly rather than corrupting on a sed metacharacter" {
+    printf 'GRUB_CMDLINE_LINUX="quiet"\n' > "$TMP/grub"
+    run grub_cmdline_add "$TMP/grub" "foo=a&b"
+    [ "$status" -ne 0 ]
+    [ "$(cat "$TMP/grub")" = 'GRUB_CMDLINE_LINUX="quiet"' ]
 }
 
 # --- require_vars ----------------------------------------------------------
@@ -104,11 +138,6 @@ setup() {
 }
 
 # --- locale_gen_uncomment --------------------------------------------------
-
-make_locale_gen() {
-    printf '#en_US.UTF-8 UTF-8  \n#en_US ISO-8859-1  \n#pt_BR.UTF-8 UTF-8  \n' \
-        > "$TMP/locale.gen"
-}
 
 @test "locale_gen_uncomment uncomments exactly the requested entry" {
     make_locale_gen
@@ -164,11 +193,6 @@ make_locale_gen() {
 
 # --- link_timezone ---------------------------------------------------------
 
-make_zoneinfo() {
-    mkdir -p "$TMP/zoneinfo/America"
-    printf 'TZif\n' > "$TMP/zoneinfo/America/Sao_Paulo"
-}
-
 @test "link_timezone links a real zone" {
     make_zoneinfo
     link_timezone "$TMP/zoneinfo" America/Sao_Paulo "$TMP/localtime"
@@ -211,6 +235,8 @@ make_zoneinfo() {
     [ "$(readlink "$TMP/localtime")" = "$TMP/zoneinfo/America/Sao_Paulo" ]
 }
 
+# --- host detection --------------------------------------------------------
+
 @test "detect_ucode returns a real package name" {
     run detect_ucode
     [[ "$output" == "intel-ucode" || "$output" == "amd-ucode" ]]
@@ -227,25 +253,19 @@ make_zoneinfo() {
     [ -z "$output" ]
 }
 
-@test "grub_cmdline_add fails loudly when the line is absent" {
-    printf 'GRUB_TIMEOUT=5\n' > "$TMP/grub"
-    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
-    [ "$status" -ne 0 ]
-    assert_absent 'cryptdevice' "$TMP/grub"
+@test "needs_grub_install is true when the EFI stub is absent" {
+    run needs_grub_install "$TMP/nonexistent-esp"
+    [ "$status" -eq 0 ]
 }
 
-@test "grub_cmdline_add fails loudly on a single-quoted line" {
-    printf "GRUB_CMDLINE_LINUX='quiet'\n" > "$TMP/grub"
-    run grub_cmdline_add "$TMP/grub" "cryptdevice=UUID=abc:cryptroot"
-    [ "$status" -ne 0 ]
+@test "needs_grub_install is false when the EFI stub exists" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp"
+    [ "$status" -eq 1 ]
 }
 
-@test "grub_cmdline_add fails loudly rather than corrupting on a sed metacharacter" {
-    printf 'GRUB_CMDLINE_LINUX="quiet"\n' > "$TMP/grub"
-    run grub_cmdline_add "$TMP/grub" "foo=a&b"
-    [ "$status" -ne 0 ]
-    [ "$(cat "$TMP/grub")" = 'GRUB_CMDLINE_LINUX="quiet"' ]
-}
+# --- subsystem setup -------------------------------------------------------
 
 # Machine-independent: assert on whichever branch this host lands in, so the
 # test does not silently depend on the developer's own login shell.
@@ -257,18 +277,6 @@ make_zoneinfo() {
     else
         [[ "$output" == *"would chsh"* ]]
     fi
-}
-
-@test "needs_grub_install is true when the EFI stub is absent" {
-    run needs_grub_install "$TMP/nonexistent-esp"
-    [ "$status" -eq 0 ]
-}
-
-@test "needs_grub_install is false when the EFI stub exists" {
-    mkdir -p "$TMP/esp/EFI/GRUB"
-    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
-    run needs_grub_install "$TMP/esp"
-    [ "$status" -eq 1 ]
 }
 
 @test "setup_shell fails when the target user cannot be determined" {

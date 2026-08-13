@@ -1,5 +1,18 @@
 #!/bin/bash
-# One idempotent function per subsystem. Requires lib/ui.sh.
+# Shared transforms, host probes and one idempotent function per subsystem.
+# Requires lib/ui.sh.
+#
+# COUPLING: everything in the first three sections below -- hooks_line,
+# modules_line, gpu_packages, require_vars, grub_cmdline_add,
+# locale_gen_uncomment, link_timezone, detect_ucode, detect_gpu,
+# needs_grub_install -- is a candidate for injection into the generated chroot
+# script, and lib/chroot.sh's CHROOT_INJECTED currently takes seven of them
+# verbatim via `declare -f`. Anything injected runs under `set -Eeuo pipefail`
+# in a shell that defines only RED GREEN YELLOW BLUE RESET and
+# info/warn/error/success. So: no CYAN, no BOLD, no ARCH_SETUP_DIR, no sudo,
+# no reading a variable the caller has not passed in -- an undefined name is
+# fatal there, not cosmetic. See the CONSTRAINT block at chroot.sh's injection
+# site; test/chroot.bats enforces it against the generated file.
 # shellcheck shell=bash
 
 # Arch no longer ships the proprietary nvidia/nvidia-dkms packages -- only the
@@ -9,7 +22,7 @@ GPU_NVIDIA=(nvidia-open-dkms nvidia-utils nvidia-settings)
 GPU_AMD=(xf86-video-amdgpu mesa vulkan-radeon)
 GPU_INTEL=(mesa vulkan-intel intel-media-driver)
 
-# --- pure transforms -------------------------------------------------------
+# --- pure transforms (no I/O) ----------------------------------------------
 
 # hooks_line "HOOKS=(...)" <want_encrypt> -> new HOOKS line
 hooks_line() {
@@ -46,6 +59,33 @@ modules_line() {
     echo "MODULES=(${mods[*]})"
 }
 
+gpu_packages() {
+    case "$1" in
+        nvidia) echo "${GPU_NVIDIA[*]}" ;;
+        amd)    echo "${GPU_AMD[*]}" ;;
+        intel)  echo "${GPU_INTEL[*]}" ;;
+        *)      echo "" ;;
+    esac
+}
+
+# require_vars NAME... -- every named variable must exist and be non-empty.
+# Names them all at once so a caller running under `set -u` fails with one
+# readable list before it mutates anything, rather than dying on a bare
+# "unbound variable" partway through.
+require_vars() {
+    local name missing=()
+    for name in "$@"; do
+        # The `-` default is what makes this safe under `set -u`.
+        [[ -n "${!name-}" ]] || missing+=("$name")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        error "missing or empty required config value(s): ${missing[*]}"
+        return 1
+    fi
+}
+
+# --- config-file editors ---------------------------------------------------
+
 # grub_cmdline_add <file> key=value  -- idempotent, replaces a changed value.
 # Asserts before and verifies after: a silent no-op here means a kernel with no
 # cryptdevice= and a system that will not boot, discovered only at reboot.
@@ -73,22 +113,6 @@ grub_cmdline_add() {
     sed -i "s|^GRUB_CMDLINE_LINUX=\".*\"$|GRUB_CMDLINE_LINUX=\"${new[*]}\"|" "$file"
     grep -qF -- "$kv" "$file" \
         || { error "grub_cmdline_add: failed to write '${kv}' to ${file}"; return 1; }
-}
-
-# require_vars NAME... -- every named variable must exist and be non-empty.
-# Names them all at once so a caller running under `set -u` fails with one
-# readable list before it mutates anything, rather than dying on a bare
-# "unbound variable" partway through.
-require_vars() {
-    local name missing=()
-    for name in "$@"; do
-        # The `-` default is what makes this safe under `set -u`.
-        [[ -n "${!name-}" ]] || missing+=("$name")
-    done
-    if (( ${#missing[@]} > 0 )); then
-        error "missing or empty required config value(s): ${missing[*]}"
-        return 1
-    fi
 }
 
 # locale_gen_uncomment <file> <locale> -- uncomment the locale.gen entry whose
@@ -159,6 +183,8 @@ link_timezone() {
     fi
 }
 
+# --- host probes -----------------------------------------------------------
+
 detect_ucode() {
     if grep -qi 'GenuineIntel' /proc/cpuinfo; then echo "intel-ucode"; else echo "amd-ucode"; fi
 }
@@ -174,23 +200,14 @@ detect_gpu() {
     esac
 }
 
-gpu_packages() {
-    case "$1" in
-        nvidia) echo "${GPU_NVIDIA[*]}" ;;
-        amd)    echo "${GPU_AMD[*]}" ;;
-        intel)  echo "${GPU_INTEL[*]}" ;;
-        *)      echo "" ;;
-    esac
-}
-
-# --- subsystem setup (idempotent) ------------------------------------------
-
 # True (0) when GRUB still needs installing. Takes the ESP mountpoint.
 needs_grub_install() {
     local esp=${1:-/boot}
     [[ -f "${esp}/EFI/GRUB/grubx64.efi" ]] && return 1
     return 0
 }
+
+# --- subsystem setup (needs sudo, host-only) -------------------------------
 
 setup_zram() {
     local src="${ARCH_SETUP_DIR}/etc/systemd/zram-generator.conf"

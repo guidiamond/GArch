@@ -10,6 +10,22 @@ setup() {
     mkdir -p "$TMP/root"
 }
 
+# Slice the injected helper block out of the artifact into <out>.
+#
+# Guarded, not trusted: one caller feeds the result to `bash -c`, so if that
+# end marker ever moves this must fail rather than hand over the real chroot
+# body and reconfigure the developer's machine. assert_absent because a bare
+# `! grep` here would be inert under errexit and wave it straight through.
+extract_helpers() {
+    local artifact=$1 out=$2
+    awk '/^hooks_line \(\)/ { on = 1 }
+         /^# ---- preflight ----$/ { exit }
+         on { print }' "$artifact" > "$out"
+    [ -s "$out" ]
+    assert_absent 'mkinitcpio|grub-install|grub-mkconfig|useradd|usermod|chpasswd|systemctl|locale-gen|hwclock|sudo|/etc/' \
+        "$out"
+}
+
 # --- chroot_write_config ---------------------------------------------------
 
 @test "chroot_write_config quotes every value" {
@@ -127,7 +143,6 @@ setup() {
 @test "generated chroot script only ever pipes a password into chpasswd" {
     chroot_write_script "$TMP/root/setup.sh"
     offenders=$(grep -nE '\$\{?(ROOT|USER)_PASSWORD' "$TMP/root/setup.sh" \
-                | grep -vE '^[0-9]+:(ROOT|USER)_PASSWORD=\$\(printf' \
                 | grep -v 'chpasswd' || true)
     [ -z "$offenders" ]
 }
@@ -153,12 +168,18 @@ setup() {
     [ -z "$(ls -A "$TMP/root")" ]
 }
 
-# The generated script runs under `set -u`, so referencing a colour the
-# HEADER does not define is fatal, not cosmetic: it aborts the chroot
-# mid-configuration. Any function added to the injection list must therefore
-# avoid CYAN and BOLD unless the HEADER grows to define them.
-@test "generated chroot script references no colour its header omits" {
+# Under `set -u` ANY variable the HEADER does not define is fatal, not just
+# the colours -- ARCH_SETUP_DIR is the live one, since setup_zram,
+# setup_lightdm and setup_gpu all reference it and it does not exist in the
+# artifact. The injected block references no uppercase variable at all, so
+# assert exactly that: a whitelist subsuming CYAN, BOLD, ARCH_SETUP_DIR,
+# SUDO_USER, HOME and anything added later. The narrower colour check still
+# covers the hand-written body, where uppercase config vars are legitimate
+# and a whitelist is not expressible.
+@test "generated chroot script references no variable its header omits" {
     chroot_write_script "$TMP/root/setup.sh"
+    extract_helpers "$TMP/root/setup.sh" "$TMP/helpers.sh"
+    assert_absent '\$\{?[A-Z][A-Z0-9_]*' "$TMP/helpers.sh"
     assert_absent '\$\{?(CYAN|BOLD)\b' "$TMP/root/setup.sh"
 }
 
@@ -172,10 +193,46 @@ setup() {
 }
 
 # base64 is encoding, not encryption: the config must not survive a failed run
-# on a machine that still boots.
+# on a machine that still boots. The script itself holds no secret, and
+# deleting it on failure would take away the file the reported line number
+# refers to -- so it goes only on success.
 @test "generated chroot script removes the credential file on every exit path" {
     chroot_write_script "$TMP/root/setup.sh"
     grep -qE "^trap .*rm -f .*chroot_config\.sh.* EXIT$" "$TMP/root/setup.sh"
+    assert_absent "^trap .*rm -f .*chroot_setup\.sh.*EXIT" "$TMP/root/setup.sh"
+    grep -qE '^rm -f /root/chroot_setup\.sh$' "$TMP/root/setup.sh"
+}
+
+# Every guarded path in the helpers returns explicitly and would be reported
+# either way. An *unguarded* failure inside one is what needs -E: without it
+# the ERR trap does not reach into functions, and grub_cmdline_add's sed -i on
+# a read-only /etc/default/grub yields sed's own message and no location at
+# all. Driven with the artifact's own options and trap lines, not a copy.
+@test "the artifact's ERR trap locates a failure inside an injected helper" {
+    chroot_write_script "$TMP/root/setup.sh"
+    extract_helpers "$TMP/root/setup.sh" "$TMP/helpers.sh"
+    opts=$(grep -m1 '^set -' "$TMP/root/setup.sh")
+    errtrap=$(grep -m1 '^trap .* ERR$' "$TMP/root/setup.sh")
+    [ -n "$opts" ]
+    [ -n "$errtrap" ]
+
+    mkdir -p "$TMP/ro"
+    printf 'GRUB_CMDLINE_LINUX="quiet"\n' > "$TMP/ro/grub"
+    chmod 444 "$TMP/ro/grub"
+    chmod 555 "$TMP/ro"
+    run bash -c "${opts}
+        RED=; RESET=
+        error() { echo \"[ERROR] \$*\" >&2; }
+        ${errtrap}
+        $(cat "$TMP/helpers.sh")
+        grub_cmdline_add '$TMP/ro/grub' quiet=1
+        echo SHOULD_NOT_REACH"
+    chmod 755 "$TMP/ro"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed at line"* ]]
+    [[ "$output" == *"sed -i"* ]]
+    [[ "$output" != *"SHOULD_NOT_REACH"* ]]
 }
 
 @test "generated chroot script refuses a LUKS_ENABLED that is neither true nor false" {
@@ -199,19 +256,10 @@ setup() {
 # an abort there would leave the initramfs with no btrfs module.
 @test "injected helpers still work under the generated script's shell options" {
     chroot_write_script "$TMP/root/setup.sh"
-    helpers=$(awk '/^hooks_line \(\)/ { on = 1 }
-                   /^# ---- preflight ----$/ { exit }
-                   on { print }' "$TMP/root/setup.sh")
-    # Guard the extraction rather than trusting it: if that end marker ever
-    # moves, this test must fail, not eval the real body on a live machine.
-    # Via assert_absent, because a bare `! grep` here is inert under set -e
-    # and would wave the whole chroot body straight into the bash -c below.
-    [ -n "$helpers" ]
-    printf '%s\n' "$helpers" > "$TMP/helpers.sh"
-    assert_absent 'mkinitcpio|grub-install|grub-mkconfig|useradd|usermod|chpasswd|systemctl|locale-gen|hwclock|/etc/' \
-        "$TMP/helpers.sh"
+    extract_helpers "$TMP/root/setup.sh" "$TMP/helpers.sh"
+    helpers=$(cat "$TMP/helpers.sh")
 
-    run bash -c "set -euo pipefail
+    run bash -c "set -Eeuo pipefail
         RED=; RESET=
         error() { echo \"[ERROR] \$*\" >&2; }
         ${helpers}
