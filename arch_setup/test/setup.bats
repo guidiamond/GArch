@@ -103,8 +103,9 @@ stub_actions_failing() {
 
 # The arguments each step callee needs to get past its own early returns. A
 # function with no entry here fails the case rather than being run bare:
-# `setup_gpu` with no argument returns 0 at "no GPU driver selected" and would
-# pass while testing nothing. `amd` is the plain path -- one pacman call --
+# `setup_gpu` with no argument now fails at gpu_packages, which satisfies the
+# FAILED[probe] assertion below without any of the sudo commands the case is
+# actually about ever running. `amd` is the plain path -- one pacman call --
 # which is where the unchecked-pacman shape shows; the nvidia tail, which is
 # the one that ends in an initramfs, has its own cases below.
 step_args() {
@@ -182,6 +183,24 @@ exec $(command -v grep) "\$@"
 EOF
     chmod +x "$TMP/bin/sudo" "$TMP/bin/grep"
     : > "$TMP/sudo_args"
+}
+
+# An answer setup_gpu does not recognise must not be read as "none". Both of
+# these run before any sudo, so nothing is stubbed: gpu_packages decides.
+@test "setup_gpu refuses an unrecognised driver instead of calling it none" {
+    local out
+    out=$(run_step setup_gpu NVIDIA)
+    [[ "$out" == *"FAILED[probe]"* ]]
+    [[ "$out" == *"unrecognised"* ]]
+    [[ "$out" != *"no GPU driver selected"* ]]
+    [[ "$out" != *"GPU driver configured"* ]]
+}
+
+@test "setup_gpu treats none as a no-op and succeeds" {
+    local out
+    out=$(run_step setup_gpu none)
+    [[ "$out" == *"OK[probe]"* ]]
+    [[ "$out" == *"no GPU driver selected"* ]]
 }
 
 @test "setup_gpu fails when mkinitcpio cannot rebuild the initramfs" {

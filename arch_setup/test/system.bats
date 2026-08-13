@@ -354,7 +354,29 @@ stub_net() {
 
 @test "gpu_packages maps none to nothing" {
     run gpu_packages none
+    [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+# "none" and "a value I do not recognise" must not share an answer. This used
+# to return "" at status 0 for everything unrecognised, and setup_gpu reads an
+# empty package list as "no GPU driver selected" -- so `nvidai`, and `NVIDIA`,
+# which is exactly what the prompt's own "Detected GPU: nvidia" line invites,
+# installed nothing, configured nothing and landed in the summary as a green
+# step.
+@test "gpu_packages rejects an unrecognised choice instead of answering nothing" {
+    local bad
+    for bad in NVIDIA nvidai Intel "" "amd intel"; do
+        run gpu_packages "$bad"
+        [ "$status" -ne 0 ] || {
+            echo "gpu_packages accepted '${bad}' at status 0 with output '${output}'" >&2
+            return 1
+        }
+        [[ "$output" == *"unrecognised GPU driver"* ]] || {
+            echo "gpu_packages said nothing useful about '${bad}': ${output}" >&2
+            return 1
+        }
+    done
 }
 
 @test "needs_grub_install is true when the EFI stub is absent" {

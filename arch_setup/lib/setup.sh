@@ -82,6 +82,11 @@ setup_zsh_dirs() {
     fi
 }
 
+# ASSUMPTION: $HOME/.config/xkb/install.sh is itself idempotent. It is stowed
+# from the dotfiles repo, lives outside arch_setup/, and is re-run in full on
+# every provision -- nothing here checks whether the layout is already
+# installed, because only that script knows where it puts it. If it ever grows
+# a non-idempotent step, this is the caller that will re-run it.
 setup_xkb() {
     local script="$HOME/.config/xkb/install.sh"
     [[ -x "$script" ]] || { warn "xkb install.sh not found at ${script}, skipping"; return 0; }
@@ -111,9 +116,24 @@ setup_lightdm() {
     success "lightdm configured (gtk-greeter, bspwm)"
 }
 
+# setup_gpu <nvidia|amd|intel|none>
+#
+# LIMITATION -- idempotent for a repeated answer, but it does not converge on a
+# CHANGED one. Answering nvidia and then amd installs the amd packages and stops
+# there: the nvidia modules stay in /etc/mkinitcpio.conf's MODULES=,
+# /etc/pacman.d/hooks/nvidia.hook stays installed, and nvidia-drm.modeset=1 stays
+# on the kernel command line. Deliberately left alone -- undoing it means
+# removing entries from MODULES=, deleting a pacman hook and dropping a cmdline
+# token, i.e. three more ways to make a machine that does not boot, for a case
+# (swapping the GPU in a personal workstation) that is rare and visible. Undo it
+# by hand, or reinstall.
 setup_gpu() {
     local choice=$1 pkgs
-    pkgs=$(gpu_packages "$choice")
+    # Checked, because an unrecognised answer is not "none": see gpu_packages.
+    if ! pkgs=$(gpu_packages "$choice"); then
+        error "setup_gpu: refusing to configure an unrecognised GPU driver: '${choice}'"
+        return 1
+    fi
     [[ -z "$pkgs" ]] && { info "no GPU driver selected"; return 0; }
 
     info "Installing GPU driver: ${pkgs}"

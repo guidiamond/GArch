@@ -65,12 +65,23 @@ modules_line() {
     echo "MODULES=(${mods[*]})"
 }
 
+# gpu_packages <choice> -- the packages for a driver, empty for "none", and
+# NON-ZERO for anything else.
+#
+# "none" and "not a driver I know" are different answers and must not share a
+# return: this used to answer "" at status 0 for every unrecognised value, and
+# setup_gpu reads an empty package list as "no GPU driver selected", so `nvidai`
+# -- or `NVIDIA`, which is exactly what the prompt's own "Detected GPU: nvidia"
+# line invites -- installed nothing, configured nothing, and landed in the
+# summary as a green step.
 gpu_packages() {
     case "$1" in
         nvidia) echo "${GPU_NVIDIA[*]}" ;;
         amd)    echo "${GPU_AMD[*]}" ;;
         intel)  echo "${GPU_INTEL[*]}" ;;
-        *)      echo "" ;;
+        none)   echo "" ;;
+        *)      error "gpu_packages: unrecognised GPU driver '${1}' (want nvidia, amd, intel or none)"
+                return 1 ;;
     esac
 }
 
