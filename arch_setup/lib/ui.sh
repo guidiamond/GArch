@@ -148,23 +148,6 @@ ask_password() {
     done
 }
 
-ask_choice() {
-    local prompt=$1; shift
-    local options=("$@") i choice
-    echo -e "${BOLD}${prompt}${RESET}" >&2
-    for i in "${!options[@]}"; do
-        echo "  $((i + 1))) ${options[$i]}" >&2
-    done
-    while true; do
-        read -rp "$(echo -e "${BOLD}Choice [1-${#options[@]}]${RESET}: ")" choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#options[@]} )); then
-            echo "${options[$((choice - 1))]}"
-            return 0
-        fi
-        warn "Invalid choice."
-    done
-}
-
 spinner() {
     local pid=$1 message=$2 spin="|/-\\" i=0
     while kill -0 "$pid" 2>/dev/null; do

@@ -1,6 +1,11 @@
 #!/bin/bash
-# ~/.netrc, clone, stow. The only module that writes to $HOME.
+# ~/.netrc, clone, stow, and staging a clone into a freshly installed root.
 # Requires lib/ui.sh.
+#
+# Everything except stage_dotfiles is stage 2 and writes to $HOME -- this is
+# the only module that does. stage_dotfiles is the exception in both
+# directions: it runs in stage 1, where $HOME is root's on the live ISO, and it
+# writes under the <target-root> it is handed, never $HOME.
 # shellcheck shell=bash
 
 DOTFILES_REPO="https://github.com/guidiamond/.dotfiles.git"
@@ -129,12 +134,13 @@ dotfiles_clone() {
 
 # --- staging into a freshly installed root ---------------------------------
 
-# stage_dotfiles <target-root> <username> <repo-root>
+# stage_dotfiles <repo-root> <target-root> <username>
 #
 # Copies the clone install.sh is running from into the new system, so stage 2
 # needs no second GitHub authentication. Takes its paths rather than reading
 # install.sh's globals: every other lib/ function does (btrfs_mount_all,
-# link_timezone), and a hardcoded /mnt is untestable.
+# link_timezone), and a hardcoded /mnt is untestable. Repo first, target
+# second, matching stow_conflicts and stow_apply below.
 #
 # MUST run *after* arch-chroot has created the user. `useradd -m` does nothing
 # at all to a home directory that already exists -- verified: it warns "the
@@ -147,7 +153,7 @@ dotfiles_clone() {
 # the repo itself, so every failure path warns with what to do instead rather
 # than taking down a working install.
 stage_dotfiles() {
-    local target=$1 username=$2 repo_root=$3
+    local repo_root=$1 target=$2 username=$3
     local home="${target}/home/${username}" dest="${target}/home/${username}/.dotfiles"
 
     if [[ ! -d "$home" ]]; then

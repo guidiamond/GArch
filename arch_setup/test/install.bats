@@ -165,10 +165,14 @@ in_install() {
 
 # --- keymap_listed ---------------------------------------------------------
 #
-# keymap_listed stays here while list_keymaps lives in lib/system.sh, for the
-# same reason valid_size stays here while size_to_sgdisk lives in lib/disk.sh:
-# the probe is work, the predicate over it is prompt flow. Its 0/1/2 contract
-# is what phase_locale branches on, so it is tested against a stubbed list.
+# keymap_listed stays in install.sh while list_keymaps lives in lib/system.sh.
+# The rule is the one lib/system.sh:167-171 states: a predicate lives next to
+# the writer it has to agree with, and where there is no such writer it is
+# prompt flow. locale_listed has one -- locale_gen_uncomment, which it must
+# match character for character -- so it moved. keymap_listed has none; nothing
+# later re-derives "is this a real keymap", so a disagreement is impossible.
+# Its 0/1/2 contract is what phase_locale branches on, so it is tested here
+# against a stubbed list.
 
 @test "keymap_listed matches a whole line only" {
     run in_install 'list_keymaps() { printf "%s\n" us br-abnt2 uk; }; keymap_listed us'

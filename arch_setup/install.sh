@@ -5,9 +5,7 @@
 #   git clone https://github.com/guidiamond/.dotfiles
 #   cd .dotfiles/arch_setup && ./install.sh
 #
-# Flags:
-#   --dry-run   run the full prompt flow, print destructive commands instead
-#               of executing them
+# Run `./install.sh --help` for the flags; usage() below is the one copy.
 set -euo pipefail
 
 ARCH_SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -99,12 +97,19 @@ cleanup() {
 
 # ---------------- prompt-time validation ----------------
 #
-# Every check below has a counterpart that already exists further down the
-# pipeline -- chroot_write_config's refusal set, locale_gen_uncomment's
-# "not listed" error, lib/chroot.sh's uid<1000 guard, size_to_sgdisk. Those
-# are the right backstops, but they fire in phase 5, in the chroot, after the
-# disk has been wiped and pacstrapped. Everything here exists to reach the same
-# verdict at the prompt, where re-asking costs nothing.
+# Every check below has a counterpart further down the pipeline, and they are
+# the right backstops. Three of them fire far too late to be the only check:
+#
+#   chroot_write_config's refusal set   phase 5, in this process, after the
+#                                       disk is wiped and pacstrapped
+#   locale_gen_uncomment's "not listed" phase 5, inside the chroot
+#   lib/chroot.sh's uid<1000 guard      phase 5, inside the chroot
+#
+# size_to_sgdisk is the exception and is here for a different reason: it fires
+# in plan_add, in phase 3, *before* the Type-YES gate and before plan_execute,
+# so a bad size already aborts with nothing written. valid_size does not
+# prevent a post-wipe abort -- it turns a mistyped size from an abort into a
+# re-ask, which is worth three lines on its own.
 
 # The exact set chroot_write_config refuses: each of these would close the
 # double quote in KEY="value" and hand the rest to a root shell in the new
@@ -204,36 +209,9 @@ phase_preflight() {
         warn "could not enable NTP -- if this host's clock is wrong, pacman will reject package signatures"
     fi
 
-    info "Refreshing the keyring..."
-    # Logged rather than sent to /dev/null. This fails often enough to matter on
-    # an ISO a few months old, and under `set -e` it takes the run down: with
-    # the output discarded the operator is left with an exit code and nothing to
-    # read. Letting it through instead would bury the phase banner in progress
-    # bars, so it goes to a file and is printed only when it matters.
-    local log
-    log=$(mktemp /tmp/arch-install-keyring.XXXXXX) \
-        || die "cannot create a temp file for the pacman log"
-    if ! pacman -Sy --noconfirm archlinux-keyring >"$log" 2>&1; then
-        error "refreshing archlinux-keyring failed:"
-        cat "$log" >&2
-        rm -f "$log"
-        die "cannot continue -- pacstrap would fail in phase 4 with signature errors"
-    fi
-    rm -f "$log"
-
-    if command -v reflector >/dev/null 2>&1; then
-        info "Ranking mirrors with reflector..."
-        # Not fatal: the ISO ships a working mirrorlist, so a reflector that
-        # cannot reach the mirror-status API costs speed, not correctness. It
-        # does have to be *said* -- silently pacstrapping from an unranked list
-        # looks like a hung phase 4, and reflector's status was previously
-        # discarded along with its output.
-        if ! reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist >/dev/null 2>&1; then
-            warn "reflector failed; keeping the ISO's mirrorlist"
-        fi
-    else
-        warn "reflector is not installed; keeping the ISO's mirrorlist"
-    fi
+    refresh_keyring \
+        || die "cannot continue -- pacstrap would fail in phase 4 with signature errors"
+    rank_mirrors
     success "ready"
 }
 
@@ -296,15 +274,20 @@ phase_locale() {
   Timezone: ${TIMEZONE}"
 }
 
-# ---------------- phase 3: disk ----------------
+# ---------------- phase 3: disk -- FIRST DESTRUCTIVE PHASE ----------------
+# Everything before this point is reversible by pressing ctrl-c. From the
+# Type-YES gate below onward it is not.
 phase_disk() {
     banner 3 "$TOTAL_PHASES" "Disk Setup"
     info "Available disks:"
     local disks disk esp_size confirm
-    # `|| true`: grep -v exits 1 when it filters every line out, and under
-    # `set -o pipefail` that aborts the phase with no message at all on a host
-    # whose only block devices are the ISO's own loop and optical ones.
-    disks=$(lsblk -dpno NAME,SIZE,MODEL | grep -vE 'loop|sr[0-9]|rom' || true)
+    # -e 7,11 excludes loop and optical devices by major number, which is what
+    # was actually meant. Filtering the formatted line through `grep -v` instead
+    # matched the MODEL column too, so a disk whose model contained "rom"
+    # vanished from the list -- and the pipeline needed a `|| true`, because
+    # grep -v exits 1 when it filters everything out and `set -o pipefail`
+    # turned that into a silent abort.
+    disks=$(lsblk -dpno NAME,SIZE,MODEL -e 7,11)
     [[ -n "$disks" ]] \
         || die "no installable disk found (only loop and optical devices are present)"
     printf '%s\n' "$disks"
@@ -364,6 +347,7 @@ phase_disk() {
 }
 
 # ---------------- phase 4: base install ----------------
+# Destructive: writes to the filesystems phase 3 created.
 phase_base() {
     banner 4 "$TOTAL_PHASES" "Base System"
     local ucode
@@ -392,6 +376,8 @@ phase_base() {
 }
 
 # ---------------- phase 5: chroot ----------------
+# Destructive: configures the system phase 4 installed, and is the phase the
+# prompt-time validation above exists to keep from aborting halfway.
 
 # The KEY=VALUE set handed to chroot_write_config, one line each. A single
 # function so the --dry-run rehearsal below cannot drift from the real write it
@@ -419,9 +405,11 @@ chroot_config_args() {
         "LUKS_UUID=${LUKS_UUID}"
 }
 
-# Collected with a read loop rather than `mapfile -t x < <(...)` for the reason
-# lib/packages.sh documents: mapfile's status is mapfile's, not the process
-# substitution's, so a `|| return 1` on it is dead code.
+# A faithful clone of lib/packages.sh's pkg_read, kept in that shape on purpose.
+# Note what does the work: the emptiness check at the end. A read loop is no
+# better than `mapfile -t x < <(...)` at noticing a failed process substitution
+# -- measured, both report 0 for one returning 7 -- so neither could carry a
+# `|| return 1`. Only the guard below catches an array that never got filled.
 chroot_config_array() {
     local -n __cfg_out=$1
     local __root_b64=$2 __user_b64=$3 __line
@@ -514,7 +502,7 @@ phase_chroot() {
     # what `useradd -m` does (nothing) to a home directory that already exists.
     local repo_root
     repo_root=$(cd "${ARCH_SETUP_DIR}/.." && pwd) || repo_root=""
-    stage_dotfiles /mnt "$USERNAME_VAR" "$repo_root"
+    stage_dotfiles "$repo_root" /mnt "$USERNAME_VAR"
     success "system configured"
 }
 

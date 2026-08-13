@@ -258,8 +258,8 @@ make_zoneinfo() {
 # from "ICMP answered after all".
 stub_net() {
     mkdir -p "$TMP/bin"
-    printf '#!/bin/sh\ntouch %s/ping_ran\nexit %s\n' "$TMP" "$1" > "$TMP/bin/ping"
-    printf '#!/bin/sh\ntouch %s/curl_ran\nexit %s\n' "$TMP" "$2" > "$TMP/bin/curl"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/ping_args\nexit %s\n' "$TMP" "$1" > "$TMP/bin/ping"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/curl_args\nexit %s\n' "$TMP" "$2" > "$TMP/bin/curl"
     chmod +x "$TMP/bin/ping" "$TMP/bin/curl"
 }
 
@@ -267,8 +267,8 @@ stub_net() {
     stub_net 0 1
     PATH="$TMP/bin:$PATH" run net_check
     [ "$status" -eq 0 ]
-    [ -e "$TMP/ping_ran" ]
-    [ ! -e "$TMP/curl_ran" ]
+    [ -e "$TMP/ping_args" ]
+    [ ! -e "$TMP/curl_args" ]
 }
 
 # The reason the fallback exists: ICMP is filtered on plenty of networks, and
@@ -278,15 +278,21 @@ stub_net() {
     stub_net 1 0
     PATH="$TMP/bin:$PATH" run net_check
     [ "$status" -eq 0 ]
-    [ -e "$TMP/ping_ran" ]
-    [ -e "$TMP/curl_ran" ]
+    [ -e "$TMP/ping_args" ]
+    [ -e "$TMP/curl_args" ]
+    # -f is what makes curl fail on an HTTP error rather than happily writing a
+    # captive portal's login page to /dev/null and reporting success, and the
+    # timeout is what stops a black-holed connection hanging the phase. Both
+    # are easy to drop while "simplifying" the flags.
+    grep -qF -- '-sSf' "$TMP/curl_args"
+    grep -qF -- '--max-time' "$TMP/curl_args"
 }
 
 @test "net_check fails when neither ICMP nor HTTPS answers" {
     stub_net 1 1
     PATH="$TMP/bin:$PATH" run net_check
     [ "$status" -ne 0 ]
-    [ -e "$TMP/curl_ran" ]
+    [ -e "$TMP/curl_args" ]
 }
 
 # --- link_timezone ---------------------------------------------------------
@@ -381,4 +387,82 @@ stub_net() {
     USER="" SUDO_USER="" run setup_shell --check-only
     [ "$status" -ne 0 ]
     [[ "$output" == *"cannot determine the target user"* ]]
+}
+
+# --- refresh_keyring / rank_mirrors ----------------------------------------
+#
+# Extracted from install.sh's phase_preflight, which left the path its own
+# comment calls out as failing "often enough to matter on an ISO a few months
+# old" with no coverage at all. pacman and reflector are stubbed on PATH, the
+# same technique as stub_net above and for the same reason: neither may run for
+# real, and reflector's success path writes to /etc/pacman.d/mirrorlist.
+#
+# TMPDIR is redirected at $TMP so refresh_keyring's mktemp lands somewhere the
+# leak check below can see.
+stub_pacman() {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/pacman_args\n%s\nexit %s\n' \
+        "$TMP" "$2" "$1" > "$TMP/bin/pacman"
+    chmod +x "$TMP/bin/pacman"
+}
+
+@test "refresh_keyring succeeds quietly and asks pacman for the keyring" {
+    stub_pacman 0 'echo "resolving dependencies..."'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    grep -qF -- '-Sy --noconfirm archlinux-keyring' "$TMP/pacman_args"
+    # pacman's chatter stays out of the way on success; the caller prints its
+    # own phase line.
+    [[ "$output" != *"resolving dependencies"* ]]
+}
+
+# The defect this replaced: the output went to /dev/null while `set -e` took
+# the run down, leaving the operator an exit code and nothing to read.
+@test "refresh_keyring surfaces pacman's output when it fails" {
+    stub_pacman 1 'echo "error: failed retrieving file from mirror" >&2'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"failed retrieving file from mirror"* ]]
+}
+
+@test "refresh_keyring leaves no temp file behind on either path" {
+    stub_pacman 0 ':'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    stub_pacman 1 'echo boom >&2'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -ne 0 ]
+    # mktemp's own names are tmp.XXXXXXXXXX; nothing but the stub's records and
+    # its bin directory should remain.
+    [ -z "$(find "$TMP" -maxdepth 1 -name 'tmp.*' -print -quit)" ]
+}
+
+@test "rank_mirrors ranks by rate and saves over the mirrorlist" {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/reflector_args\nexit 0\n' "$TMP" \
+        > "$TMP/bin/reflector"
+    chmod +x "$TMP/bin/reflector"
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    grep -qF -- '--sort rate' "$TMP/reflector_args"
+    grep -qF -- '--save /etc/pacman.d/mirrorlist' "$TMP/reflector_args"
+}
+
+# Never fatal, but never silent either: the ISO ships a working mirrorlist, so
+# both of these cost speed rather than correctness -- and pacstrapping from an
+# unranked list looks exactly like a hung phase if nothing says so.
+@test "rank_mirrors warns instead of failing when reflector errors" {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nexit 1\n' > "$TMP/bin/reflector"
+    chmod +x "$TMP/bin/reflector"
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"reflector failed"* ]]
+}
+
+@test "rank_mirrors warns instead of failing when reflector is absent" {
+    mkdir -p "$TMP/empty"
+    PATH="$TMP/empty" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not installed"* ]]
 }

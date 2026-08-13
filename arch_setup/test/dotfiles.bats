@@ -446,7 +446,7 @@ stage_fixture() {
 
 @test "stage_dotfiles copies the repo and hands it to the user" {
     stage_fixture
-    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/repo" "$TMP/mnt" damn
     [ "$status" -eq 0 ]
     [ -f "$TMP/mnt/home/damn/.dotfiles/README" ]
     # The copy is only half the job: cp -a preserves the ISO's ownership, whose
@@ -462,7 +462,7 @@ stage_fixture() {
 @test "stage_dotfiles refuses to create a home directory that useradd should own" {
     stage_fixture
     rm -rf "$TMP/mnt/home/damn"
-    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/repo" "$TMP/mnt" damn
     [ "$status" -eq 0 ]
     [ ! -e "$TMP/mnt/home/damn" ]
     [[ "$output" == *"fresh clone"* ]]
@@ -475,7 +475,7 @@ stage_fixture() {
     stage_fixture
     mkdir -p "$TMP/mnt/home/damn/.dotfiles"
     printf 'mine\n' > "$TMP/mnt/home/damn/.dotfiles/KEEP"
-    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/repo"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/repo" "$TMP/mnt" damn
     [ "$status" -eq 0 ]
     [ -f "$TMP/mnt/home/damn/.dotfiles/KEEP" ]
     [ ! -e "$TMP/mnt/home/damn/.dotfiles/.dotfiles" ]
@@ -486,7 +486,7 @@ stage_fixture() {
 # so a missing repo must not take down a working install.
 @test "stage_dotfiles warns rather than failing when there is no repo to copy" {
     stage_fixture
-    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/mnt" damn "$TMP/no-such-repo"
+    PATH="$TMP/bin:$PATH" run stage_dotfiles "$TMP/no-such-repo" "$TMP/mnt" damn
     [ "$status" -eq 0 ]
     [[ "$output" == *"fresh clone"* ]]
     [ ! -e "$TMP/mnt/home/damn/.dotfiles" ]

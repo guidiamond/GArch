@@ -4,8 +4,9 @@
 #
 # COUPLING: everything in the first three sections below -- hooks_line,
 # modules_line, gpu_packages, require_vars, grub_cmdline_add,
-# locale_gen_uncomment, link_timezone, detect_ucode, detect_gpu,
-# needs_grub_install -- is a candidate for injection into the generated chroot
+# locale_gen_uncomment, locale_listed, link_timezone, detect_ucode, detect_gpu,
+# needs_grub_install, list_keymaps, net_check, refresh_keyring, rank_mirrors
+# -- is a candidate for injection into the generated chroot
 # script, and lib/chroot.sh's CHROOT_INJECTED currently takes seven of them
 # verbatim via `declare -f`. Anything injected runs under `set -Eeuo pipefail`
 # in a shell that defines only RED GREEN YELLOW BLUE RESET and
@@ -84,7 +85,7 @@ require_vars() {
     fi
 }
 
-# --- config-file editors ---------------------------------------------------
+# --- config files (readers and editors) ------------------------------------
 
 # grub_cmdline_add <file> key=value  -- idempotent, replaces a changed value.
 # Asserts before and verifies after: a silent no-op here means a kernel with no
@@ -248,6 +249,48 @@ net_check() {
     ping -c1 -W3 archlinux.org >/dev/null 2>&1 && return 0
     command -v curl >/dev/null 2>&1 || return 1
     curl -sSf --max-time 10 -o /dev/null https://archlinux.org/
+}
+
+# Refresh the package-signing keyring before anything is installed from a
+# mirror. Fatal for the caller: this fails often enough to matter on an ISO a
+# few months old, and pacstrap several phases later would then fail with
+# signature errors that read like a corrupt mirror.
+#
+# pacman's output goes to a temp file and is printed only on failure. Sending
+# it to /dev/null -- which is what this did before -- leaves the operator an
+# exit code and nothing to read; letting it through buries the caller's phase
+# banner under progress bars.
+refresh_keyring() {
+    local log rc=0
+    info "Refreshing the keyring..."
+    log=$(mktemp) || {
+        error "refresh_keyring: cannot create a temp file for pacman's output"
+        return 1
+    }
+    pacman -Sy --noconfirm archlinux-keyring >"$log" 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        error "refreshing archlinux-keyring failed:"
+        cat "$log" >&2
+    fi
+    rm -f "$log"
+    return "$rc"
+}
+
+# Rank the mirrorlist by download rate. Never fatal, and deliberately so: the
+# ISO ships a working mirrorlist, so a reflector that is missing or cannot
+# reach the mirror-status API costs speed, not correctness.
+#
+# It does have to be *said*, though. Both of those used to be silent, and
+# pacstrapping from an unranked mirrorlist looks exactly like a hung phase.
+rank_mirrors() {
+    if ! command -v reflector >/dev/null 2>&1; then
+        warn "reflector is not installed; keeping the ISO's mirrorlist"
+        return 0
+    fi
+    info "Ranking mirrors with reflector..."
+    if ! reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist >/dev/null 2>&1; then
+        warn "reflector failed; keeping the ISO's mirrorlist"
+    fi
 }
 
 detect_gpu() {

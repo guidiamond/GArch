@@ -148,7 +148,7 @@ HEADER
         # `set -u` a reference to an undefined colour is fatal, not cosmetic
         # ("CYAN: unbound variable" aborts the chroot mid-configuration), and
         # every ui.sh function that touches CYAN or BOLD (banner, ask,
-        # ask_yes_no, ask_password, ask_choice, confirm_step) is absent from
+        # ask_yes_no, ask_password, confirm_step) is absent from
         # this list for that reason. Anything added to CHROOT_INJECTED must
         # reference neither, or the HEADER has to grow to define them.
         # test/chroot.bats enforces this on the generated file.
