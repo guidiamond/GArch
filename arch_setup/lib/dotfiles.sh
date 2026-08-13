@@ -262,10 +262,55 @@ stage_dotfiles() {
 # reason. See test/dotfiles.bats for the exact shapes this is verified
 # against, including the one case left deliberately unhandled (a real file
 # blocking a symlink-to-directory entry) and why.
+#
+# Paths that already resolve back into the package are excluded, which is what
+# makes a re-run a genuine no-op -- see stow_path_is_package_file.
+
+# True when <abs> already resolves to a file inside the stow package: the path
+# leads back into the repository rather than at anything the user owns, so it
+# is emphatically not something to "back up" out of the way.
+#
+# This is what a *folded* directory produces. GNU stow folds whenever the
+# matching target directory does not already exist, making one symlink
+# ($HOME/.config -> <repo>/dotfiles/.config) instead of a link per leaf, and
+# every repo file underneath is then reachable at $HOME/<rel> as a real,
+# non-symlink file -- the path travels through the symlinked ancestor straight
+# back into the repo. `-e && ! -L` alone called those conflicts, so a second
+# run moved the repository's own files into a backup directory and left the
+# surviving links pointing at nothing, all while reporting [OK] and exiting 0.
+#
+# Two tests, because the ancestor can be aimed anywhere:
+#
+#   -ef  is the common case and needs no subprocess: same device and inode as
+#        the package's own entry for this exact path, which is precisely what
+#        folding yields, at any depth.
+#
+#   the prefix test is the general one. An ancestor symlink aimed at a
+#        *different* subtree of the package still lands on a real repo file,
+#        which -ef alone would call a conflict and relocate. The invariant
+#        worth holding is the broader one: a file that lives inside the
+#        package is never stow_apply's to move, however it became reachable.
+#
+# A realpath that cannot answer leaves the path classified as a conflict --
+# the pre-existing behaviour, which backs the file up rather than deleting it.
+stow_path_is_package_file() {
+    local abs=$1 rel=$2 pkgdir=$3 pkgreal=$4 absreal
+    [[ "$abs" -ef "${pkgdir}/${rel}" ]] && return 0
+    absreal=$(realpath -- "$abs" 2>/dev/null) || return 1
+    [[ "$absreal" == "${pkgreal}/"* ]]
+}
+
 stow_conflicts() {
-    local repo=$1 target=$2 pkgdir rel abs listing
+    local repo=$1 target=$2 pkgdir pkgreal rel abs listing
     pkgdir="${repo}/${STOW_PACKAGE}"
     [[ -d "$pkgdir" ]] || { error "stow_conflicts: no such package dir: ${pkgdir}"; return 1; }
+
+    # Resolved once, outside the loop: every comparison below is against this,
+    # and it has to be the symlink-free form or the prefix test never matches.
+    if ! pkgreal=$(realpath -- "$pkgdir"); then
+        error "stow_conflicts: failed to resolve ${pkgdir}"
+        return 1
+    fi
 
     # Captured via command substitution, not streamed straight into the
     # while loop's process substitution, specifically so find's own exit
@@ -284,8 +329,11 @@ stow_conflicts() {
         # `if`, not a bare `[[ ]] && echo`: the non-match case (the common
         # one) must not leave a non-zero status as the last statement run,
         # or a caller with `set -e` would abort mid-scan on the first file
-        # that isn't a conflict.
-        if [[ -e "$abs" && ! -L "$abs" ]]; then
+        # that isn't a conflict. The added test stays inside the same `if`
+        # condition for that reason -- everything in a condition context is
+        # exempt from errexit, so a false result here cannot abort the scan.
+        if [[ -e "$abs" && ! -L "$abs" ]] \
+           && ! stow_path_is_package_file "$abs" "$rel" "$pkgdir" "$pkgreal"; then
             echo "$rel"
         fi
     done <<< "$listing"

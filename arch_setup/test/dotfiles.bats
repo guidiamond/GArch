@@ -507,6 +507,88 @@ EOF
     [[ "$output" != *"gadgets"* ]]
 }
 
+# --- stow_conflicts: paths that already resolve into the package ----------
+#
+# GNU stow *folds* a directory whenever the matching target directory does not
+# already exist: instead of a link per leaf it makes a single symlink,
+# $HOME/.config -> <repo>/dotfiles/.config. Every repo file underneath is then
+# reachable at $HOME/<rel> as a real, non-symlink file, because the path
+# travels through the symlinked ancestor straight back into the repository.
+# `-e && ! -L` read that as a conflict, so the *second* run moved the
+# repository's own files out of the repository -- while printing [OK] and
+# exiting 0, which is why neither the summary nor the exit status caught it.
+#
+# The trigger is the ordinary case rather than a corner one: stow folds unless
+# every ancestor directory already exists at the target, and a $HOME that
+# `useradd -m` built from /etc/skel has none of them. On the author's own
+# machine 4,475 of the repo's 4,554 files sit under 25 folded symlinks.
+#
+# These build the fold with the real `stow` rather than a hand-made symlink,
+# so they pin what stow actually does instead of this file's idea of it.
+make_folded_repo() {
+    mkdir -p "$TMP/repo/dotfiles/.config/nvim"
+    printf 'from repo\n' > "$TMP/repo/dotfiles/.config/bspwmrc"
+    printf 'nvim cfg\n'  > "$TMP/repo/dotfiles/.config/nvim/init.lua"
+}
+
+@test "stow_conflicts does not flag a repo file reached through a folded directory" {
+    make_folded_repo
+    stow_apply "$TMP/repo" "$HOME"
+    # Asserted rather than assumed: if stow ever stopped folding here, every
+    # remaining assertion would pass for a reason that has nothing to do with
+    # the bug, and the test would go quietly inert.
+    [ -L "$HOME/.config" ]
+    run stow_conflicts "$TMP/repo" "$HOME"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+# A regression guard rather than a discriminating case -- it passes either
+# way, and is here because the errexit trap it covers is one this file has
+# already been bitten by. The existing set -e case scans a tree where nothing
+# conflicts, so the package test is never reached at all; this one scans a
+# folded tree, where it is called for every single file. Written as a bare
+# `[[ ... ]] && continue` outside the `if` condition, its status on a matching
+# file would end the scan early under a caller running set -e.
+@test "stow_conflicts finishes the scan under set -e across a folded tree" {
+    make_folded_repo
+    stow_apply "$TMP/repo" "$HOME"
+    [ -L "$HOME/.config" ]
+    wrapper() { set -e; stow_conflicts "$TMP/repo" "$HOME"; echo "reached end"; }
+    run wrapper
+    [[ "$output" == *"reached end"* ]]
+}
+
+# The other half of the property, and the one the fix must not trade away: a
+# file the user genuinely owns, at a path no fold accounts for, is still a
+# conflict and must still be found. Both ancestors exist here, so stow links
+# the leaf and folds nothing.
+@test "stow_conflicts still flags a real user file when nothing was folded" {
+    make_folded_repo
+    mkdir -p "$HOME/.config/nvim"
+    printf 'mine\n' > "$HOME/.config/nvim/init.lua"
+    run stow_conflicts "$TMP/repo" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *".config/nvim/init.lua"* ]]
+}
+
+# The same class one step further out, and the reason the test is "does this
+# path resolve to somewhere inside the package" rather than only "is it the
+# package's own file for this exact entry": an ancestor symlink aimed at a
+# *different* subtree of the package still lands on a real repo file, which a
+# same-file comparison alone would call a conflict and move out of the
+# repository. A file that lives in the repo is never stow_apply's to relocate,
+# however it came to be reachable from the target.
+@test "stow_conflicts does not flag a repo file reached through a mis-aimed ancestor symlink" {
+    mkdir -p "$TMP/repo/dotfiles/.config/nvim" "$TMP/repo/dotfiles/other/nvim"
+    printf 'from repo\n'  > "$TMP/repo/dotfiles/.config/nvim/init.lua"
+    printf 'elsewhere\n'  > "$TMP/repo/dotfiles/other/nvim/init.lua"
+    ln -s "$TMP/repo/dotfiles/other" "$HOME/.config"
+    run stow_conflicts "$TMP/repo" "$HOME"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"init.lua"* ]]
+}
+
 # --- stow_apply: backup and link ------------------------------------------
 
 @test "stow_apply backs up a conflicting file then links it" {
@@ -612,6 +694,29 @@ EOF
     run stow_apply "$TMP/repo" "$HOME"
     [ "$status" -ne 0 ]
     [ "$(wc -l < "$TMP/mvcalls")" -eq 1 ]
+}
+
+# The end-to-end shape of the folding bug, and the sequence a user actually
+# performs: stage 2 is documented as re-runnable, and it was the second run
+# that did the damage. Two real stow_apply calls against the real `stow`,
+# asserting on the state of the *repository* rather than on messages or exit
+# status -- the run that emptied the repo printed [OK] and returned 0, so
+# neither of those proves anything here.
+@test "a second stow_apply leaves the repository's own files in the repository" {
+    make_folded_repo
+    stow_apply "$TMP/repo" "$HOME"
+    [ -L "$HOME/.config" ]
+    stow_apply "$TMP/repo" "$HOME"
+    [ -f "$TMP/repo/dotfiles/.config/bspwmrc" ]
+    [ -f "$TMP/repo/dotfiles/.config/nvim/init.lua" ]
+    # The user-visible consequence of losing them: the links that survive in
+    # $HOME resolve to nothing. Reading through one is what a desktop does at
+    # login, so read through one here.
+    [ "$(cat "$HOME/.config/nvim/init.lua")" = "nvim cfg" ]
+    # A no-op re-run must not invent a backup directory either: one appearing
+    # means files were moved, whatever the repo looks like afterwards.
+    run bash -c "ls -d ${HOME}/.dotfiles-backup-* 2>/dev/null"
+    [ "$status" -ne 0 ]
 }
 
 # --- stage_dotfiles --------------------------------------------------------
