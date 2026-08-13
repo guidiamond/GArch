@@ -13,11 +13,23 @@
 # shellcheck shell=bash
 
 # --- subsystem setup (needs sudo, host-only) -------------------------------
+#
+# EVERY function below is invoked by provision.sh as `step "name" <fn>`, i.e.
+# from inside an `if` condition, and bash suspends errexit for the whole
+# dynamic extent of that. So none of these can lean on provision.sh's `set -e`:
+# an unchecked command here is a command whose failure nothing will ever
+# notice, and a function ending on `success` is a function that returns 0 no
+# matter what happened above. Check every command, and let the `success` be
+# reachable only when there is something to be successful about.
+# test/setup.bats pins this for each function.
 
 setup_zram() {
     local src="${ARCH_SETUP_DIR}/etc/systemd/zram-generator.conf"
     info "Configuring zram swap..."
-    sudo install -Dm644 "$src" /etc/systemd/zram-generator.conf
+    if ! sudo install -Dm644 "$src" /etc/systemd/zram-generator.conf; then
+        error "setup_zram: could not install ${src} to /etc/systemd/zram-generator.conf"
+        return 1
+    fi
     success "zram configured (ram/2, zstd)"
 }
 
@@ -30,7 +42,16 @@ setup_shell() {
         error "setup_shell: cannot determine the target user (\$USER and \$SUDO_USER are both empty)"
         return 1
     fi
-    current=$(getent passwd "$target" | cut -d: -f7)
+    # Unchecked, this read the other way round: a getent that fails leaves
+    # `current` empty, empty is not /usr/bin/zsh, and "cannot tell what the
+    # login shell is" silently became "the login shell is wrong, chsh it".
+    if ! current=$(getent passwd "$target"); then
+        error "setup_shell: cannot read the passwd entry for ${target}"
+        return 1
+    fi
+    # The shell is field 7 and field 7 is the last one, so no `cut` -- and so
+    # no pipeline whose status depends on whether the caller set pipefail.
+    current=${current##*:}
     if [[ "$current" == "/usr/bin/zsh" ]]; then
         success "login shell is already zsh"
         return 0
@@ -47,16 +68,28 @@ setup_shell() {
 
 # .zshrc needs both of these to exist before the first interactive shell.
 setup_zsh_dirs() {
-    mkdir -p "$HOME/.cache/zsh" "$HOME/.local/share/zinit"
-    touch "$HOME/.cache/zsh/history"
-    mkdir -p "$HOME/Pictures/Backgrounds" "$HOME/Documents" "$HOME/Downloads"
+    if ! mkdir -p "$HOME/.cache/zsh" "$HOME/.local/share/zinit"; then
+        error "setup_zsh_dirs: could not create ${HOME}/.cache/zsh and ${HOME}/.local/share/zinit"
+        return 1
+    fi
+    if ! touch "$HOME/.cache/zsh/history"; then
+        error "setup_zsh_dirs: could not create the zsh history file ${HOME}/.cache/zsh/history"
+        return 1
+    fi
+    if ! mkdir -p "$HOME/Pictures/Backgrounds" "$HOME/Documents" "$HOME/Downloads"; then
+        error "setup_zsh_dirs: could not create the standard user directories under ${HOME}"
+        return 1
+    fi
 }
 
 setup_xkb() {
     local script="$HOME/.config/xkb/install.sh"
     [[ -x "$script" ]] || { warn "xkb install.sh not found at ${script}, skipping"; return 0; }
     info "Installing the ptbr keyboard layout..."
-    sudo "$script"
+    if ! sudo "$script"; then
+        error "setup_xkb: ${script} failed"
+        return 1
+    fi
     success "keyboard layout installed"
 }
 
@@ -68,8 +101,11 @@ setup_xkb() {
 setup_lightdm() {
     local base="${ARCH_SETUP_DIR}/etc/lightdm"
     info "Configuring lightdm..."
-    sudo install -Dm644 "${base}/lightdm.conf.d/50-dotfiles.conf" \
-        /etc/lightdm/lightdm.conf.d/50-dotfiles.conf
+    if ! sudo install -Dm644 "${base}/lightdm.conf.d/50-dotfiles.conf" \
+            /etc/lightdm/lightdm.conf.d/50-dotfiles.conf; then
+        error "setup_lightdm: could not install /etc/lightdm/lightdm.conf.d/50-dotfiles.conf"
+        return 1
+    fi
     [[ -f /usr/share/xsessions/bspwm.desktop ]] \
         || warn "/usr/share/xsessions/bspwm.desktop missing -- is bspwm installed?"
     success "lightdm configured (gtk-greeter, bspwm)"
@@ -82,16 +118,32 @@ setup_gpu() {
 
     info "Installing GPU driver: ${pkgs}"
     # shellcheck disable=SC2086
-    sudo pacman -S --needed --noconfirm $pkgs
+    if ! sudo pacman -S --needed --noconfirm $pkgs; then
+        error "setup_gpu: could not install the ${choice} driver packages: ${pkgs}"
+        return 1
+    fi
 
     if [[ "$choice" == nvidia* ]]; then
         local cur new
-        cur=$(grep -E '^MODULES=' /etc/mkinitcpio.conf)
+        # Asserted rather than assumed, the same way grub_cmdline_add asserts
+        # its GRUB_CMDLINE_LINUX line: the sed below is anchored to ^MODULES=,
+        # so against a file without one it matches nothing, exits 0 and leaves
+        # an initramfs with no nvidia modules in it.
+        if ! cur=$(grep -E '^MODULES=' /etc/mkinitcpio.conf); then
+            error "setup_gpu: /etc/mkinitcpio.conf has no MODULES= line to add the nvidia modules to"
+            return 1
+        fi
         new=$(modules_line "$cur" nvidia nvidia_modeset nvidia_uvm nvidia_drm)
-        sudo sed -i "s|^MODULES=.*|${new}|" /etc/mkinitcpio.conf
+        if ! sudo sed -i "s|^MODULES=.*|${new}|" /etc/mkinitcpio.conf; then
+            error "setup_gpu: could not write the nvidia modules to /etc/mkinitcpio.conf"
+            return 1
+        fi
 
-        sudo install -Dm644 "${ARCH_SETUP_DIR}/etc/pacman.d/hooks/nvidia.hook" \
-            /etc/pacman.d/hooks/nvidia.hook
+        if ! sudo install -Dm644 "${ARCH_SETUP_DIR}/etc/pacman.d/hooks/nvidia.hook" \
+                /etc/pacman.d/hooks/nvidia.hook; then
+            error "setup_gpu: could not install /etc/pacman.d/hooks/nvidia.hook"
+            return 1
+        fi
 
         if ! sudo bash -c "$(declare -f grub_cmdline_add error); \
             grub_cmdline_add /etc/default/grub nvidia-drm.modeset=1"; then
@@ -99,8 +151,20 @@ setup_gpu() {
             return 1
         fi
 
-        sudo mkinitcpio -P
-        sudo grub-mkconfig -o /boot/grub/grub.cfg
+        # Past this point /etc has already been rewritten for nvidia, so these
+        # two are what actually make the machine bootable with it -- and they
+        # are the reason this function may not end on a bare `success`. Left
+        # unchecked, a failure here produced a fully green summary and
+        # "Reboot to land in lightdm" on a machine whose initramfs and grub.cfg
+        # know nothing about the driver /etc is now configured for.
+        if ! sudo mkinitcpio -P; then
+            error "setup_gpu: mkinitcpio -P failed -- the initramfs has no nvidia modules; do NOT reboot"
+            return 1
+        fi
+        if ! sudo grub-mkconfig -o /boot/grub/grub.cfg; then
+            error "setup_gpu: grub-mkconfig failed -- /boot/grub/grub.cfg has no nvidia-drm.modeset=1; do NOT reboot"
+            return 1
+        fi
     fi
     success "GPU driver configured"
 }
