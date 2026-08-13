@@ -105,18 +105,40 @@ setup_gpu() {
     success "GPU driver configured"
 }
 
+# enable_services <unit>... -- non-zero if any unit that EXISTS could not be
+# enabled. A unit that is not installed warns and is skipped, and that is not
+# counted as a failure: provision.sh asks for docker, bluetooth and cups on
+# every run, and a machine provisioned with --skip-packages, or one whose
+# operator declined the optional group, legitimately has none of them. Failing
+# there would make the summary red on a run where nothing went wrong.
+#
+# The count is the point. This used to return the last iteration's status, so
+# `enable_services NetworkManager lightdm docker bluetooth cups` could fail to
+# enable NetworkManager -- no network on the next boot -- and still return 0
+# because cups happened to be fine.
 enable_services() {
-    local svc
+    local svc listed failed=0
     for svc in "$@"; do
-        if systemctl list-unit-files "${svc}.service" &>/dev/null \
-           && [[ -n "$(systemctl list-unit-files "${svc}.service" --no-legend)" ]]; then
-            if sudo systemctl enable "$svc" &>/dev/null; then
-                success "enabled ${svc}"
-            else
-                error "failed to enable ${svc}"
-            fi
-        else
+        # One call, and its output captured rather than piped into a `grep -q`:
+        # grep -q closes the pipe on its first match, systemctl takes SIGPIPE,
+        # and `set -o pipefail` in the caller surfaces it as a failure on the
+        # units that DID exist. `list-unit-files <pattern>` exits 0 for a
+        # pattern matching nothing, so the emptiness of the output is the only
+        # real answer here.
+        listed=$(systemctl list-unit-files "${svc}.service" --no-legend 2>/dev/null) || listed=""
+        if [[ -z "$listed" ]]; then
             warn "unit ${svc}.service not found, skipping"
+            continue
+        fi
+        if sudo systemctl enable "$svc" &>/dev/null; then
+            success "enabled ${svc}"
+        else
+            error "failed to enable ${svc}"
+            failed=$((failed + 1))
         fi
     done
+    if (( failed )); then
+        error "enable_services: ${failed} of $# unit(s) could not be enabled"
+        return 1
+    fi
 }
