@@ -7,17 +7,34 @@ DOTFILES_REPO="https://github.com/guidiamond/.dotfiles.git"
 DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
 STOW_PACKAGE="dotfiles"
 
-# Anchored on both ends: an unanchored '.' (regex "any char") would also
-# match an unrelated host that merely starts with "github" + any-char +
-# "com", e.g. github.community or github.company-mirror.com.
+# Anchored at the start (allowing leading whitespace, which netrc permits)
+# and bounded at the end by either whitespace or end-of-line -- not just an
+# end anchor. netrc allows both a multi-line "machine X\n  login Y\n
+# password Z" form and a single-line "machine X login Y password Z" form,
+# and both are common in the wild; a plain '$' anchor rejects the
+# single-line form outright. The boundary after "github.com" still rejects
+# an unrelated host that merely starts with the same characters, e.g.
+# github.community or github.company-mirror.com.
 netrc_has_github() {
-    [[ -f "$HOME/.netrc" ]] && grep -qE '^machine[[:space:]]+github\.com[[:space:]]*$' "$HOME/.netrc"
+    [[ -f "$HOME/.netrc" ]] && grep -qE '^[[:space:]]*machine[[:space:]]+github\.com([[:space:]]|$)' "$HOME/.netrc"
 }
 
 netrc_write() {
-    local user=$1 token=$2 old_umask
+    local user=$1 token=$2 old_umask backup
     [[ -n "$user"  ]] || { error "netrc_write: empty username"; return 1; }
     [[ -n "$token" ]] || { error "netrc_write: empty token"; return 1; }
+
+    # This is a whole-file overwrite below, and detection above can be
+    # wrong (or netrc_write can be called directly). Never let a working
+    # credential file -- for github.com or any other unrelated host -- just
+    # disappear: copy whatever is already there aside first. Bail without
+    # touching the original if the backup itself can't be made.
+    if [[ -e "$HOME/.netrc" ]]; then
+        backup="$HOME/.netrc.bak-$(date +%Y%m%d-%H%M%S)"
+        cp "$HOME/.netrc" "$backup" || { error "netrc_write: failed to back up existing ${HOME}/.netrc"; return 1; }
+        chmod 600 "$backup" || { error "netrc_write: failed to chmod backup ${backup}"; return 1; }
+        warn "backed up existing ${HOME}/.netrc -> ${backup}"
+    fi
 
     # umask is process-wide and this file is sourced (not exec'd), so an
     # unrestored umask would silently tighten every file this process
@@ -67,16 +84,34 @@ dotfiles_clone() {
 }
 
 # Real files (not symlinks) that stow would refuse to overwrite. Also scans
-# repo entries that are themselves symlinks (this dotfiles repo has several,
-# e.g. .config/fzf/*.zsh) -- a plain -type f miss there means a real file
-# blocking one never gets backed up before stow_apply runs the real stow.
-# A directory in the repo colliding with a real directory at the target is
-# not a conflict: stow folds into an existing real directory and links the
-# leaf files inside it, which is exactly the granularity this scan uses.
+# repo entries that are themselves symlinks-to-files (this dotfiles repo has
+# several, e.g. .config/fzf/*.zsh) -- a plain -type f miss there means a
+# real file blocking one never gets backed up before stow_apply runs the
+# real stow. Symlinks-to-*directories* are deliberately excluded (-xtype):
+# stow folds those into an existing real target directory exactly like a
+# plain directory entry, so flagging one would make stow_apply relocate the
+# user's whole real directory -- and everything inside it -- into a backup
+# it never needed to leave (e.g. vimspector_cfg/gadgets/linux/debugpy,
+# which vimspector recreates as a real directory at runtime). A plain
+# directory in the repo colliding with a real directory at the target is
+# not a conflict either, for the same folding reason, and needs no special
+# case: the leaf-file granularity of this scan already matches it.
 stow_conflicts() {
-    local repo=$1 target=$2 pkgdir rel abs
+    local repo=$1 target=$2 pkgdir rel abs listing
     pkgdir="${repo}/${STOW_PACKAGE}"
     [[ -d "$pkgdir" ]] || { error "stow_conflicts: no such package dir: ${pkgdir}"; return 1; }
+
+    # Captured via command substitution, not streamed straight into the
+    # while loop's process substitution, specifically so find's own exit
+    # status is visible here: a `cd && find` that fails partway through
+    # (e.g. a subtree it can't read) must not be reported as "no
+    # conflicts" at status 0 -- that would hand stow_apply a silently
+    # truncated list and let it charge ahead anyway.
+    if ! listing=$(cd "$pkgdir" && find . \( -type f -o \( -type l -a ! -xtype d \) \) -printf '%P\n'); then
+        error "stow_conflicts: failed to scan ${pkgdir}"
+        return 1
+    fi
+
     while IFS= read -r rel; do
         [[ -z "$rel" ]] && continue
         abs="${target}/${rel}"
@@ -87,20 +122,39 @@ stow_conflicts() {
         if [[ -e "$abs" && ! -L "$abs" ]]; then
             echo "$rel"
         fi
-    done < <(cd "$pkgdir" && find . \( -type f -o -type l \) -printf '%P\n')
+    done <<< "$listing"
     return 0
 }
 
 stow_apply() {
-    local repo=$1 target=$2 backup rel
+    local repo=$1 target=$2 backup rel conflicts
     backup="${target}/.dotfiles-backup-$(date +%Y%m%d-%H%M%S)"
 
-    while read -r rel; do
+    # Captured via command substitution: `done < <(stow_conflicts ...)`
+    # would only expose the while loop's own status, not stow_conflicts'
+    # -- a scan failure would pass through here silently.
+    if ! conflicts=$(stow_conflicts "$repo" "$target"); then
+        error "stow_apply: could not determine conflicts for ${repo} -> ${target}"
+        return 1
+    fi
+
+    while IFS= read -r rel; do
         [[ -z "$rel" ]] && continue
-        mkdir -p "${backup}/$(dirname "$rel")"
-        mv "${target}/${rel}" "${backup}/${rel}"
+        # Stop at the first failure instead of limping on: with several
+        # conflicts, continuing past a failed mkdir/mv would relocate the
+        # ones that did succeed while stow (below) still aborts wholesale,
+        # stranding files in the backup dir with nothing linked and a
+        # "backed up" message that was never true for the failed one.
+        if ! mkdir -p "${backup}/$(dirname "$rel")"; then
+            error "stow_apply: failed to create backup dir for ${rel}"
+            return 1
+        fi
+        if ! mv "${target}/${rel}" "${backup}/${rel}"; then
+            error "stow_apply: failed to back up ${rel}"
+            return 1
+        fi
         warn "backed up ${rel} -> ${backup}/${rel}"
-    done < <(stow_conflicts "$repo" "$target")
+    done <<< "$conflicts"
 
     # -R restows, so re-running cleans up links whose targets moved.
     # Never --adopt: that pulls machine state into the repo silently.

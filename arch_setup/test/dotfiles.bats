@@ -1,11 +1,14 @@
 #!/usr/bin/env bats
 
 setup() {
-    source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
-    source "${BATS_TEST_DIRNAME}/../lib/dotfiles.sh"
     TMP="$BATS_TEST_TMPDIR"
     HOME="$TMP/home"
     mkdir -p "$HOME"
+    # HOME must be reassigned *before* sourcing: DOTFILES_DIR defaults to
+    # "$HOME/.dotfiles" at source time, so sourcing first would bind it to
+    # the real invoking user's home instead of this test's sandbox.
+    source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
+    source "${BATS_TEST_DIRNAME}/../lib/dotfiles.sh"
 }
 
 @test "netrc_write creates a 600 file with the credentials" {
@@ -142,4 +145,151 @@ setup() {
 @test "stow_apply fails loudly when the real stow command fails" {
     run stow_apply "$TMP/repo" "$HOME"
     [ "$status" -ne 0 ]
+}
+
+# --- round 2: fixes requested by spec review ---
+
+# Issue 1a: the anchor '[[:space:]]*$' fixed the github.community false
+# positive but broke the single-line netrc form ("machine X login Y
+# password Z" all on one line), which curl and git both document and which
+# is what many real netrc files actually use.
+@test "netrc_has_github recognizes the single-line netrc form" {
+    printf 'machine github.com login someone password tok123\n' > "$HOME/.netrc"
+    run netrc_has_github
+    [ "$status" -eq 0 ]
+}
+
+# Issue 1a, other direction: leading whitespace before "machine" is also
+# valid netrc syntax and must still be recognized.
+@test "netrc_has_github recognizes an indented machine line" {
+    printf '  machine github.com\n    login x\n    password y\n' > "$HOME/.netrc"
+    run netrc_has_github
+    [ "$status" -eq 0 ]
+}
+
+# Issue 1b: ensure_github_auth's "already configured" check can be wrong
+# (see above), and netrc_write does `cat > "$HOME/.netrc"`, a whole-file
+# overwrite. If detection is ever wrong, or netrc_write is called directly,
+# an existing working credential file (github or any other unrelated host)
+# must never simply vanish.
+@test "netrc_write backs up an existing netrc before overwriting it" {
+    printf 'machine github.com\n  login old\n  password oldtok\nmachine gitlab.com\n  login x\n  password y\n' > "$HOME/.netrc"
+    chmod 600 "$HOME/.netrc"
+    netrc_write "new" "newtok"
+    run bash -c "cat ${HOME}/.netrc.bak-*"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"login old"* ]]
+    [[ "$output" == *"gitlab.com"* ]]
+    grep -q 'login new' "$HOME/.netrc"
+}
+
+# Issue 2: -type l widened the scan to symlinks-to-files (correct) but also
+# to symlinks-to-directories (wrong): stow folds those into an existing
+# real target directory just like a plain directory entry, so flagging one
+# as a "conflict" makes stow_apply relocate the user's whole real directory
+# -- and everything inside it -- into a backup dir it never needed to
+# leave. This repo actually has this shape: vimspector_cfg/gadgets/linux/
+# debugpy is a symlink-to-directory in the repo, and vimspector recreates a
+# real directory at that same path at runtime.
+@test "stow_conflicts still flags a real file blocking a symlink-to-file entry" {
+    mkdir -p "$TMP/repo/dotfiles"
+    ln -s /nonexistent-target "$TMP/repo/dotfiles/.testrc"
+    printf 'pre-existing\n' > "$HOME/.testrc"
+    run stow_conflicts "$TMP/repo" "$HOME"
+    [[ "$output" == *".testrc"* ]]
+}
+
+@test "stow_conflicts does not flag a real directory blocking a symlink-to-directory entry" {
+    mkdir -p "$TMP/repo/dotfiles/sub" "$TMP/real_target"
+    ln -s "$TMP/real_target" "$TMP/repo/dotfiles/sub/gadgets"
+    mkdir -p "$HOME/sub/gadgets"
+    printf 'user data\n' > "$HOME/sub/gadgets/keep.txt"
+    run stow_conflicts "$TMP/repo" "$HOME"
+    [[ "$output" != *"gadgets"* ]]
+}
+
+# Issue 3: the bug class ("a command fails, its status is discarded, and
+# the caller announces success") survived inside stow_conflicts itself.
+# The `-d` guard only covers a missing package dir; `find` can still fail
+# for other reasons (e.g. a subtree it can't read), and the trailing
+# `return 0` discarded that too, handing back an empty or truncated
+# conflict list at status 0 instead of surfacing the real failure.
+@test "stow_conflicts fails loudly when part of the repo tree is unreadable" {
+    mkdir -p "$TMP/repo/dotfiles/blocked"
+    printf 'secret\n' > "$TMP/repo/dotfiles/blocked/leaf"
+    printf 'from repo\n' > "$TMP/repo/dotfiles/.testrc"
+    chmod 000 "$TMP/repo/dotfiles/blocked"
+    run stow_conflicts "$TMP/repo" "$HOME"
+    chmod 755 "$TMP/repo/dotfiles/blocked"
+    [ "$status" -ne 0 ]
+}
+
+# Issue 4: mkdir -p and mv in stow_apply's backup loop were never checked.
+# If either fails, the loop must stop immediately (not strand later
+# conflicts partway through, and not print "backed up" for a file that
+# was never actually moved).
+@test "stow_apply aborts without printing a false 'backed up' message when the backup mkdir fails" {
+    mkdir -p "$TMP/repo/dotfiles"
+    printf 'a\n' > "$TMP/repo/dotfiles/.a"
+    printf 'b\n' > "$TMP/repo/dotfiles/.b"
+    printf 'pre-existing-a\n' > "$HOME/.a"
+    printf 'pre-existing-b\n' > "$HOME/.b"
+    mkdir() { return 1; }
+    run stow_apply "$TMP/repo" "$HOME"
+    [[ "$output" != *"backed up"* ]]
+    [ "$(cat "$HOME/.a")" = "pre-existing-a" ]
+    [ "$(cat "$HOME/.b")" = "pre-existing-b" ]
+}
+
+@test "stow_apply aborts without printing a false 'backed up' message when the backup mv fails" {
+    mkdir -p "$TMP/repo/dotfiles"
+    printf 'from repo\n' > "$TMP/repo/dotfiles/.testrc"
+    printf 'pre-existing\n' > "$HOME/.testrc"
+    mv() { return 1; }
+    run stow_apply "$TMP/repo" "$HOME"
+    [[ "$output" != *"backed up"* ]]
+}
+
+# Issue 5: `done < <(stow_conflicts ...)` is a process substitution, so
+# stow_apply never saw stow_conflicts' own exit status -- only the while
+# loop's. Proven independently of stow's own success/failure (which would
+# otherwise mask this): stow_conflicts is stubbed to fail while the real
+# stow command, left to run, would have succeeded cleanly (no real
+# conflict exists).
+@test "stow_apply surfaces a stow_conflicts failure even when the real stow would have succeeded" {
+    mkdir -p "$TMP/repo/dotfiles"
+    printf 'from repo\n' > "$TMP/repo/dotfiles/.testrc"
+    stow_conflicts() { echo "forced failure" >&2; return 1; }
+    run stow_apply "$TMP/repo" "$HOME"
+    [ "$status" -ne 0 ]
+}
+
+# Issue 6: setup() used to source lib/dotfiles.sh before reassigning HOME,
+# so DOTFILES_DIR (computed at source time) bound to the real user's home
+# instead of this test's sandbox.
+@test "DOTFILES_DIR defaults relative to the test HOME, not the real one" {
+    [[ "$DOTFILES_DIR" == "$HOME/.dotfiles" ]]
+}
+
+# Issue 7: ensure_github_auth discarded netrc_write's exit status.
+# Stubbed so no network or git is touched -- only the propagation itself
+# is under test.
+@test "ensure_github_auth propagates a netrc_write failure instead of claiming success" {
+    netrc_has_github() { return 1; }
+    github_verify() { return 0; }
+    netrc_write() { return 1; }
+    run ensure_github_auth
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"wrote"* ]]
+}
+
+# Issue 7: dotfiles_clone discarded git clone's exit status. `git` itself
+# is stubbed so no network is touched.
+@test "dotfiles_clone propagates a git clone failure instead of claiming success" {
+    DOTFILES_DIR="$TMP/nonexistent-clone-target"
+    ensure_github_auth() { return 0; }
+    git() { return 1; }
+    run dotfiles_clone
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"cloned to"* ]]
 }
