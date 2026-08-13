@@ -144,7 +144,18 @@ ensure_github_auth() {
 # step()'s `if "$@"`, and bash suspends errexit for the whole dynamic extent
 # of a condition context, so every command here is checked explicitly.
 dotfiles_clone() {
-    if [[ -d "${DOTFILES_DIR}/.git" ]]; then
+    # -e, not -d: a git worktree's `.git` is a file holding `gitdir: ...`. A
+    # -d test calls that "not cloned yet" and falls through to a clone that
+    # cannot work -- git refuses a destination that already exists and is not
+    # empty -- after which the auth fallback blames credentials for a
+    # repository that is already there.
+    #
+    # Not `git rev-parse`, which is the more thorough question: from inside
+    # a parent repository it answers yes for a DOTFILES_DIR that is merely a
+    # subdirectory, which is a false positive this file test cannot have. The
+    # remaining gap is a stray `.git` that is not a repository at all, and
+    # that was equally true of -d.
+    if [[ -e "${DOTFILES_DIR}/.git" ]]; then
         success "dotfiles already present at ${DOTFILES_DIR}"
         return 0
     fi

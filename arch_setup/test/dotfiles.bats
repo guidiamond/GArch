@@ -366,6 +366,28 @@ EOF
     [ "$(wc -l < "$TMP/gitcalls")" -eq 0 ]
 }
 
+# In a git worktree `.git` is a FILE holding `gitdir: ...`, not a directory, so
+# a `-d` guard calls a perfectly good checkout "not cloned yet". What follows
+# is not a clone: git refuses a destination that already exists and is not
+# empty, and the auth fallback then reports a credentials problem for a
+# repository sitting right there. Nothing is destroyed -- preexisting is 1, so
+# the partial-clone cleanup correctly leaves it alone -- but the run stops on
+# a diagnosis that has nothing to do with why it stopped.
+#
+# The assertions are the same three as above, against the same stub, because
+# "already present" is the same answer in both shapes. Only the fixture moves.
+@test "dotfiles_clone short-circuits when the dotfiles are a git worktree" {
+    clone_stub 99
+    DOTFILES_DIR="$TMP/clone-target"
+    mkdir -p "$DOTFILES_DIR"
+    printf 'gitdir: %s/repo/.git/worktrees/wt\n' "$TMP" > "$DOTFILES_DIR/.git"
+    ensure_github_auth() { : > "$TMP/auth_called"; return 0; }
+    PATH="$TMP/bin:$PATH" run dotfiles_clone
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/auth_called" ]
+    [ "$(wc -l < "$TMP/gitcalls")" -eq 0 ]
+}
+
 # NOT `run dotfiles_clone`: bats' own `run` turns errexit off inside the run,
 # which is the setting under test. A separate shell instead, running the
 # function directly under `set -euo pipefail` -- not inside an `if`, which
