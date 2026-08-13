@@ -121,11 +121,15 @@ both stages and parts of it are injected into the generated chroot script,
 ./test/run.sh          # shellcheck over every script, then bats
 ```
 
-230 tests over the pure functions in `lib/` and the sourceable parts of both
+The suite covers the pure functions in `lib/` and the sourceable parts of both
 orchestrators -- partition-plan arithmetic, mkinitcpio hook and module
 ordering, GRUB cmdline editing, netrc handling, stow conflict detection,
 package-list parsing, the step/summary machinery. The destructive paths are
 covered by `--dry-run` and the VM below.
+
+No test count is quoted here on purpose: one written down in prose is wrong
+the next time a test is added, and a number nobody re-derives is worse than
+none. `./test/run.sh` prints the current one.
 
 `run.sh` refuses to run as root: the suite puts stub `pacman` and `reflector`
 binaries on `PATH`, and a call that missed a stub would hit this machine rather

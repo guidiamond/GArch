@@ -579,10 +579,11 @@ intel
 
 # --- the sudo keepalive ----------------------------------------------------
 #
-# `sudo -v` authenticates once and the timestamp expires (15 minutes by
-# default) long before ~250 packages and the AUR builds are done. Every sudo
-# after that re-prompts from behind tee, where a script waiting for a password
-# and a script that has hung look identical.
+# `sudo -v` authenticates once and the timestamp expires (timestamp_timeout,
+# which `man 5 sudoers` on this host gives as FIVE minutes by default) long
+# before ~250 packages and the AUR builds are done. Every sudo after that
+# re-prompts from behind tee, where a script waiting for a password and a
+# script that has hung look identical.
 
 @test "the sudo keepalive runs in the background and is killed on the way out" {
     run in_provision 'sudo(){ :; }
