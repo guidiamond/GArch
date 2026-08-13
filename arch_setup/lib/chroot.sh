@@ -102,8 +102,13 @@ chroot_write_script() {
         cat <<'HEADER'
 #!/bin/bash
 # -E, not just -e: a plain errexit does not propagate the ERR trap into shell
-# functions, command substitutions or subshells, and the failures most worth
-# reporting here happen inside the injected helpers and inside $(...).
+# functions, so a command that fails *inside* an injected helper reports
+# nothing at all -- grub_cmdline_add's sed -i and read -ra are unguarded, and
+# without this a read-only /etc/default/grub gives sed's own message and no
+# location. Top-level assignments like CUR_HOOKS=$(grep ...) below are the
+# other silent case, but they report either way, since the assignment is
+# itself a failing top-level command; -E only adds a second line naming the
+# command inside the substitution.
 set -Eeuo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
