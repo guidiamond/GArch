@@ -276,6 +276,10 @@ if ! grep -qE '^[[:space:]]*[@#]includedir[[:space:]]+/etc/sudoers.d' /etc/sudoe
     error "/etc/sudoers has no active includedir for /etc/sudoers.d -- ${USERNAME_VAR} would have no sudo"
     exit 1
 fi
+# Deliberately no `visudo -cf` on what follows: the content is one hardcoded
+# line from a quoted heredoc with nothing interpolated, so validating it only
+# asks whether visudo itself works. It also could not be fail-closed -- the
+# file is already live in /etc/sudoers.d by the time any check could run.
 mkdir -p /etc/sudoers.d
 cat > /etc/sudoers.d/10-wheel <<'WHEEL'
 %wheel ALL=(ALL:ALL) ALL

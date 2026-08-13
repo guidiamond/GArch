@@ -55,4 +55,8 @@ setup() {
         echo SHOULD_NOT_REACH"
     [ "$status" -ne 0 ]
     [[ "$output" != *"SHOULD_NOT_REACH"* ]]
+    # On the helper's own message, not just a non-zero status: if the function
+    # vanished, `declare -f` would emit nothing and the 127 from "command not
+    # found" would satisfy the two assertions above.
+    [[ "$output" == *"unexpectedly found"* ]]
 }
