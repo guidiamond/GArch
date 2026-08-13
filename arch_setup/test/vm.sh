@@ -22,6 +22,13 @@ SUMS_URL="https://geo.mirror.pkgbuild.com/iso/latest/sha256sums.txt"
 OVMF_CODE="/usr/share/edk2/x64/OVMF_CODE.4m.fd"
 OVMF_VARS_SRC="/usr/share/edk2/x64/OVMF_VARS.4m.fd"
 
+# What the guest clones, and the branch that actually carries the installer.
+# A variable rather than a literal so that the day this branch merges, one
+# environment override -- or one line here -- retargets the whole recipe;
+# there is nothing to hunt for in the middle of a heredoc.
+VM_REPO="${VM_REPO:-https://github.com/guidiamond/GArch.git}"
+VM_BRANCH="${VM_BRANCH:-arch-installer}"
+
 # Sized to the job, not to the round number a desktop reaches for. Stage 1
 # writes roughly 6-8G -- a 2G ESP, plus base, base-devel, linux, linux-headers
 # and linux-firmware -- so 12G is that plus half again, and it is stage 1 this
@@ -276,9 +283,40 @@ qemu_run() {
         "$@"
 }
 
+# The recipe below is typed at a bare console inside a VM, so every way it can
+# go wrong costs an ISO boot to find out about. This is the one failure that
+# can be settled from the host beforehand: whether the branch the clone names
+# is on the remote at all.
+#
+# Not fatal when it cannot be answered. An unreachable remote or a host
+# without git says nothing about the branch, and refusing to boot over it
+# would break the offline re-run of a VM whose clone already happened.
+require_branch() {
+    local heads
+    if ! command -v git >/dev/null 2>&1; then
+        echo "warning: no git on the host, so ${VM_BRANCH} was not checked" >&2
+        return 0
+    fi
+    if ! heads=$(git ls-remote --heads "$VM_REPO" "$VM_BRANCH" 2>/dev/null); then
+        echo "warning: could not reach ${VM_REPO}, so ${VM_BRANCH} was not checked" >&2
+        return 0
+    fi
+    # ls-remote exits 0 with no output for a branch that does not exist, so it
+    # is the emptiness that answers the question, not the status.
+    [[ -n "$heads" ]] || die "\
+${VM_BRANCH} is not on ${VM_REPO} yet, so the guest has nothing to clone.
+
+  git push -u origin ${VM_BRANCH}
+
+Push it, then boot. The default branch carries arch_setup.sh and yay_deps.txt
+and no install.sh, so booting first only spends an ISO boot to reach a
+'No such file or directory' inside the VM."
+}
+
 cmd_boot() {
     [[ -f "$ISO" ]]  || die "no ISO -- run './test/vm.sh fetch' first"
     [[ -f "$DISK" ]] || die "no disk image -- run './test/vm.sh create' first"
+    require_branch
     # The repository is guidiamond/GArch; the *directory* it clones into is
     # .dotfiles. Hence the explicit destination below -- without it git names
     # the new directory after the repo and the next line has nothing to cd
@@ -286,14 +324,20 @@ cmd_boot() {
     # dot-prefixed guidiamond/.dotfiles this used to name 404s for the owner's
     # own token, while GArch answers an *anonymous* git-upload-pack with 200.
     # So the repo is public and the clone needs no credentials.
-    cat <<'EOF'
+    #
+    # Interpolating heredoc: the branch and URL are settings, and a recipe
+    # that disagreed with the check above would be worse than no check.
+    cat <<EOF
 Booting the Arch ISO. Inside the VM:
 
   pacman -Sy --noconfirm git
-  git clone https://github.com/guidiamond/GArch.git .dotfiles
+  git clone -b ${VM_BRANCH} ${VM_REPO} .dotfiles
   cd .dotfiles/arch_setup
   ./install.sh --dry-run    # rehearse the whole prompt flow, write nothing
   ./install.sh              # the real run
+
+The -b is load-bearing: the default branch has no install.sh. That the branch
+is on the remote was checked before this window opened.
 
 The repository is public, so the clone asks for no credentials. (Stage 2's
 ~/.netrc prompt is a separate thing, on the installed system.)
@@ -340,7 +384,28 @@ Environment:
   RESERVE            free space kept for the host (default 5G)
   RAM, SMP           guest memory and vCPUs (default 4G, 4)
   VM_DISPLAY         qemu -display backend (default gtk)
+  VM_REPO            repository the guest clones (default guidiamond/GArch)
+  VM_BRANCH          branch it clones; must be pushed (default arch-installer)
   ALLOW_LOW_SPACE=1  proceed past the free-space refusal
+
+Testing uncommitted work:
+  The guest clones from the remote, so `boot` only ever tests what has been
+  pushed. To run the working tree as it stands, hand qemu a 9p export -- add
+  to the qemu-system-x86_64 line in qemu_run():
+
+    -virtfs local,path=REPO,mount_tag=dotfiles,security_model=mapped-xattr,readonly=on
+
+  and inside the guest, in place of the clone:
+
+    mkdir -p /mnt/dotfiles
+    mount -t 9p -o trans=virtio dotfiles /mnt/dotfiles
+    cd /mnt/dotfiles/arch_setup
+
+  Deliberately an edit you make rather than a flag this script carries. It is
+  the better way to test an unpushed change, but it cannot be verified from
+  outside a VM, and it has no business sitting on the path of `boot` -- the
+  one command this harness exists to run. readonly=on is what keeps a guest
+  mid-install from writing to your checkout; drop it only knowing that.
 USAGE
 }
 
