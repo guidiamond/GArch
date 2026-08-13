@@ -11,6 +11,11 @@
 # the summary counted them twice. Each call keeps its own list; see there.
 PKG_FAILED=()
 
+# How much of a failed AUR build to print. A makepkg log runs to thousands of
+# lines and the reason is at the end of it, so the tail is what gets shown --
+# and it goes through provision.sh's tee, so it survives in the run log.
+AUR_LOG_LINES=20
+
 # One package per line. Strips blank lines and comments -- BOTH whole-line and
 # inline, so `foo  # needed by bar` yields `foo`.
 #
@@ -73,18 +78,38 @@ pkg_install_repo() {
 # if/else below, whose status is 0 down both branches, so a run where every
 # single AUR package failed to build reported success to provision.sh's step()
 # and the summary printed a green line for it.
+# Output goes to a temp file rather than /dev/null, and the tail of it is
+# printed for each package that failed. `&>/dev/null` left "failed 3 of 13:
+# a b c" as the entire diagnosis of a failed build -- no PKGBUILD error, no
+# missing dependency, nothing to act on, and nothing in the run log either.
+#
+# It is NOT about a lost sudo password prompt: sudo writes that prompt to
+# /dev/tty, not to stderr, so a redirect here never hid it (sudo(8) documents
+# the stderr form as what -S selects "instead of using the terminal device";
+# measured too -- a /dev/tty write survives `&>/dev/null` while stdout and
+# stderr do not). Where there is no terminal sudo cannot prompt at all and
+# fails, and the reason for THAT failure is one of the things this now prints.
 pkg_install_aur() {
-    local file=$1 pkg total=0 n=0
+    local file=$1 pkg total=0 n=0 log
     local -a pkgs failed=()
     pkg_read "$file" pkgs || return 1
     total=${#pkgs[@]}
+    log=$(mktemp) || { error "pkg_install_aur: cannot create a temp file for yay's output"; return 1; }
     info "Installing ${total} AUR packages..."
     for pkg in "${pkgs[@]}"; do
         n=$((n + 1))
         printf '\r  [%d/%d] %-40s' "$n" "$total" "$pkg"
-        yay -S --needed --noconfirm "$pkg" &>/dev/null || failed+=("$pkg")
+        if ! yay -S --needed --noconfirm "$pkg" >"$log" 2>&1; then
+            failed+=("$pkg")
+            # The progress line is overwritten first, or the error lands on top
+            # of it and the package name is half eaten.
+            printf '\r%-60s\r' ""
+            error "yay could not build ${pkg}, last ${AUR_LOG_LINES} lines:"
+            tail -n "$AUR_LOG_LINES" "$log" >&2
+        fi
     done
     printf '\r%-60s\r' ""
+    rm -f "$log"
     if (( ${#failed[@]} )); then
         PKG_FAILED+=("${failed[@]}")
         warn "failed ${#failed[@]} of ${total} from ${file}: ${failed[*]}"

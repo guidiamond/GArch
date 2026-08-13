@@ -120,9 +120,13 @@ setup() {
 # missed stub would build packages for real.
 
 # stub_yay <packages that fail to build>
+#
+# A failing build prints to stdout and to stderr before exiting, the way a real
+# makepkg does: what pkg_install_aur has to do with that output is the point of
+# the diagnosis case below.
 stub_yay() {
     mkdir -p "$TMP/bin"
-    printf '#!/bin/sh\nfor bad in %s; do\n  case " $* " in *" $bad "*) exit 1 ;; esac\ndone\nexit 0\n' \
+    printf '#!/bin/sh\nfor bad in %s; do\n  case " $* " in *" $bad "*)\n    echo "==> Making package $bad"\n    echo "error: could not satisfy dependency libfoo" >&2\n    exit 1 ;;\n  esac\ndone\nexit 0\n' \
         "$1" > "$TMP/bin/yay"
     chmod +x "$TMP/bin/yay"
 }
@@ -148,6 +152,42 @@ stub_yay() {
     [[ "$output" == *"all 2 AUR packages installed"* ]]
 }
 
+# `yay ... &>/dev/null` left "failed 1 of 2: beta" as the entire diagnosis of a
+# failed build: no PKGBUILD error, no missing dependency, and nothing in the
+# run log either, since there was nothing to tee.
+@test "pkg_install_aur shows why a package failed to build" {
+    printf 'alpha\nbeta\n' > "$TMP/l.txt"
+    stub_yay "beta"
+    PATH="$TMP/bin:$PATH" run pkg_install_aur "$TMP/l.txt"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"could not satisfy dependency libfoo"* ]]
+    [[ "$output" == *"yay could not build beta"* ]]
+}
+
+# ...and a build that WORKED stays quiet, or a 148-package run buries its own
+# progress line under every makepkg log.
+@test "pkg_install_aur stays quiet about the packages that built" {
+    printf 'alpha\n' > "$TMP/l.txt"
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\necho "==> Making package alpha"\necho "noise" >&2\nexit 0\n' > "$TMP/bin/yay"
+    chmod +x "$TMP/bin/yay"
+    PATH="$TMP/bin:$PATH" run pkg_install_aur "$TMP/l.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Making package alpha"* ]]
+    [[ "$output" != *"noise"* ]]
+}
+
+@test "pkg_install_aur leaves no temp file behind" {
+    printf 'alpha\nbeta\n' > "$TMP/l.txt"
+    stub_yay "beta"
+    # mktemp honours TMPDIR, so the whole question is answerable in a directory
+    # nothing else on this machine writes to.
+    mkdir -p "$TMP/tmpdir"
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP/tmpdir" run pkg_install_aur "$TMP/l.txt"
+    [ "$status" -ne 0 ]
+    [ -z "$(ls -A "$TMP/tmpdir")" ]
+}
+
 # PKG_FAILED is initialised once at source time and only ever appended to,
 # because provision.sh's summary reads it at the end and wants both calls'
 # failures. Each CALL must still report and return on its own list only --
@@ -162,13 +202,21 @@ stub_yay() {
                  source '${BATS_TEST_DIRNAME}/../lib/packages.sh'
                  export PATH=\"${TMP}/bin:\$PATH\"
                  pkg_install_aur '${TMP}/first.txt'  && echo FIRST_OK  || echo FIRST_FAILED
+                 echo ===SECOND-CALL-STARTS-HERE===
                  pkg_install_aur '${TMP}/second.txt' && echo SECOND_OK || echo SECOND_FAILED
+                 echo ===SECOND-CALL-ENDS-HERE===
                  printf 'CUMULATIVE[%s]' \"\${PKG_FAILED[*]}\""
     [[ "$output" == *"FIRST_FAILED"* ]]
     [[ "$output" == *"SECOND_OK"* ]]
     # ...and the summary still gets to see alpha, exactly once.
     [[ "$output" == *"CUMULATIVE[alpha]"* ]]
-    [ "$(grep -c 'alpha' <<< "$output")" -eq 2 ]
+    # The second call must not mention alpha at all. Bracketed by markers
+    # rather than counted: the first call legitimately names a failed package
+    # more than once now that it also prints why the build failed, so a total
+    # count says nothing about which call did the naming.
+    local second=${output#*===SECOND-CALL-STARTS-HERE===}
+    second=${second%%===SECOND-CALL-ENDS-HERE===*}
+    [[ "$second" != *"alpha"* ]]
 }
 
 # --- ensure_yay ------------------------------------------------------------
