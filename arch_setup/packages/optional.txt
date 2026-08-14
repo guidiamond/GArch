@@ -1,0 +1,26 @@
+# Optional desktop applications. provision.sh prompts once for the whole group.
+# AUR unless noted.
+1password
+brave-bin
+google-chrome
+visual-studio-code-bin
+datagrip
+insomnia
+postman-bin
+slack-desktop
+# discord is in extra, not the AUR, despite the header above
+discord
+teams-for-linux-bin
+notion-app-electron
+ferdium-bin
+spotify
+claude-code
+google-cloud-cli
+ngrok
+etcher-bin
+czkawka-gui-bin
+droidcam
+watchman-bin
+mongodb-bin
+mongodb-tools-bin
+robo3t-bin

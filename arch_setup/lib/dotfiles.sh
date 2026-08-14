@@ -1,0 +1,408 @@
+#!/bin/bash
+# ~/.netrc, clone, stow, and staging a clone into a freshly installed root.
+# Requires lib/ui.sh.
+#
+# Everything except stage_dotfiles is stage 2 and writes to $HOME -- this is
+# the only module that does. stage_dotfiles is the exception in both
+# directions: it runs in stage 1, where $HOME is root's on the live ISO, and it
+# writes under the <target-root> it is handed, never $HOME.
+# shellcheck shell=bash
+
+# The repository is NOT named after the directory it clones into, which is the
+# whole trap here: this used to say guidiamond/.dotfiles, which does not exist
+# -- it 404s for the owner's own authenticated token. The local *directory* is
+# .dotfiles; the repository's canonical current name is GArch, and it is
+# public (an anonymous git-upload-pack against it answers 200). DOTFILES_DIR
+# below is what keeps the clone landing in ~/.dotfiles regardless.
+DOTFILES_REPO="https://github.com/guidiamond/GArch.git"
+DOTFILES_DIR="${DOTFILES_DIR:-$HOME/.dotfiles}"
+STOW_PACKAGE="dotfiles"
+
+# --- credentials -------------------------------------------------------
+
+# Anchored at the start (allowing leading whitespace, which netrc permits)
+# and bounded at the end by either whitespace or end-of-line -- not just an
+# end anchor. netrc allows both a multi-line "machine X\n  login Y\n
+# password Z" form and a single-line "machine X login Y password Z" form,
+# and both are common in the wild; a plain '$' anchor rejects the
+# single-line form outright. The boundary after "github.com" still rejects
+# an unrelated host that merely starts with the same characters, e.g.
+# github.community or github.company-mirror.com.
+netrc_has_github() {
+    [[ -f "$HOME/.netrc" ]] && grep -qE '^[[:space:]]*machine[[:space:]]+github\.com([[:space:]]|$)' "$HOME/.netrc"
+}
+
+# Back up a real file at $HOME/.netrc, or remove a symlink there (dangling
+# or valid, after backing up a valid one's real target first) -- so
+# whatever runs next is guaranteed to find nothing in its way. Never let a
+# working credential file -- for github.com or any other unrelated host --
+# just disappear: netrc_write does a whole-file overwrite, and detection
+# above can be wrong (or netrc_write can be called directly).
+netrc_clear_path() {
+    local backup
+    [[ -e "$HOME/.netrc" || -L "$HOME/.netrc" ]] || return 0
+
+    if [[ -L "$HOME/.netrc" && ! -e "$HOME/.netrc" ]]; then
+        # A *dangling* symlink fails `-e`, so without checking `-L` too,
+        # this would fall through untouched and the write that follows
+        # would follow the link, landing the token at whatever arbitrary
+        # path it points at instead of $HOME/.netrc. Nothing real behind
+        # it to back up.
+        rm -f "$HOME/.netrc" || { error "netrc_clear_path: failed to remove dangling symlink at ${HOME}/.netrc"; return 1; }
+        warn "removed dangling symlink at ${HOME}/.netrc"
+        return 0
+    fi
+
+    # mktemp's XXXXXX is what makes this collision-proof -- two calls in
+    # the same second (a retry, or two provisioning runs) get genuinely
+    # different files, so the second backup can never overwrite the first
+    # with whatever it had already replaced. The timestamp is decoration
+    # for a human skimming $HOME, not part of the safety property.
+    if ! backup=$(mktemp "$HOME/.netrc.bak-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
+        error "netrc_clear_path: failed to create a backup path for ${HOME}/.netrc"
+        return 1
+    fi
+    if ! cp "$HOME/.netrc" "$backup"; then
+        error "netrc_clear_path: failed to back up existing ${HOME}/.netrc"
+        rm -f "$backup"
+        return 1
+    fi
+    chmod 600 "$backup" || { error "netrc_clear_path: failed to chmod backup ${backup}"; return 1; }
+    warn "backed up existing ${HOME}/.netrc -> ${backup}"
+
+    # A *valid* symlink must be removed too, so the write that follows
+    # creates a plain regular file at $HOME/.netrc itself rather than
+    # following the link and overwriting whatever real file it happens to
+    # point at.
+    if [[ -L "$HOME/.netrc" ]]; then
+        rm -f "$HOME/.netrc" || { error "netrc_clear_path: failed to remove existing symlink at ${HOME}/.netrc"; return 1; }
+    fi
+}
+
+netrc_write() {
+    local user=$1 token=$2
+    [[ -n "$user"  ]] || { error "netrc_write: empty username"; return 1; }
+    [[ -n "$token" ]] || { error "netrc_write: empty token"; return 1; }
+
+    # Subshell so umask 077 is contained: lib/ files are sourced, not
+    # exec'd, so an unrestored umask would tighten every file this process
+    # creates for the rest of the run. A subshell cannot leak it on any
+    # exit path, which an explicit save/restore pair has to get right on
+    # every single one.
+    (
+        umask 077
+        netrc_clear_path || exit 1
+        if ! cat > "$HOME/.netrc" <<EOF
+machine github.com
+  login ${user}
+  password ${token}
+EOF
+        then error "netrc_write: failed to write ${HOME}/.netrc"; exit 1; fi
+    ) || return 1
+
+    chmod 600 "$HOME/.netrc" || { error "netrc_write: failed to chmod ${HOME}/.netrc"; return 1; }
+}
+
+github_verify_creds() {
+    local user=$1 token=$2 login
+    login=$(curl -sf -u "${user}:${token}" https://api.github.com/user \
+            | grep -oP '(?<="login": ")[^"]+' || true)
+    [[ -n "$login" ]] || { error "GitHub rejected those credentials"; return 1; }
+    success "authenticated as ${login}"
+}
+
+# Prompts only when there is no usable credential already.
+ensure_github_auth() {
+    netrc_has_github && { success "${HOME}/.netrc already has a github.com entry"; return 0; }
+    local user token
+    user=$(ask "GitHub username" "guidiamond")
+    read -rsp "$(echo -e "${BOLD}GitHub PAT (repo scope)${RESET}: ")" token; echo ""
+    # Without this, pressing Enter at the prompt fires a real request at
+    # api.github.com and reports back "GitHub rejected those credentials"
+    # -- true, but misleading about what actually happened. netrc_write's
+    # own empty-token guard never gets a chance to fire from this path,
+    # since github_verify_creds runs first.
+    [[ -n "$token" ]] || { error "ensure_github_auth: empty token"; return 1; }
+    github_verify_creds "$user" "$token" || return 1
+    netrc_write "$user" "$token" || return 1
+    success "wrote ${HOME}/.netrc (600)"
+}
+
+# --- clone ---------------------------------------------------------------
+
+# Clones first and authenticates only if that fails. ensure_github_auth used
+# to run unconditionally, *before* the clone, which demanded a PAT for a
+# public repository and so failed provision.sh's phase 1 outright for anyone
+# who could not produce one -- including an operator at a bare console. The
+# auth path is kept for the day the repository goes private; only when it runs
+# has changed.
+#
+# `if`, not `[[ ... ]] && { ... }`: on the common path (no clone yet) that
+# guard's status is 1 with nothing exempting it, so a caller running under
+# `set -e` aborted on this very first line and never reached the clone at all.
+# Nothing below leans on errexit either -- provision.sh reaches this through
+# step()'s `if "$@"`, and bash suspends errexit for the whole dynamic extent
+# of a condition context, so every command here is checked explicitly.
+dotfiles_clone() {
+    # -e, not -d: a git worktree's `.git` is a file holding `gitdir: ...`. A
+    # -d test calls that "not cloned yet" and falls through to a clone that
+    # cannot work -- git refuses a destination that already exists and is not
+    # empty -- after which the auth fallback blames credentials for a
+    # repository that is already there.
+    #
+    # Not `git rev-parse`, which is the more thorough question: from inside
+    # a parent repository it answers yes for a DOTFILES_DIR that is merely a
+    # subdirectory, which is a false positive this file test cannot have. The
+    # remaining gap is a stray `.git` that is not a repository at all, and
+    # that was equally true of -d.
+    if [[ -e "${DOTFILES_DIR}/.git" ]]; then
+        success "dotfiles already present at ${DOTFILES_DIR}"
+        return 0
+    fi
+
+    # Whether the destination was already there before this function touched
+    # anything. It is the only thing that makes the cleanup below safe.
+    local preexisting=0
+    if [[ -e "$DOTFILES_DIR" ]]; then
+        preexisting=1
+    fi
+
+    # No netrc check in front of this. When ~/.netrc already holds a
+    # github.com entry, this attempt is not "anonymous" in the first place --
+    # git's HTTP transport reads netrc on its own, so it IS the authenticated
+    # attempt, and there is nothing for a netrc branch to skip ahead to. (The
+    # old code relied on that same behaviour: ensure_github_auth only ever
+    # wrote the file, and never handed a credential to git.) The one cost is
+    # on a private repo whose stored credential has gone stale, where the
+    # retry below re-runs an identical clone once. That is a wasted round
+    # trip, not a wrong answer, and it buys a single code path.
+    info "Cloning dotfiles..."
+    if git clone "$DOTFILES_REPO" "$DOTFILES_DIR"; then
+        success "cloned to ${DOTFILES_DIR}"
+        return 0
+    fi
+
+    # An orderly git failure cleans up after itself -- repository-not-found,
+    # auth refused and connection-refused all leave nothing behind (measured,
+    # git 2.55.0). A clone killed mid-transfer cannot: it leaves the
+    # destination with a .git inside it, and the retry below would then die
+    # with "destination path already exists and is not an empty directory",
+    # reporting an auth problem that isn't one.
+    #
+    # Removed ONLY when this function is what just created it. A directory
+    # that was already there when we started is the user's, holds whatever
+    # they put in it, and is left exactly as found -- an unguarded `rm -rf
+    # "$DOTFILES_DIR"` here would be a data-loss bug, not a cleanup.
+    if (( ! preexisting )) && [[ -d "$DOTFILES_DIR" ]]; then
+        rm -rf "$DOTFILES_DIR" || {
+            error "failed to clear the partial clone at ${DOTFILES_DIR}"
+            return 1
+        }
+    fi
+
+    # Say what is actually being attempted. A clone can fail for reasons no
+    # credential can fix -- no network, dead DNS, a GitHub outage -- and a
+    # bare "trying authenticated" would send that user hunting for a PAT that
+    # cannot help.
+    warn "could not clone ${DOTFILES_REPO} without credentials"
+    warn "expected if the repository is now private; if the network or DNS is down instead, no token will help"
+    info "Retrying with GitHub authentication..."
+    ensure_github_auth || return 1
+    git clone "$DOTFILES_REPO" "$DOTFILES_DIR" || { error "failed to clone ${DOTFILES_REPO}"; return 1; }
+    success "cloned to ${DOTFILES_DIR}"
+}
+
+# --- staging into a freshly installed root ---------------------------------
+
+# stage_dotfiles <repo-root> <target-root> <username>
+#
+# Copies the clone install.sh is running from into the new system, so stage 2
+# needs no second GitHub authentication. Takes its paths rather than reading
+# install.sh's globals: every other lib/ function does (btrfs_mount_all,
+# link_timezone), and a hardcoded /mnt is untestable. Repo first, target
+# second, matching stow_conflicts and stow_apply below.
+#
+# MUST run *after* arch-chroot has created the user. `useradd -m` does nothing
+# at all to a home directory that already exists -- verified: it warns "the
+# home directory ... already exists. Not copying any file from skel directory
+# into it", and it resets neither the owner nor the mode. So staging first
+# leaves the operator with a root-owned $HOME on whatever mode the copy
+# happened to make, and no /etc/skel.
+#
+# Nothing here is fatal. By this point the machine boots and stage 2 can clone
+# the repo itself, so every failure path warns with what to do instead rather
+# than taking down a working install.
+stage_dotfiles() {
+    local repo_root=$1 target=$2 username=$3
+    local home="${target}/home/${username}" dest="${target}/home/${username}/.dotfiles"
+
+    if [[ ! -d "$home" ]]; then
+        warn "${home} does not exist -- stage 2 will need a fresh clone"
+        return 0
+    fi
+    if [[ -e "$dest" ]]; then
+        warn "${dest} already exists; leaving it alone"
+        return 0
+    fi
+    if [[ -z "$repo_root" || ! -d "$repo_root" ]]; then
+        warn "no repository to copy from ('${repo_root}') -- stage 2 will need a fresh clone"
+        return 0
+    fi
+
+    info "Copying ${repo_root} to /home/${username}/.dotfiles..."
+    if ! cp -a "$repo_root" "$dest"; then
+        warn "could not copy the repository; clone it as ${username} before stage 2"
+        return 0
+    fi
+    # cp -a preserves the source's ownership, and the live ISO's uid numbering
+    # is not the new root's. Chowned through the chroot so the name resolves
+    # against the new root's passwd rather than the ISO's.
+    arch-chroot "$target" chown -R "${username}:${username}" "/home/${username}/.dotfiles" \
+        || warn "could not chown /home/${username}/.dotfiles to ${username}"
+    success "dotfiles staged at /home/${username}/.dotfiles"
+}
+
+# --- stow ------------------------------------------------------------------
+
+# Real files (not symlinks) that stow would refuse to overwrite, plus repo
+# entries that are themselves symlinks-to-files (this dotfiles repo has
+# several, e.g. .config/fzf/*.zsh). Symlinks-to-*directories* and plain
+# directories are deliberately excluded: stow folds those into an existing
+# real target directory instead of conflicting on them, so flagging one
+# would make stow_apply relocate the user's whole real directory for no
+# reason. See test/dotfiles.bats for the exact shapes this is verified
+# against, including the one case left deliberately unhandled (a real file
+# blocking a symlink-to-directory entry) and why.
+#
+# Paths that already resolve back into the package are excluded, which is what
+# makes a re-run a genuine no-op -- see stow_path_is_package_file.
+
+# True when <abs> already resolves to a file inside the stow package: the path
+# leads back into the repository rather than at anything the user owns, so it
+# is emphatically not something to "back up" out of the way.
+#
+# This is what a *folded* directory produces. GNU stow folds whenever the
+# matching target directory does not already exist, making one symlink
+# ($HOME/.config -> <repo>/dotfiles/.config) instead of a link per leaf, and
+# every repo file underneath is then reachable at $HOME/<rel> as a real,
+# non-symlink file -- the path travels through the symlinked ancestor straight
+# back into the repo. `-e && ! -L` alone called those conflicts, so a second
+# run moved the repository's own files into a backup directory and left the
+# surviving links pointing at nothing, all while reporting [OK] and exiting 0.
+#
+# Two tests, because the ancestor can be aimed anywhere:
+#
+#   -ef  is the common case and needs no subprocess: same device and inode as
+#        the package's own entry for this exact path, which is precisely what
+#        folding yields, at any depth.
+#
+#   the prefix test is the general one. An ancestor symlink aimed at a
+#        *different* subtree of the package still lands on a real repo file,
+#        which -ef alone would call a conflict and relocate. The invariant
+#        worth holding is the broader one: a file that lives inside the
+#        package is never stow_apply's to move, however it became reachable.
+#
+# A realpath that cannot answer leaves the path classified as a conflict --
+# the pre-existing behaviour, which backs the file up rather than deleting it.
+stow_path_is_package_file() {
+    local abs=$1 rel=$2 pkgdir=$3 pkgreal=$4 absreal
+    [[ "$abs" -ef "${pkgdir}/${rel}" ]] && return 0
+    absreal=$(realpath -- "$abs" 2>/dev/null) || return 1
+    [[ "$absreal" == "${pkgreal}/"* ]]
+}
+
+stow_conflicts() {
+    local repo=$1 target=$2 pkgdir pkgreal rel abs listing
+    pkgdir="${repo}/${STOW_PACKAGE}"
+    [[ -d "$pkgdir" ]] || { error "stow_conflicts: no such package dir: ${pkgdir}"; return 1; }
+
+    # Resolved once, outside the loop: every comparison below is against this,
+    # and it has to be the symlink-free form or the prefix test never matches.
+    if ! pkgreal=$(realpath -- "$pkgdir"); then
+        error "stow_conflicts: failed to resolve ${pkgdir}"
+        return 1
+    fi
+
+    # Captured via command substitution, not streamed straight into the
+    # while loop's process substitution, specifically so find's own exit
+    # status is visible here: a `cd && find` that fails partway through
+    # (e.g. a subtree it can't read) must not be reported as "no
+    # conflicts" at status 0 -- that would hand stow_apply a silently
+    # truncated list and let it charge ahead anyway.
+    if ! listing=$(cd "$pkgdir" && find . \( -type f -o \( -type l -a ! -xtype d \) \) -printf '%P\n'); then
+        error "stow_conflicts: failed to scan ${pkgdir}"
+        return 1
+    fi
+
+    while IFS= read -r rel; do
+        [[ -z "$rel" ]] && continue
+        abs="${target}/${rel}"
+        # `if`, not a bare `[[ ]] && echo`: the non-match case (the common
+        # one) must not leave a non-zero status as the last statement run,
+        # or a caller with `set -e` would abort mid-scan on the first file
+        # that isn't a conflict. The added test stays inside the same `if`
+        # condition for that reason -- everything in a condition context is
+        # exempt from errexit, so a false result here cannot abort the scan.
+        if [[ -e "$abs" && ! -L "$abs" ]] \
+           && ! stow_path_is_package_file "$abs" "$rel" "$pkgdir" "$pkgreal"; then
+            echo "$rel"
+        fi
+    done <<< "$listing"
+    return 0
+}
+
+stow_apply() {
+    local repo=$1 target=$2 backup="" rel conflicts
+
+    # Captured via command substitution: `done < <(stow_conflicts ...)`
+    # would only expose the while loop's own status, not stow_conflicts'
+    # -- a scan failure would pass through here silently.
+    if ! conflicts=$(stow_conflicts "$repo" "$target"); then
+        error "stow_apply: could not determine conflicts for ${repo} -> ${target}"
+        return 1
+    fi
+
+    while IFS= read -r rel; do
+        [[ -z "$rel" ]] && continue
+        if [[ -z "$backup" ]]; then
+            # Created lazily, on the first real conflict, so a clean run
+            # leaves nothing behind. mktemp's XXXXXX is what makes the
+            # name collision-proof across two same-second runs -- a
+            # same-second retry must not let the second run's mv overwrite
+            # the first run's already-backed-up file inside what would
+            # otherwise be the identical directory name. The timestamp is
+            # decoration for a human skimming $HOME, not part of the
+            # safety property.
+            if ! backup=$(mktemp -d "${target}/.dotfiles-backup-$(date +%Y%m%d-%H%M%S)-XXXXXX"); then
+                error "stow_apply: failed to create a backup dir under ${target}"
+                return 1
+            fi
+        fi
+        # Stop at the first failure instead of limping on: with several
+        # conflicts, continuing past a failed mkdir/mv would relocate the
+        # ones that did succeed while stow (below) still aborts wholesale,
+        # stranding files in the backup dir with nothing linked and a
+        # "backed up" message that was never true for the failed one. Name
+        # the backup dir in both messages: a user reading "failed to back
+        # up .b" has no way to know ".a" (backed up before the failure) is
+        # already sitting there with nothing linked, unless we say where.
+        if ! mkdir -p "${backup}/$(dirname "$rel")"; then
+            error "stow_apply: failed to create backup dir for ${rel} under ${backup}"
+            return 1
+        fi
+        if ! mv "${target}/${rel}" "${backup}/${rel}"; then
+            error "stow_apply: failed to back up ${rel} (earlier files, if any, are under ${backup})"
+            return 1
+        fi
+        warn "backed up ${rel} -> ${backup}/${rel}"
+    done <<< "$conflicts"
+
+    # -R restows, so re-running cleans up links whose targets moved.
+    # Never --adopt: that pulls machine state into the repo silently.
+    if stow -R -t "$target" -d "$repo" "$STOW_PACKAGE"; then
+        success "dotfiles stowed into ${target}"
+    else
+        error "stow failed for ${STOW_PACKAGE} -> ${target}"
+        return 1
+    fi
+}

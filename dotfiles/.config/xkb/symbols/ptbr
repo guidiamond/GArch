@@ -1,0 +1,52 @@
+// US layout with Portuguese accents folded in, as a self-contained layout.
+//
+// This is the source of truth. It gets installed to
+// /usr/share/X11/xkb/symbols/ptbr by ./install.sh -- edit here, then re-run
+// that script.
+//
+// It must stay self-contained (hence the `include "us(basic)"` below) because
+// it is selected via XkbLayout in /etc/X11/xorg.conf.d/00-keyboard.conf, which
+// names exactly one layout. That indirection is the whole point: the X server
+// applies this to every keyboard *as the device is added*, so a udev reload or
+// a hotplug re-applies it instead of silently reverting to plain `us`.
+//
+// Right Alt becomes AltGr (ISO_Level3_Shift), which is the modifier that
+// actually selects shift levels 3 and 4. Left Alt stays a normal Alt so the
+// sxhkd bindings (super + alt + ...) are untouched.
+//
+// Level 2 of <TLDE> is left as dead_tilde on purpose: Shift+` then a vowel
+// gives a~, and Shift+` then Space gives a literal ~.
+
+partial alphanumeric_keys
+xkb_symbols "basic" {
+
+    include "us(basic)"
+    include "level3(ralt_switch)"
+
+    // Vowels: AltGr gives the acute form directly, no dead key needed.
+    key <AC01> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ a, A, aacute,   Aacute   ] };
+    key <AD03> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ e, E, eacute,   Eacute   ] };
+    key <AD08> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ i, I, iacute,   Iacute   ] };
+    key <AD09> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ o, O, oacute,   Oacute   ] };
+    key <AD07> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ u, U, uacute,   Uacute   ] };
+
+    // Consonants.
+    key <AB03> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ c, C, ccedilla, Ccedilla ] };
+    key <AB06> { type[Group1]="FOUR_LEVEL_ALPHABETIC", [ n, N, ntilde,   Ntilde   ] };
+
+    // Dead keys for the combinations that have no direct slot: circumflex
+    // (a^, e^, o^) and grave (a`).
+    //
+    // <AE06> mirrors <TLDE> below: the dead key sits on level 2, so Shift+6
+    // then a vowel gives a^, and Shift+6 then Space gives a literal ^.
+    // Levels 3 and 4 keep a literal ^ on AltGr+6 for when Space is awkward
+    // (regexes, `git rev-parse HEAD^`, vim motions).
+    key <AE06> { type[Group1]="FOUR_LEVEL",
+                 [ 6, dead_circumflex, asciicircum, asciicircum ] };
+    key <TLDE> { type[Group1]="FOUR_LEVEL",
+                 [ grave, dead_tilde, dead_grave, asciitilde ] };
+
+    // Apostrophe and quote keep their literal meaning at levels 1 and 2.
+    key <AC11> { type[Group1]="FOUR_LEVEL",
+                 [ apostrophe, quotedbl, dead_acute, dead_diaeresis ] };
+};

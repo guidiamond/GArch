@@ -1,8 +1,6 @@
 # vim: filetype=i3config
 # Execs {{{
 exec --no-startup-id xss-lock -- $HOME/.config/i3/lock.sh
-exec --no-startup-id setxkbmap -model abnt -layout us -variant intl
-exec --no-startup-id xmodmap ~/.Xmodmap
 exec --no-startup-id nm-applet
 exec --no-startup-id nitrogen --restore 
 exec --no-startup-id $HOME/.config/screenlayout/home-monitor.sh

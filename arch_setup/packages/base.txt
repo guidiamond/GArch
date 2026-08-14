@@ -1,0 +1,18 @@
+# Pacstrap set. Installed by install.sh into /mnt.
+# Microcode (intel-ucode / amd-ucode) is detected and appended at runtime.
+base
+base-devel
+linux
+linux-firmware
+linux-headers
+btrfs-progs
+sudo
+vim
+git
+stow
+zsh
+networkmanager
+grub
+efibootmgr
+dosfstools
+zram-generator

@@ -1,0 +1,13 @@
+# AUR packages, installed one at a time by provision.sh.
+# Failures here are reported, not fatal.
+zsh-theme-powerlevel10k-git
+devour-git
+dragon-drop-git
+eww
+siji-git
+ttf-icomoon-feather
+ttf-unifont
+urlview
+mutt-wizard-git
+simplescreenrecorder-git
+gtk2fontsel

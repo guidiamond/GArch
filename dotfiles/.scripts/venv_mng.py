@@ -1,15 +1,14 @@
-from os import walk, path, listdir, getlogin
+from os import walk, path, listdir
 from os.path import isfile, join
 import subprocess
 
 
-USER = getlogin()
 # onlyfiles = [f for f in listdir(mypath) if isfile(join(mypath, f))]
 class VenvManager:
     def __init__(self):
         self.selected_option = "0"
-        self.venv_path = path.abspath(f"/home/{USER}/.virtualenv")
-        self.zshrc_file = path.abspath(f"/home/{USER}/.config/zsh/zshrc")
+        self.venv_path = path.expanduser("~/.virtualenv")
+        self.zshrc_file = path.expanduser("~/.config/zsh/zshrc")
         self.select_menu()
         print("============================")
         self.run_option()
@@ -72,15 +71,17 @@ class VenvManager:
         self.save_new_env(dir_names[selected_env])
 
     def save_new_env(self, env_name):
-        # new env dir eg: $HOME/.virtualenv/NEW_ENV
-        venv_dir = "{0}/{1}".format(self.venv_path, env_name)
         # read zshrc file
         with open(self.zshrc_file, "r") as file:
             types_content = file.readlines()
         # find and replace the python_env export
         for l in range(len(types_content)):
             if types_content[l].find("export PYTHON_ENV") != -1:
-                types_content[l] = 'export PYTHON_ENV="{0}"\n'.format(venv_dir)
+                # Write $HOME literally so zshrc stays portable across users;
+                # zsh expands it at source time.
+                types_content[l] = 'export PYTHON_ENV="$HOME/.virtualenv/{0}"\n'.format(
+                    env_name
+                )
         # save file
         with open(self.zshrc_file, "w") as file:
             file.writelines(types_content)
