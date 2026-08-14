@@ -1,0 +1,20 @@
+#!/bin/sh
+MONITORS=($(xrandr --listactivemonitors | awk '{print $4}'))
+
+# Only works with 2 monitors
+if [ ${#MONITORS[@]} -lt 2 ]; then
+  exit 0
+fi
+
+MAIN_MONITOR="${MONITORS[0]}"
+WORKSPACE_NUMBER=${1}
+
+FOCUSED_MONITOR=$(bspc query -M -d focused --names)
+
+NOT_FOCUSED_MONITOR=${MONITORS[1]}
+
+if [ $FOCUSED_MONITOR != $MAIN_MONITOR ]; then
+  NOT_FOCUSED_MONITOR=${MONITORS[0]}
+fi
+
+bspc node focused -d $NOT_FOCUSED_MONITOR:\^${WORKSPACE_NUMBER} --focus

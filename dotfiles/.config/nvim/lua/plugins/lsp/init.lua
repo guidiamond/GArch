@@ -1,8 +1,3 @@
-local status_ok, _ = pcall(require, "lspconfig")
-if not status_ok then
-  return
-end
-
-require "plugins.lsp.configs"
-require("plugins.lsp.handlers").setup()
-require "plugins.lsp.null-ls"
+require("plugins.lsp.handlers").setup() -- Diagnostics + LspAttach autocmd
+require "plugins.lsp.mason" -- Sets up mason, mason-lspconfig, and vim.lsp.config/enable
+require "plugins.lsp.none-ls"

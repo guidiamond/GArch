@@ -1,18 +1,25 @@
-#! /bin/sh 
+#! /bin/sh
 USERNAME=$(echo $USER)
 # Startup #{{{
-"/home/${USERNAME}/.config/polybar_ex/launch.sh" & \
-"/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
-  sxhkd &
+"/home/${USERNAME}/.config/eww/launch_bar.sh" & \
+    "/home/${USERNAME}/.config/bspwm/bsp_configure_monitors.sh" & \
+
+# Start sxhkd only if not already running, so `bspc wm -r` (which re-runs this
+# file) does not stack duplicate hotkey daemons. Duplicates fire every keybind
+# N times, multiplying bspc commands and amplifying event bursts.
+pgrep -x sxhkd >/dev/null || sxhkd &
+
+# Start bsptab daemon for i3-style tabbed windows
+pkill -f "bsptab daemon" 2>/dev/null
+"/home/${USERNAME}/.scripts/bspwm/bsptab" daemon &
 #}}}
 # /home/diamond/.config/polybar/launch.sh &
 
 # Sizing #{{{
 bspc config window_gap                    10
-bspc config border_width                  3 
+bspc config border_width                  3
 
-bspc config top_padding                   40
-bspc config bottom_padding                10
+# top/bottom padding managed by launch_bar.sh based on bar position
 bspc config left_padding                  0
 bspc config right_padding                 0
 #}}}
@@ -61,6 +68,8 @@ bspc config urgent_border_color 	      "#dd2727"
 #polybar hidden when fullscreen for vlc, youtube, mpv ...
 #find out the name of your monitor with xrandr
 xdo below -t $(xdo id -n root) $(xdo id -a /home/diamond/.config/polybar_ex/launch.sh)
+
+bspc rule -a electron state=floating
 
 #bspc rule -a Gimp desktop='^8' state=floating follow=on
 #bspc rule -a Chromium desktop='^2'

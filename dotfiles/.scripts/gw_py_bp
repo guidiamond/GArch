@@ -1,0 +1,292 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import shutil
+import argparse
+from pathlib import Path
+
+# --- Colors for pretty output ---
+GREEN = "\033[92m"
+BLUE = "\033[94m"
+CYAN = "\033[96m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
+
+def log(msg, color=RESET):
+    print(f"{color}{msg}{RESET}")
+
+
+def run_command(command, cwd=None, capture_output=True):
+    """Runs a shell command and returns the result."""
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            shell=True,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE if capture_output else None,
+            stderr=subprocess.PIPE if capture_output else None,
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        return None
+
+
+def check_is_git_repo():
+    """Constraints: It should only be possible to run it in a github repo."""
+    if run_command("git rev-parse --git-dir") is None:
+        log("Error: This command must be run inside a Git repository.", RED)
+        sys.exit(1)
+
+
+def get_main_repo_root():
+    """
+    Finds the absolute path of the 'main' worktree.
+    The first block of 'git worktree list --porcelain' is always the main repo.
+    """
+    output = run_command("git worktree list --porcelain")
+    if not output:
+        sys.exit(1)
+
+    # The first line is 'worktree /absolute/path/to/main'
+    first_line = output.splitlines()[0]
+    if first_line.startswith("worktree "):
+        return first_line.split(" ", 1)[1]
+
+    log("Error: Could not determine main repository root.", RED)
+    sys.exit(1)
+
+
+def get_default_branch():
+    """Attempts to guess the default branch (master or main)."""
+    if run_command("git rev-parse --verify master"):
+        return "master"
+    if run_command("git rev-parse --verify main"):
+        return "main"
+    return None
+
+
+def ensure_setup(root_dir, worktrees_dir):
+    """Checks for .worktrees and updates .gitignore in the ROOT directory."""
+    if not os.path.exists(worktrees_dir):
+        os.makedirs(worktrees_dir)
+        log(f"Created directory: {worktrees_dir}", GREEN)
+
+    gitignore_path = os.path.join(root_dir, ".gitignore")
+    ignore_entry = ".worktrees/"
+
+    if os.path.exists(gitignore_path):
+        with open(gitignore_path, "r") as f:
+            content = f.read()
+        if ignore_entry not in content:
+            with open(gitignore_path, "a") as f:
+                if not content.endswith("\n") and content:
+                    f.write("\n")
+                f.write(f"{ignore_entry}\n")
+            log(f"Added {ignore_entry} to .gitignore", GREEN)
+    else:
+        with open(gitignore_path, "w") as f:
+            f.write(f"{ignore_entry}\n")
+        log(f"Created .gitignore and added {ignore_entry}", GREEN)
+
+
+def branch_exists(branch_name):
+    """Checks if a branch exists locally."""
+    return run_command(f"git show-ref --verify refs/heads/{branch_name}") is not None
+
+
+def branch_is_checked_out(branch_name):
+    """Checks if a branch is already checked out in ANY worktree."""
+    output = run_command("git worktree list --porcelain")
+    if output:
+        return f"refs/heads/{branch_name}" in output
+    return False
+
+
+# --- Commands ---
+
+
+def cmd_help(args=None, root_dir=None, worktrees_dir=None):
+    """Prints a detailed help message."""
+    help_text = f"""
+{BOLD}Git Worktree Manager (gw){RESET}
+
+A CLI tool to manage git worktrees in a centralized '.worktrees' directory.
+It ensures all new worktrees are based on the main project root, regardless of where you run the command.
+
+{BOLD}USAGE{RESET}
+  {GREEN}gw{RESET} {CYAN}<command>{RESET} [options]
+
+{BOLD}COMMANDS{RESET}
+
+  {GREEN}create{RESET} {YELLOW}<branch_name> [folder_name]{RESET}
+      Creates a new worktree and branch.
+      
+      {BOLD}How it works:{RESET}
+      1. Finds the root of your repository.
+      2. Creates a folder in {BLUE}.worktrees/<folder_name>{RESET}.
+         (If folder_name is not provided, it uses the branch name. 
+          If branch is 'feature/abc', folder becomes 'abc').
+      3. {BOLD}Branch Logic:{RESET}
+         - If branch {RED}doesn't exist{RESET}: Creates it from 'master' or 'main'.
+         - If branch {YELLOW}exists{RESET}: Checks it out (unless it's already open elsewhere).
+      4. {BOLD}Environment:{RESET}
+         - Copies all {BLUE}.env*{RESET} files from the root repo to the new worktree.
+
+  {GREEN}delete{RESET} {YELLOW}<folder_name> [folder_name...]{RESET}
+      Removes one or more worktrees by their folder name.
+      
+      {BOLD}Example:{RESET}
+      gw delete branch-1 setup-ui
+      (Deletes .worktrees/branch-1 and .worktrees/setup-ui)
+
+  {GREEN}help{RESET}
+      Shows this help message.
+
+{BOLD}EXAMPLES{RESET}
+  gw create feature/login
+  gw create feature/login my-login-folder
+  gw delete my-login-folder
+    """
+    print(help_text)
+
+
+def cmd_create(args, root_dir, worktrees_dir):
+    branch_name = args.branch_name
+    folder_name = args.folder_name
+
+    if not folder_name:
+        folder_name = branch_name.split("/")[-1] if "/" in branch_name else branch_name
+
+    target_path = os.path.join(worktrees_dir, folder_name)
+
+    if os.path.exists(target_path):
+        log(f"Error: Target folder '{target_path}' already exists.", RED)
+        sys.exit(1)
+
+    exists = branch_exists(branch_name)
+    checked_out = branch_is_checked_out(branch_name)
+
+    git_cmd = []
+
+    if exists:
+        if checked_out:
+            log(
+                f"Error: Branch '{branch_name}' exists and is already checked out.", RED
+            )
+            sys.exit(1)
+        else:
+            log(f"Branch '{branch_name}' exists. Creating worktree...", YELLOW)
+            git_cmd = ["git", "worktree", "add", target_path, branch_name]
+    else:
+        base_branch = get_default_branch()
+        if base_branch:
+            log(f"Creating '{branch_name}' based on '{base_branch}'...", GREEN)
+            git_cmd = [
+                "git",
+                "worktree",
+                "add",
+                "-b",
+                branch_name,
+                target_path,
+                base_branch,
+            ]
+        else:
+            log(f"Warning: Could not find master/main. Branching off HEAD.", YELLOW)
+            git_cmd = ["git", "worktree", "add", "-b", branch_name, target_path]
+
+    try:
+        subprocess.run(git_cmd, check=True)
+    except subprocess.CalledProcessError:
+        log("Failed to create worktree.", RED)
+        sys.exit(1)
+
+    log("Copying .env files...", YELLOW)
+    env_files = [
+        f
+        for f in os.listdir(root_dir)
+        if f.startswith(".env") and os.path.isfile(os.path.join(root_dir, f))
+    ]
+    copied_count = 0
+    for env_file in env_files:
+        shutil.copy2(
+            os.path.join(root_dir, env_file), os.path.join(target_path, env_file)
+        )
+        copied_count += 1
+
+    log(f"Success! Worktree ready at: {target_path}", GREEN)
+    log(f"Copied {copied_count} .env file(s).", GREEN)
+
+
+def cmd_delete(args, root_dir, worktrees_dir):
+    for folder in args.folder_names:
+        path = os.path.join(worktrees_dir, folder)
+        if not os.path.exists(path):
+            log(f"Warning: '{path}' not found.", YELLOW)
+            continue
+
+        try:
+            subprocess.run(["git", "worktree", "remove", path], check=True)
+            log(f"Deleted {folder}", GREEN)
+        except subprocess.CalledProcessError:
+            log(f"Failed to delete {folder}. Try manual cleanup.", RED)
+
+
+def main():
+    # 1. Intercept Help or No Args immediately
+    # This prevents the "required argument" error when running just 'gw'
+    # and allows 'gw --help' to run without needing to be in a git repo.
+    if len(sys.argv) == 1 or (
+        len(sys.argv) > 1 and sys.argv[1] in ["--help", "-h", "help"]
+    ):
+        cmd_help()
+        sys.exit(0)
+
+    # 2. Constraints Check
+    check_is_git_repo()
+
+    # 3. Setup Paths
+    root_dir = get_main_repo_root()
+    worktrees_dir = os.path.join(root_dir, ".worktrees")
+    ensure_setup(root_dir, worktrees_dir)
+
+    # 4. Configure Argparse
+    # add_help=False suppresses default argparse help so our custom one handles it
+    parser = argparse.ArgumentParser(
+        prog="gw", description="Git Worktree Manager", add_help=False
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Create Command
+    create_parser = subparsers.add_parser("create", help="Create a new worktree")
+    create_parser.add_argument("branch_name", help="Name of the branch")
+    create_parser.add_argument("folder_name", nargs="?", help="Optional folder name")
+
+    # Delete Command
+    delete_parser = subparsers.add_parser(
+        "delete", help="Delete worktrees by folder name"
+    )
+    delete_parser.add_argument(
+        "folder_names", nargs="+", help="Folder names within .worktrees to delete"
+    )
+
+    # Help Command (for 'gw help')
+    help_parser = subparsers.add_parser("help", help="Show detailed help")
+
+    args = parser.parse_args()
+
+    if args.command == "create":
+        cmd_create(args, root_dir, worktrees_dir)
+    elif args.command == "delete":
+        cmd_delete(args, root_dir, worktrees_dir)
+    elif args.command == "help":
+        cmd_help(args, root_dir, worktrees_dir)
+
+
+if __name__ == "__main__":
+    main()

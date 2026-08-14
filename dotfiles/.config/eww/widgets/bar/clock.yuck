@@ -1,0 +1,25 @@
+;; Clock widget — click to toggle between date+time and seconds; right-click for calendar
+(defvar clock-mode 0)
+(defvar calendar-visible false)
+
+(defpoll clock-datetime :interval "1s" `date '+%d/%m %H:%M'`)
+(defpoll clock-seconds :interval "1s" `date '+%H:%M:%S'`)
+
+(defwidget clock []
+  (button :class "clock"
+          :onclick "eww update clock-mode=$(( (${clock-mode} + 1) % 2 ))"
+          :onrightclick "~/.config/eww/scripts/toggle_calendar.sh"
+    {clock-mode == 0 ? clock-datetime : clock-seconds}))
+
+(defwidget calendar-widget []
+  (box :class "calendar-container" :orientation "vertical" :space-evenly false :spacing 8
+    (calendar :class "cal" :show-heading true :show-day-names true)))
+
+(defwindow calendar-popup
+           :geometry (geometry :x "85%"
+                               :y "48px"
+                               :anchor "top left")
+           :stacking "overlay"
+           :windowtype "dialog"
+           :wm-ignore true
+  (calendar-widget))

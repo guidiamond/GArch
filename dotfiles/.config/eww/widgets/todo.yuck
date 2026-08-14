@@ -1,0 +1,47 @@
+(defpoll todoist-tasks :interval "60s"
+                      :initial "[]"
+  `~/.config/eww/scripts/todoist.sh fetch`)
+
+(defwidget todo-item [task]
+  (box :class "todo-item ${task.priority == 4 ? 'priority-urgent' :
+                           task.priority == 3 ? 'priority-high' :
+                           task.priority == 2 ? 'priority-medium' : ''}"
+       :orientation "horizontal" :space-evenly false
+    (box :class "priority-bar ${task.priority == 4 ? 'bar-urgent' :
+                                task.priority == 3 ? 'bar-high' :
+                                task.priority == 2 ? 'bar-medium' : 'bar-default'}"
+      "")
+    (box :orientation "vertical" :space-evenly false :class "todo-text" :hexpand true
+      (label :class "todo-content" :text {task.content} :halign "start" :limit-width 45 :wrap false)
+      (label :class "todo-due"
+             :text {task.due != "null" && task.due != "" ? "  ${task.due}" : ""}
+             :halign "start"
+             :visible {task.due != "null" && task.due != ""}))
+    (button :class "todo-check"
+            :onclick "~/.config/eww/scripts/todoist.sh close '${task.id}'"
+      "")))
+
+(defwidget todo-list []
+  (box :class "todo-container" :orientation "vertical" :space-evenly false
+    (box :class "todo-header" :orientation "horizontal" :space-evenly false
+      (label :class "todo-icon" :text "")
+      (label :class "todo-title" :text "Tasks" :halign "start")
+      (box :hexpand true "")
+      (label :class "todo-count" :text {arraylength(todoist-tasks) > 0 ? "${arraylength(todoist-tasks)}" : ""})
+      (button :class "todo-refresh"
+              :onclick "eww update todoist-tasks=\"$(~/.config/eww/scripts/todoist.sh fetch)\""
+        ""))
+    (scroll :class "todo-scroll" :vscroll true :hscroll false :height 420
+      (box :orientation "vertical" :space-evenly false :class "todo-items"
+        (for task in todoist-tasks
+          (todo-item :task task))))))
+
+(defwindow todo
+           :geometry (geometry :x "10px"
+                               :y "50px"
+                               :width "380px"
+                               :anchor "top right")
+           :stacking "overlay"
+           :windowtype "dialog"
+           :wm-ignore true
+  (todo-list))

@@ -1,0 +1,11 @@
+;; Workspace widget — shows per-monitor workspaces (1-9, 0), click to switch, scroll to cycle
+;; Receives workspace data from a per-monitor deflisten variable.
+
+(defwidget workspaces [ws-data monitor]
+  (eventbox :onscroll "if [ '{}' = 'up' ]; then bspc desktop -f prev.local; else bspc desktop -f next.local; fi"
+    (box :class "workspaces" :orientation "horizontal" :space-evenly false :spacing 4
+      (for ws in ws-data
+        (button :class "ws-btn ${ws.focused ? 'ws-focused' : ws.urgent ? 'ws-urgent' : ws.occupied ? 'ws-occupied' : 'ws-empty'}"
+                :onclick "bspc desktop -f '${monitor}:^${ws.name}'"
+                :tooltip "Workspace ${ws.label}"
+          {ws.label})))))

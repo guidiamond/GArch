@@ -6,12 +6,23 @@
 .npmrc
 .gitconfig-dodo
 
+plugged/
+
+.serena/
+.luarc.json
+
+# Stray ~ directory
+~/
+
+# Machine-specific / auto-generated
 # Per-session X cookie. Was tracked, which made switching branches add or
 # remove the live $XAUTHORITY out from under the running session.
 dotfiles/.Xauthority
+.config/nvim/.claude/
 
-plugged/
-
+# Temp files
+dotfiles/.config/i3/temp_qr.png
+dotfiles/.config/i3/config copy
 
 ############################################
 #  Gitignore personal gitignore additions  #

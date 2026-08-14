@@ -7,7 +7,7 @@
 
 # Function Keys #{{{
 super + F1
-  bash ~/.config/i3/lock.sh
+  dm-tool lock
 
 super + F2
   bspc wm -r && pkill -USR1 -x sxhkd
@@ -65,7 +65,7 @@ super + {_} + {h,j,k,l}
 
 # change to workspace on focused monitor
 super + {_} + {1-9,0}
-  bspworkspace desktop '{1-9,10}'
+  bspgoto '{1-9,10}'
 
 # focus the node for the given path jump
 super + p + {1-9,0}
@@ -86,7 +86,7 @@ super + {grave,Tab}
 
 # focus or send to the given desktop
 super + shift + {1-9,0}
-	bspworkspace 'node -d' '{1-9,10}'
+  bspmovenodetoworkspace '{1-9,10}'
 
 
 #
@@ -99,8 +99,7 @@ super + ctrl + {h,j,k,l}
 
 # preselect the ratio
 super + ctrl + {1-9,0}
-  bspmove 'node -d' '{1-9,10}'
-  # bspc 'node -d' '{1-9,10}' --node
+	bspmovetoothermonitor '{1-9,10}'
 
 #}}}
 
@@ -111,8 +110,10 @@ super + ctrl + {1-9,0}
 # RESERVED   => Shift and Key in use
 
 # key Return
+#super + Return
+#	alacritty
 super + Return
-	alacritty
+	wezterm
 # key Space
 # cancel the preselection for the focused node
 super + ctrl + space
@@ -124,21 +125,26 @@ super + ctrl + shift + space
 # key Semicolon
 # key Delete
 super + Delete
-  alacritty -e htop
+#  alacritty -e htop
+  wezterm start htop
 # key A
 # key B
+# toggle eww bar position (top/bottom)
+super + shift + b
+  ~/.config/eww/scripts/toggle_bar_position.sh
 # key C
+# copy Claude Code's last reply to the clipboard
 # focus the next/previous node in the current desktop
 super + c
-  rofi -show calc -modi calc -no-show-match -no-sort
-super + {_,shift + }c
-  bspc node -f {next,prev}.local
+  rofi-calc-clipboard
+#super + {_,shift + }c
+#  bspc node -f {next,prev}.local
 
 super + {_,shift + }c
 	bspc node -f {next,prev}.local
 # key D
 super + shift + d
-  rofi_launcher
+  ~/.config/rofi/launchers/type-2/launcher.sh
 # key E
 # key F
 super + f
@@ -158,6 +164,9 @@ super + shift + i
 super + m
 	bspc desktop -l next
 # key N
+super + n
+  takeScreenshot
+#  bsptab next
 # key O
 super + o
   bspc monitor -f next
@@ -174,25 +183,43 @@ super + shift + q
   bspc node -c
 # quit/restart bspwm
 super + shift + r
-  alacritty -e ranger
+  wezterm start ranger
+  # alacritty -e ranger
 super + alt + {q,r}
 	bspc {quit,wm -r}
 # key R
-# key S
+super + r
+  /home/guidiamond/.pyenv/versions/3.12.8/bin/python /home/guidiamond/dodo/word_to_text/voice_to_clipboard.py -d
+# key S - toggle between floating and tiled
 super + s
-  bspc node -t floating
+  if bspc query -N -n focused.floating > /dev/null; then bspc node -t tiled; else bspc node -t floating; fi
 # key T
-# Add focused window to a tabbed instance in given direction
+# Toggle eww todo widget on focused monitor
+super + shift + t
+  eww open --toggle --screen "$(bspc query -M -m focused --names)" todo
+
+# Tabbed windows (i3-style tabs via bsptab daemon)
+# Add neighbor in direction to focused tab group
 super + t; {h,j,k,l}
-    bsptab add {west,south,north, east} $(bspc query -N -n focused)
-# Remove one tab from tabbed
+    bsptab add {west,south,north,east}
+# Remove active tab from group
 super + t; r
-    tabbed=$(bspc query -N -n focused); \
-    child=$(bsptab list $tabbed | head -n1); \
-    bsptab remove $child
+    bsptab remove
+# Create tab group from focused window
+super + t; t
+    bsptab create
+# Switch tabs
+super + t; {n,p}
+    bsptab {next,prev}
+# Focus tab by number
+super + t; {1-9}
+    bsptab focus {1-9}
+# Close active tab
+super + t; q
+    bsptab close
 # set the window state
 #super + {t,shift + t,s}
-#	bspc node -t {tiled,pseudo_tiled,floating}
+  bspc node -t {tiled,pseudo_tiled,floating}
 # key U
 super + shift + u
   brave
@@ -212,8 +239,8 @@ super + x
 super + y
 	bspc node newest.marked.local -n newest.!automatic.local
 # key Z
-super + ctrl + {m,x,y,z}
-	bspc node -g {marked,locked,sticky,private}
+#super + ctrl + {m,x,y,z}
+#	bspc node -g {marked,locked,sticky,private}
 super + z
   bspc node -g hidden=on
 super + shift +  z
@@ -221,3 +248,10 @@ super + shift +  z
 # }}}
 
 # vim:foldmethod=marker:foldlevel=0
+
+
+
+
+
+super + shift + k
+	claude-copy-last

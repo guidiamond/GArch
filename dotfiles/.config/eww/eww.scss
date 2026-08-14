@@ -1,0 +1,830 @@
+// Catppuccin Mocha palette
+$bg: #1e1e2e;
+$surface: #313244;
+$overlay: #45475a;
+$text: #cdd6f4;
+$subtext: #a6adc8;
+$muted: #585b70;
+$accent: #89b4fa;
+$green: #a6e3a1;
+$red: #f38ba8;
+$yellow: #f9e2af;
+$peach: #fab387;
+$sapphire: #74c7ec;
+$teal: #94e2d5;
+$lavender: #b4befe;
+$mauve: #cba6f7;
+$sky: #89dceb;
+
+// Main container
+.todo-container {
+  background-color: $bg;
+  border: 1px solid $overlay;
+  border-radius: 14px;
+  padding: 16px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+}
+
+// Header
+.todo-header {
+  padding: 8px 10px 12px 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid $overlay;
+}
+
+.todo-icon {
+  color: $accent;
+  font-size: 18px;
+  margin-right: 8px;
+}
+
+.todo-title {
+  color: $text;
+  font-size: 15px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+}
+
+.todo-count {
+  color: $muted;
+  font-size: 12px;
+  background-color: $surface;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-right: 8px;
+}
+
+.todo-refresh {
+  all: unset;
+  color: $muted;
+  font-size: 13px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: all 200ms ease;
+
+  &:hover {
+    color: $accent;
+    background-color: $surface;
+  }
+}
+
+// Scroll area
+.todo-scroll {
+  margin-top: 2px;
+}
+
+.todo-items {
+  padding: 0 2px;
+}
+
+// Individual task item
+.todo-item {
+  padding: 8px 10px;
+  border-radius: 10px;
+  margin: 3px 0;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+// Priority left bar
+.priority-bar {
+  min-width: 3px;
+  min-height: 20px;
+  border-radius: 2px;
+  margin-right: 10px;
+}
+
+.bar-urgent {
+  background-color: $red;
+}
+
+.bar-high {
+  background-color: $peach;
+}
+
+.bar-medium {
+  background-color: $yellow;
+}
+
+.bar-default {
+  background-color: $overlay;
+}
+
+// Task text
+.todo-text {
+  padding: 2px 0;
+}
+
+.todo-content {
+  color: $text;
+  font-size: 13px;
+}
+
+.todo-due {
+  color: $muted;
+  font-size: 11px;
+  margin-top: 3px;
+}
+
+// Complete button (right side)
+.todo-check {
+  all: unset;
+  color: $muted;
+  font-size: 14px;
+  padding: 2px 4px;
+  border-radius: 6px;
+  margin-left: 6px;
+  min-width: 20px;
+  transition: all 200ms ease;
+
+  &:hover {
+    color: $green;
+    background-color: rgba($green, 0.1);
+  }
+}
+
+// ============================================================
+// Bar styles
+// ============================================================
+
+// All eww windows — transparent background to prevent white edges
+window {
+  background-color: transparent;
+}
+
+.bar-content {
+  background-color: rgba(30, 30, 46, 0.92);
+  border-radius: 16px;
+  border: 2px solid $overlay;
+  padding: 0 14px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+  font-size: 15px;
+  color: $text;
+  transition: background-color 500ms ease, border-color 500ms ease;
+}
+
+.bar-res-warning {
+  background-color: rgba($peach, 0.2);
+  border-color: rgba($peach, 0.5);
+}
+
+.bar-res-critical {
+  background-color: rgba($red, 0.25);
+  border-color: rgba($red, 0.55);
+}
+
+.bar-left,
+.bar-center,
+.bar-right {
+  padding: 4px 0;
+}
+
+.bar-center {
+  margin: 0 20px;
+}
+
+// Module group pill
+.module-group {
+  background-color: rgba($surface, 0.6);
+  border-radius: 10px;
+  padding: 4px 12px;
+  transition: background-color 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+// Separator
+.separator {
+  color: $muted;
+  font-size: 12px;
+  margin: 0 5px;
+}
+
+// ------- Workspaces -------
+.workspaces {
+  padding: 2px 0;
+}
+
+.ws-btn {
+  all: unset;
+  min-width: 28px;
+  min-height: 28px;
+  border-radius: 8px;
+  color: $subtext;
+  font-size: 15px;
+  font-weight: bold;
+
+  &:hover {
+    background-color: rgba($accent, 0.2);
+    color: $accent;
+  }
+}
+
+.ws-focused {
+  background-color: $accent;
+  color: $bg;
+
+  &:hover {
+    background-color: $lavender;
+    color: $bg;
+  }
+}
+
+.ws-occupied {
+  color: $text;
+  background-color: rgba($text, 0.1);
+}
+
+.ws-urgent {
+  background-color: $red;
+  color: $bg;
+  animation: urgent-pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes urgent-pulse {
+  from { opacity: 0.7; }
+  to { opacity: 1; }
+}
+
+.ws-empty {
+  color: $muted;
+}
+
+// ------- Window title -------
+.window-title {
+  color: $subtext;
+  font-size: 14px;
+  padding: 0 4px;
+}
+
+// ------- Clock -------
+.clock {
+  all: unset;
+  color: $text;
+  font-size: 15px;
+  font-weight: bold;
+  padding: 4px 16px;
+  border-radius: 10px;
+  min-width: 105px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: rgba($accent, 0.15);
+    color: $accent;
+  }
+}
+
+// ------- Calendar popup -------
+.calendar-container {
+  background-color: rgba(30, 30, 46, 0.95);
+  border: 1px solid $overlay;
+  border-radius: 12px;
+  padding: 16px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+}
+
+// GTK calendar widget — must override every internal element
+calendar {
+  background-color: transparent;
+  color: $text;
+  font-size: 12px;
+  padding: 4px;
+}
+
+calendar:selected {
+  color: $bg;
+  background-color: $accent;
+  border-radius: 6px;
+}
+
+calendar:indeterminate {
+  color: $muted;
+}
+
+calendar.header {
+  background-color: transparent;
+  color: $accent;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+calendar.button {
+  background-color: transparent;
+  color: $subtext;
+  padding: 2px 6px;
+  border-radius: 4px;
+
+  &:hover {
+    background-color: $surface;
+    color: $accent;
+  }
+}
+
+calendar.highlight {
+  color: $accent;
+  font-weight: bold;
+}
+
+// Override any remaining GTK default backgrounds inside the calendar
+calendar * {
+  background-color: transparent;
+  background-image: none;
+  background: transparent;
+}
+
+// ------- System stats -------
+.system-stats {
+  padding: 2px 0;
+}
+
+.sys-item {
+  all: unset;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: rgba($text, 0.08);
+  }
+}
+
+.sys-circle {
+  font-size: 14px;
+  min-width: 16px;
+  transition: color 500ms ease;
+}
+
+.sys-val {
+  min-width: 40px;
+}
+
+// Circle color levels — green → yellow → orange → red
+.circle-ok       { color: $green; }
+.circle-warm     { color: $yellow; }
+.circle-warning  { color: $peach; }
+.circle-high     { color: #e64553; }
+.circle-critical { color: $red; }
+
+// ------- System stats overlay (floating pill) -------
+.stats-overlay {
+  background-color: rgba(30, 30, 46, 0.25);
+  border: 1px solid rgba($overlay, 0.2);
+  border-radius: 14px;
+  padding: 0 14px 6px 0;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+  font-size: 13px;
+  color: $text;
+  transition: all 300ms ease;
+
+  &:hover {
+    background-color: rgba(30, 30, 46, 0.7);
+    border-color: rgba($overlay, 0.5);
+  }
+}
+
+.stats-pill {
+  all: unset;
+  padding: 2px 4px;
+  border-radius: 8px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: rgba($text, 0.08);
+  }
+}
+
+.stats-circle {
+  font-size: 12px;
+  min-width: 14px;
+  transition: color 500ms ease;
+}
+
+.stats-overlay > :first-child .stats-circle {
+  margin-left: 4px;
+}
+
+.stats-val {
+  font-size: 12px;
+  min-width: 36px;
+  color: $subtext;
+}
+
+// Pomodoro timer
+.pomo-pill {
+  transition: all 300ms ease;
+}
+
+.pomo-icon {
+  font-size: 14px;
+  color: $red;
+  transition: color 300ms ease;
+}
+
+.pomo-time {
+  font-size: 12px;
+  font-weight: bold;
+  color: $text;
+  min-width: 36px;
+  transition: color 300ms ease;
+}
+
+.pomo-cycle {
+  font-size: 10px;
+  color: $muted;
+  min-width: 10px;
+}
+
+.pomo-rest {
+  .pomo-icon {
+    color: $green;
+  }
+
+  .pomo-time {
+    color: $green;
+  }
+}
+
+.pomo-paused {
+  .pomo-icon {
+    color: $muted;
+  }
+
+  .pomo-time {
+    color: $muted;
+  }
+}
+
+.pomo-negative {
+  .pomo-time {
+    color: $red;
+  }
+}
+
+// Notification indicator
+.stats-notif {
+  transition: all 300ms ease;
+}
+
+.notif-icon {
+  font-size: 14px;
+  color: $subtext;
+  transition: color 300ms ease;
+}
+
+.notif-count {
+  font-size: 11px;
+  font-weight: bold;
+  color: $yellow;
+  min-width: 12px;
+}
+
+.notif-active {
+  .notif-icon {
+    color: $yellow;
+  }
+}
+
+.notif-paused {
+  .notif-icon {
+    color: $muted;
+  }
+}
+
+// ------- Notification feed popup -------
+.notif-feed {
+  background-color: rgba(30, 30, 46, 0.95);
+  border: 1px solid $overlay;
+  border-radius: 16px;
+  padding: 14px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+}
+
+.notif-feed-header {
+  padding: 4px 6px 10px 6px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid $overlay;
+}
+
+.notif-feed-title {
+  color: $text;
+  font-size: 14px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+}
+
+.notif-feed-clear,
+.notif-feed-pause {
+  all: unset;
+  color: $muted;
+  font-size: 15px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  margin-left: 6px;
+  transition: all 200ms ease;
+
+  &:hover {
+    color: $accent;
+    background-color: rgba($accent, 0.12);
+  }
+}
+
+.notif-feed-scroll {
+  margin: 0 2px;
+}
+
+.notif-feed-list {
+  padding: 0 2px;
+}
+
+.notif-item {
+  padding: 10px 12px;
+  border-radius: 12px;
+  background-color: rgba($surface, 0.5);
+  transition: background-color 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+.notif-item-app {
+  color: $accent;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.3px;
+}
+
+.notif-item-time {
+  color: $muted;
+  font-size: 10px;
+}
+
+.notif-item-summary {
+  color: $text;
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.notif-item-body {
+  color: $subtext;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+// ------- Controls -------
+.controls {
+  padding: 2px 0;
+}
+
+.ctl-item {
+  all: unset;
+  font-size: 14px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background-color: transparent;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: rgba($text, 0.08);
+  }
+}
+
+.ctl-icon {
+  font-size: 16px;
+  margin-right: 4px;
+  min-width: 18px;
+}
+
+.ctl-val {
+  min-width: 40px;
+}
+
+.vol-icon {
+  color: $sapphire;
+}
+
+.vol-muted {
+  color: $red;
+}
+
+.bright-icon {
+  color: $yellow;
+}
+
+.wifi-icon {
+  color: $teal;
+}
+
+.wifi-disconnected {
+  color: $red;
+}
+
+.bat-icon {
+  color: $green;
+}
+
+.bat-critical {
+  color: $red;
+}
+
+// ------- Systray -------
+.systray-group {
+  padding: 2px 6px;
+}
+
+.systray {
+  padding: 2px 0;
+}
+
+// ------- Power button -------
+.power-btn {
+  all: unset;
+  color: $red;
+  font-size: 17px;
+  min-width: 30px;
+  min-height: 30px;
+  border-radius: 10px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: rgba($red, 0.2);
+    text-shadow: 0 0 8px rgba($red, 0.5);
+  }
+}
+
+// ------- Power popup menu -------
+.power-menu {
+  background-color: rgba(30, 30, 46, 0.95);
+  border: 1px solid $overlay;
+  border-radius: 12px;
+  padding: 12px;
+  min-width: 160px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+}
+
+.power-item {
+  all: unset;
+  color: $text;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+.power-icon {
+  font-size: 16px;
+  min-width: 20px;
+}
+
+.power-lock {
+  .power-icon { color: $accent; }
+  &:hover { background-color: rgba($accent, 0.15); }
+}
+
+.power-logout {
+  .power-icon { color: $yellow; }
+  &:hover { background-color: rgba($yellow, 0.15); }
+}
+
+.power-reboot {
+  .power-icon { color: $peach; }
+  &:hover { background-color: rgba($peach, 0.15); }
+}
+
+.power-shutdown {
+  .power-icon { color: $red; }
+  &:hover { background-color: rgba($red, 0.15); }
+}
+
+// ------- Media player -------
+.media-player {
+  background-color: rgba($surface, 0.6);
+  border-radius: 10px;
+  padding: 2px 10px;
+  transition: background-color 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+.media-info {
+  padding: 2px 0;
+}
+
+.media-icon {
+  color: $green;
+  font-size: 16px;
+  min-width: 18px;
+}
+
+.media-title {
+  color: $text;
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.media-artist {
+  color: $subtext;
+  font-size: 13px;
+}
+
+.media-status-icon {
+  color: $muted;
+  font-size: 13px;
+  margin-left: 4px;
+}
+
+.media-controls {
+  padding: 2px 0;
+}
+
+.media-ctl-btn {
+  all: unset;
+  color: $subtext;
+  font-size: 16px;
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 8px;
+  transition: all 200ms ease;
+
+  &:hover {
+    color: $accent;
+    background-color: rgba($accent, 0.15);
+  }
+}
+
+.media-play-btn {
+  color: $accent;
+  font-size: 17px;
+}
+
+// ------- Media popup -------
+.media-popup {
+  background-color: rgba(30, 30, 46, 0.95);
+  border: 1px solid $overlay;
+  border-radius: 12px;
+  padding: 12px;
+  min-width: 280px;
+  font-family: "JetBrainsMono Nerd Font", "CaskaydiaCove Nerd Font", monospace;
+}
+
+.media-popup-title {
+  color: $subtext;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.5px;
+  padding: 0 4px 4px 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid $overlay;
+}
+
+.media-popup-item {
+  all: unset;
+  color: $text;
+  font-size: 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  transition: all 200ms ease;
+
+  &:hover {
+    background-color: $surface;
+  }
+}
+
+.media-popup-active {
+  background-color: rgba($accent, 0.1);
+  border-left: 2px solid $accent;
+}
+
+.media-popup-icon {
+  color: $green;
+  font-size: 16px;
+  min-width: 20px;
+}
+
+.media-popup-name {
+  color: $text;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.media-popup-track {
+  color: $subtext;
+  font-size: 11px;
+}
+
+.media-popup-status {
+  color: $muted;
+  font-size: 13px;
+}

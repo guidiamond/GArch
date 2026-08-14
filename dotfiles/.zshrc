@@ -1,3 +1,11 @@
+# Wrap session in script(1) to capture command outputs for history recall
+if [[ -z "$_ZSH_OUTPUT_CAPTURE" && -o interactive && -t 0 ]] && command -v script &>/dev/null; then
+  export _ZSH_OUTPUT_CAPTURE=1
+  export _ZSH_OUTPUT_DIR="$HOME/.local/share/zsh/outputs"
+  export _ZSH_SESSION_LOG="$_ZSH_OUTPUT_DIR/.session-$$.log"
+  mkdir -p "$_ZSH_OUTPUT_DIR"
+  exec script -qf "$_ZSH_SESSION_LOG"
+fi
 
 export ZINIT_HOME="$HOME/.local/share/zinit"
 
@@ -15,3 +23,4 @@ autoload -Uz _zinit
 (( ${+_comps} )) && _comps[zinit]=_zinit
 
 source ~/.config/zsh/zshrc
+export PATH="$HOME/go/bin:$PATH"

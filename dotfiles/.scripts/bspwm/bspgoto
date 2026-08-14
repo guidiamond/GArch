@@ -1,0 +1,4 @@
+#!/bin/sh
+FOCUSED_MONITOR=$(bspc query -M -d focused --names)
+
+bspc desktop $FOCUSED_MONITOR:\^$1 --focus

@@ -1,0 +1,9 @@
+# Udev rule: trigger monitor hotplug handler on display connection changes.
+#
+# Install:
+#   sudo cp ~/.scripts/monitor/95-monitor-hotplug.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#
+# This fires for any DRM subsystem change (HDMI, DP, USB-C displays).
+
+ACTION=="change", SUBSYSTEM=="drm", RUN+="/home/guidiamond/.scripts/monitor/monitor_hotplug_udev.sh"

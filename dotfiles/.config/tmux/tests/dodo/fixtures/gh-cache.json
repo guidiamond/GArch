@@ -1,0 +1,22 @@
+{
+  "eng-4308-create-abandoned-cart": {
+    "updated_at": "2026-07-04T12:00:00",
+    "pr_state": "OPEN",
+    "pr_number": 2841,
+    "pr_url": "https://github.com/Dodo-Inc/dodo_app/pull/2841",
+    "ci": "failing",
+    "ci_detail": ["backend-test", "lint"],
+    "unresolved_threads": 2,
+    "has_remote": "yes"
+  },
+  "benchmark-gsecrets": {
+    "updated_at": "2026-07-04T12:00:00",
+    "pr_state": "none",
+    "pr_number": 0,
+    "pr_url": "",
+    "ci": "none",
+    "ci_detail": [],
+    "unresolved_threads": 0,
+    "has_remote": "no"
+  }
+}

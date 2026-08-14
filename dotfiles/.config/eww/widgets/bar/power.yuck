@@ -1,0 +1,31 @@
+;; Power button + popup menu
+(defvar power-visible false)
+
+(defwidget power-button []
+  (button :class "power-btn"
+          :onclick "~/.config/eww/scripts/power_toggle.sh"
+          :tooltip "Power menu"
+    "⏻"))
+
+(defwidget power-menu []
+  (box :class "power-menu" :orientation "vertical" :space-evenly false :spacing 8
+    (button :class "power-item power-lock"
+            :onclick "eww close power-popup; eww update power-visible=false; betterlockscreen -l"
+      (box :orientation "horizontal" :space-evenly false :spacing 8
+        (label :class "power-icon" :text "")
+        (label :text "Lock")))
+    (button :class "power-item power-logout"
+            :onclick "eww close power-popup; eww update power-visible=false; bspc quit"
+      (box :orientation "horizontal" :space-evenly false :spacing 8
+        (label :class "power-icon" :text "󰍃")
+        (label :text "Logout")))
+    (button :class "power-item power-reboot"
+            :onclick "eww close power-popup; eww update power-visible=false; systemctl reboot"
+      (box :orientation "horizontal" :space-evenly false :spacing 8
+        (label :class "power-icon" :text "")
+        (label :text "Reboot")))
+    (button :class "power-item power-shutdown"
+            :onclick "eww close power-popup; eww update power-visible=false; systemctl poweroff"
+      (box :orientation "horizontal" :space-evenly false :spacing 8
+        (label :class "power-icon" :text "")
+        (label :text "Shutdown")))))

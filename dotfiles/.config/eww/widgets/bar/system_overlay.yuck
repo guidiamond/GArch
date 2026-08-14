@@ -1,0 +1,112 @@
+;; System stats overlay — floating pill at opposite corner from bar
+
+;; Pomodoro timer
+(deflisten pomo-data
+  :initial '{"time":"45:00","running":false,"paused":true,"mode":"work","cycle":1,"icon":"󰔟","negative":false}'
+  `~/.config/eww/scripts/pomodoro.sh`)
+
+;; Notification data from dunst
+(deflisten notif-data
+  :initial '{"count":0,"history":0,"icon":"󰂚","visible":false,"paused":false}'
+  `~/.config/eww/scripts/notifications.sh`)
+
+;; Notification history for feed popup
+(defvar notif-feed-visible false)
+(defvar notif-history "[]")
+(defvar notif-feed-height 400)
+
+(defwidget system-stats-overlay []
+  (box :class "stats-overlay" :orientation "horizontal" :space-evenly false :spacing 12
+    ;; CPU
+    (button :class "stats-pill"
+            :onclick "wezterm start htop &"
+            :tooltip "CPU: ${sys-data.cpu_precise}%"
+      (box :orientation "horizontal" :space-evenly false :spacing 5
+        (label :class "stats-circle ${sys-data.cpu >= 90 ? 'circle-critical' : sys-data.cpu >= 75 ? 'circle-high' : sys-data.cpu >= 60 ? 'circle-warning' : sys-data.cpu >= 40 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "stats-val"
+               :visible {sys-data.cpu >= 60}
+               :text {sys-data.cpu >= 90 ? "${sys-data.cpu_precise}%" : "${sys-data.cpu}%"})))
+    ;; RAM
+    (button :class "stats-pill"
+            :onclick "wezterm start htop &"
+            :tooltip "RAM: ${sys-data.memory.used_gb} / ${sys-data.memory.total_gb} GB (${sys-data.memory.percent_precise}%)"
+      (box :orientation "horizontal" :space-evenly false :spacing 5
+        (label :class "stats-circle ${sys-data.memory.percent >= 90 ? 'circle-critical' : sys-data.memory.percent >= 75 ? 'circle-high' : sys-data.memory.percent >= 60 ? 'circle-warning' : sys-data.memory.percent >= 40 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "stats-val"
+               :visible {sys-data.memory.percent >= 60}
+               :text {sys-data.memory.percent >= 90 ? "${sys-data.memory.percent_precise}%" : "${sys-data.memory.percent}%"})))
+    ;; Temperature
+    (button :class "stats-pill"
+            :onclick "wezterm start htop &"
+            :tooltip "Temperature: ${sys-data.temp_precise}°C"
+      (box :orientation "horizontal" :space-evenly false :spacing 5
+        (label :class "stats-circle ${sys-data.temp >= 85 ? 'circle-critical' : sys-data.temp >= 75 ? 'circle-high' : sys-data.temp >= 60 ? 'circle-warning' : sys-data.temp >= 45 ? 'circle-warm' : 'circle-ok'}"
+               :text "●")
+        (label :class "stats-val"
+               :visible {sys-data.temp >= 60}
+               :text {sys-data.temp >= 90 ? "${sys-data.temp_precise}°C" : "${sys-data.temp}°C"})))
+    ;; Pomodoro
+    (button :class "stats-pill pomo-pill pomo-${pomo-data.mode} ${pomo-data.paused ? 'pomo-paused' : ''} ${pomo-data.negative ? 'pomo-negative' : ''}"
+            :onclick "~/.config/eww/scripts/pomodoro.sh toggle &"
+            :onmiddleclick "~/.config/eww/scripts/pomodoro.sh reset &"
+            :onrightclick "~/.config/eww/scripts/pomodoro.sh skip &"
+            :tooltip {pomo-data.mode == "work"
+                      ? "Pomodoro #${pomo-data.cycle} · Working${pomo-data.paused ? ' (paused)' : ''}${pomo-data.negative ? ' · OVERTIME' : ''}"
+                      : "Pomodoro #${pomo-data.cycle} · ${pomo-data.cycle % 4 == 0 ? 'Long' : 'Short'} rest${pomo-data.paused ? ' (paused)' : ''}${pomo-data.negative ? ' · OVERTIME' : ''}"}
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "pomo-icon" :text {pomo-data.icon})
+        (label :class "pomo-time" :text {pomo-data.time})
+        (label :class "pomo-cycle" :text {pomo-data.cycle})))
+    ;; Notifications
+    (button :class "stats-pill stats-notif ${notif-data.count > 0 ? 'notif-active' : ''} ${notif-data.paused ? 'notif-paused' : ''}"
+            :onclick "~/.config/eww/scripts/toggle_notif.sh &"
+            :onrightclick "dunstctl set-paused toggle"
+            :tooltip {notif-data.paused ? "Paused — right-click to resume" : "${notif-data.count} active · ${notif-data.history} in history"}
+      (box :orientation "horizontal" :space-evenly false :spacing 5
+        (label :class "notif-icon" :text {notif-data.icon})
+        (label :class "notif-count"
+               :visible {notif-data.count > 0}
+               :text {notif-data.count})))))
+
+;; ── Notification feed popup ─────────────────────────────────────────
+
+(defwidget notif-feed-content []
+  (box :class "notif-feed" :orientation "vertical" :space-evenly false :spacing 0
+    ;; Header — scroll here to resize the feed
+    (eventbox :class "notif-feed-header-wrap"
+              :onscroll "~/.config/eww/scripts/resize_notif.sh {}"
+      (box :class "notif-feed-header" :orientation "horizontal" :space-evenly false
+        (label :class "notif-feed-title" :halign "start" :hexpand true :text "Notifications")
+        (button :class "notif-feed-clear"
+                :onclick "dunstctl close-all && ~/.config/eww/scripts/toggle_notif.sh &"
+                :tooltip "Dismiss all"
+          "󰎟")
+        (button :class "notif-feed-pause"
+                :onclick "dunstctl set-paused toggle"
+                :tooltip {notif-data.paused ? "Resume notifications" : "Pause notifications"}
+          {notif-data.paused ? "󰂠" : "󰂟"})))
+    ;; Items
+    (scroll :class "notif-feed-scroll" :vscroll true :height notif-feed-height
+      (box :class "notif-feed-list" :orientation "vertical" :space-evenly false :spacing 6
+        (for item in notif-history
+          (box :class "notif-item" :orientation "vertical" :space-evenly false :spacing 2
+            (box :orientation "horizontal" :space-evenly false
+              (label :class "notif-item-app" :halign "start" :hexpand true :text {item.appname})
+              (label :class "notif-item-time" :halign "end" :text {item.time}))
+            (label :class "notif-item-summary" :halign "start" :wrap true :text {item.summary})
+            (label :class "notif-item-body" :halign "start" :wrap true
+                   :visible {item.body != "" && item.body != item.summary}
+                   :text {item.body})))))))
+
+(defwindow notif-feed
+           :geometry (geometry :x "10px"
+                               :y "50px"
+                               :width "380px"
+                               :anchor "top right")
+           :stacking "overlay"
+           :windowtype "dialog"
+           :wm-ignore true
+           :focusable true
+  (notif-feed-content))

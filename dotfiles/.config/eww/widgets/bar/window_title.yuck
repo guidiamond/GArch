@@ -1,0 +1,8 @@
+;; Active window title widget (per-monitor)
+;; Receives window-title data from a per-monitor deflisten variable.
+
+(defwidget window-title [title-data]
+  (box :class "window-title" :halign "start" :hexpand true
+    (label :text {title-data != "" ? title-data : ""}
+           :limit-width 50
+           :visible {title-data != ""})))

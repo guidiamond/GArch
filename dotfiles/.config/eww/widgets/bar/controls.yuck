@@ -1,0 +1,50 @@
+;; Controls widget — Volume, Brightness, WiFi, Battery
+
+;; Volume (event-driven via deflisten)
+(deflisten vol-data
+  :initial '{"volume":0,"muted":false,"icon":"󰕾"}'
+  `~/.config/eww/scripts/volume.sh`)
+
+;; WiFi (polled)
+(defpoll wifi-data :interval "10s"
+                   :initial '{"connected":false,"ssid":"","signal":0,"ip":"","icon":"󰤭"}'
+  `~/.config/eww/scripts/wifi.sh`)
+
+;; Battery (polled)
+(defpoll bat-data :interval "5s"
+                  :initial '{"capacity":0,"status":"N/A","time_remaining":"","icon":"","visible":false}'
+  `~/.config/eww/scripts/battery.sh`)
+
+(defwidget controls [monitor bright-data]
+  (box :class "controls" :orientation "horizontal" :space-evenly false :spacing 10
+    ;; Volume
+    (eventbox :class "ctl-item ctl-volume"
+              :onclick "pactl set-sink-mute @DEFAULT_SINK@ toggle"
+              :onrightclick "pavucontrol &"
+              :onscroll "if [ '{}' = 'up' ]; then pactl set-sink-volume @DEFAULT_SINK@ +5%; else pactl set-sink-volume @DEFAULT_SINK@ -5%; fi"
+              :tooltip "Volume: ${vol-data.volume}%${vol-data.muted ? ' (muted)' : ''}"
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "ctl-icon vol-icon ${vol-data.muted ? 'vol-muted' : ''}" :text {vol-data.icon})
+        (label :class "ctl-val" :text "${vol-data.volume}%")))
+    ;; Brightness (per-monitor, hidden if not available)
+    (eventbox :class "ctl-item ctl-brightness"
+              :visible {bright-data.visible}
+              :onscroll "if [ '{}' = 'up' ]; then ~/.config/eww/scripts/brightness.sh set ${monitor} +5%; else ~/.config/eww/scripts/brightness.sh set ${monitor} 5%-; fi"
+              :tooltip "Brightness: ${bright-data.level}%"
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "ctl-icon bright-icon" :text {bright-data.icon})
+        (label :class "ctl-val" :text "${bright-data.level}%")))
+    ;; WiFi
+    (button :class "ctl-item ctl-wifi"
+            :onclick "~/.config/eww/scripts/wifi_menu.sh &"
+            :tooltip {wifi-data.connected ? "${wifi-data.ssid} (${wifi-data.signal}%)\nIP: ${wifi-data.ip}" : "Disconnected"}
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "ctl-icon wifi-icon ${wifi-data.connected ? '' : 'wifi-disconnected'}" :text {wifi-data.icon})))
+    ;; Battery (hidden on desktops)
+    (box :class "ctl-item ctl-battery"
+         :visible {bat-data.visible}
+         :tooltip {bat-data.visible ? "${bat-data.status}: ${bat-data.capacity}%${bat-data.time_remaining != '' ? ' (' + bat-data.time_remaining + ')' : ''}" : ""}
+      (box :orientation "horizontal" :space-evenly false :spacing 4
+        (label :class "ctl-icon bat-icon ${bat-data.capacity <= 15 && bat-data.status != 'Charging' ? 'bat-critical' : ''}"
+               :text {bat-data.icon})
+        (label :class "ctl-val" :text "${bat-data.capacity}%")))))

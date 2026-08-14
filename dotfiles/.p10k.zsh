@@ -339,6 +339,54 @@
   #
   # VCS_STATUS_* parameters are set by gitstatus plugin. See reference:
   # https://github.com/romkatv/gitstatus/blob/master/gitstatus.plugin.zsh.
+
+  # -----------------------[ GitHub PR indicator ]-----------------------
+  # Shows the PR associated with the current branch next to the branch name,
+  # as a Ctrl/Cmd-clickable link (OSC 8 hyperlink) that opens it in a browser.
+  #
+  # `gh pr view` is a network call, so we never run it inline. Instead we read
+  # a cached result instantly and refresh it in a detached background job when
+  # it goes stale, keeping the prompt snappy.
+  typeset -g _my_pr_cache_dir=${XDG_CACHE_HOME:-$HOME/.cache}/p10k-pr
+  typeset -g _my_pr_ttl=20  # seconds a cached PR lookup stays fresh
+
+  # Populates globals `_my_pr_num` and `_my_pr_url` for the given repo/branch.
+  function _my_pr_lookup() {
+    emulate -L zsh
+    zmodload zsh/datetime zsh/stat 2>/dev/null
+
+    typeset -g _my_pr_num= _my_pr_url=
+    local workdir=$1 branch=$2 remote=$3
+
+    # Only GitHub remotes have PRs we can open with `gh`.
+    [[ -n $workdir && -n $branch && $remote == *github.com* ]] || return
+
+    [[ -d $_my_pr_cache_dir ]] || mkdir -p $_my_pr_cache_dir 2>/dev/null
+    local key=${workdir}:${branch}
+    local file=$_my_pr_cache_dir/${key//[^A-Za-z0-9]/_}
+
+    # Serve the cached value (format: "<number>\t<url>", may be empty = no PR).
+    [[ -r $file ]] && IFS=$'\t' read -r _my_pr_num _my_pr_url < $file
+
+    # Refresh in the background when the cache is missing or stale.
+    local now=$EPOCHSECONDS mt=0
+    zstat -A mt +mtime $file 2>/dev/null
+    if (( now - mt > _my_pr_ttl )); then
+      # Throttle via a lock file so at most one fetch runs per TTL window.
+      local lock=$file.lock lmt=0
+      zstat -A lmt +mtime $lock 2>/dev/null
+      if (( now - lmt > _my_pr_ttl )); then
+        : > $lock
+        (
+          cd -q -- $workdir 2>/dev/null || exit
+          local out=$(gh pr view --json number,url --jq '"\(.number)\t\(.url)"' 2>/dev/null)
+          print -rn -- "$out" > $file.tmp && mv -f $file.tmp $file
+          rm -f $lock
+        ) &!
+      fi
+    fi
+  }
+
   function my_git_formatter() {
     emulate -L zsh
 
@@ -380,6 +428,21 @@
     # Tip: To always show local branch name in full without truncation, delete the next line.
     (( $#where > 32 )) && where[13,-13]=".."
     res+="${clean}${where//\%/%%}"  # escape %
+
+    # GitHub PR for the current branch, shown right after the branch name.
+    # Wrapped in an OSC 8 hyperlink so Ctrl/Cmd-click opens the PR in a browser.
+    _my_pr_lookup "$VCS_STATUS_WORKDIR" "$VCS_STATUS_LOCAL_BRANCH" "$VCS_STATUS_REMOTE_URL"
+    if [[ -n $_my_pr_num ]]; then
+      local pr='%170F'  # magenta foreground for the PR badge
+      if (( $1 )) && [[ -n $_my_pr_url ]]; then
+        # OSC 8 hyperlink: ESC]8;;<url>ESC\ <text> ESC]8;;ESC\
+        # %{ %} marks the escape sequences as zero-width for the prompt.
+        local lnk=$'\e]8;;' end=$'\e\\'
+        res+=" ${pr}%{${lnk}${_my_pr_url}${end}%}#${_my_pr_num}%{${lnk}${end}%}"
+      else
+        res+=" ${pr}#${_my_pr_num}"
+      fi
+    fi
 
     # Display the current Git commit if there is no branch or tag.
     # Tip: To always display the current Git commit, remove `[[ -z $where ]] &&` from the next line.

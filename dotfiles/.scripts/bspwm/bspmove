@@ -1,11 +1,16 @@
 #!/bin/sh
-# Simple script to toggle a node to fullscreen mode in bspwm
+MONITORS=($(xrandr --listactivemonitors | awk '{print $4}'))
+
+# Only works with 2 monitors
+if [ ${#MONITORS[@]} -lt 2 ]; then
+  exit 0
+fi
+
 FOCUSED_MONITOR=$(bspc query -M -d focused --names)
-MAIN_MONITOR="DVI-I-1"
-SECONDARY_MONITOR="DVI-D-0"
+MAIN_MONITOR="${MONITORS[0]}"
 WORKSPACE_NUMBER=${2}
 
-if [ $FOCUSED_MONITOR != $MAIN_MONITOR ];then
+if [ $FOCUSED_MONITOR == $MAIN_MONITOR ]; then
   WORKSPACE_NUMBER=$((WORKSPACE_NUMBER+10))
 fi
 bspc ${1} \^$WORKSPACE_NUMBER --focus

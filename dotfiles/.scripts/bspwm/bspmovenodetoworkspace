@@ -1,0 +1,6 @@
+#!/bin/sh
+
+FOCUSED_MONITOR=$(bspc query -M -d focused --names)
+WORKSPACE_NUMBER=${1}
+
+bspc node -d $FOCUSED_MONITOR:\^$WORKSPACE_NUMBER --focus
