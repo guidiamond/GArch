@@ -8,7 +8,11 @@
 CHROOT_INJECTED=(
     hooks_line
     modules_line
+    initramfs_flavor
+    luks_hook
+    crypt_cmdline
     grub_cmdline_add
+    grub_cmdline_remove
     needs_grub_install
     require_vars
     locale_gen_uncomment
@@ -308,8 +312,19 @@ mkinitcpio -P
 
 # ---- bootloader ----
 if [[ "$LUKS_ENABLED" == "true" ]]; then
-    info "Adding cryptdevice to the kernel command line..."
-    grub_cmdline_add /etc/default/grub "cryptdevice=UUID=${LUKS_UUID}:cryptroot"
+    # The parameter has to match the initramfs HOOKS just built, not a
+    # hardcoded guess: sd-encrypt reads rd.luks.name and ignores cryptdevice,
+    # encrypt does the reverse. NEW_HOOKS is the line actually written above,
+    # so the two cannot drift apart.
+    INITRAMFS_FLAVOR=$(initramfs_flavor "$NEW_HOOKS")
+    info "Initramfs flavour: ${INITRAMFS_FLAVOR}"
+    CRYPT_PARAM=$(crypt_cmdline "$INITRAMFS_FLAVOR" "$LUKS_UUID")
+    # Clear both spellings before writing: on a re-run that changes flavour the
+    # other one would otherwise survive, inert but misleading.
+    grub_cmdline_remove /etc/default/grub cryptdevice
+    grub_cmdline_remove /etc/default/grub rd.luks.name
+    info "Adding ${CRYPT_PARAM%%=*} to the kernel command line..."
+    grub_cmdline_add /etc/default/grub "$CRYPT_PARAM"
     grub_cmdline_add /etc/default/grub "root=/dev/mapper/cryptroot"
 fi
 

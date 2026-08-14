@@ -3,6 +3,13 @@
 load helpers
 
 DEFAULT_HOOKS='HOOKS=(base udev autodetect modconf kms keyboard keymap consolefont block filesystems fsck)'
+# What a current Arch ISO actually ships. The udev-era line above is what every
+# fixture here used to assume, and assuming it is what let a systemd initramfs
+# be given the busybox `encrypt` hook -- an install that reaches a timeout on
+# /dev/mapper/cryptroot instead of a passphrase prompt.
+SYSTEMD_HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)'
+# The broken hybrid itself, as produced against a real ISO.
+MISMATCHED_HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block encrypt filesystems fsck)'
 
 setup() {
     source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
@@ -467,4 +474,110 @@ stub_pacman() {
     PATH="$TMP/empty" run rank_mirrors
     [ "$status" -eq 0 ]
     [[ "$output" == *"not installed"* ]]
+}
+
+# --- initramfs flavour -----------------------------------------------------
+#
+# The systemd and udev initramfs take different LUKS hooks AND different kernel
+# parameters, and neither ignores the other's politely: sd-encrypt does nothing
+# with cryptdevice=, encrypt does nothing with rd.luks.name=. Pairing them
+# wrongly builds an image that asks for no passphrase and times out waiting for
+# /dev/mapper/cryptroot. Verified in the VM before these tests were written.
+
+@test "initramfs_flavor detects a systemd initramfs" {
+    [ "$(initramfs_flavor "$SYSTEMD_HOOKS")" = "systemd" ]
+}
+
+@test "initramfs_flavor detects a udev initramfs" {
+    [ "$(initramfs_flavor "$DEFAULT_HOOKS")" = "udev" ]
+}
+
+@test "hooks_line uses sd-encrypt in a systemd initramfs" {
+    run hooks_line "$SYSTEMD_HOOKS" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"block sd-encrypt filesystems"* ]]
+}
+
+@test "hooks_line uses encrypt in a udev initramfs" {
+    run hooks_line "$DEFAULT_HOOKS" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"block encrypt filesystems"* ]]
+    [[ "$output" != *"sd-encrypt"* ]]
+}
+
+# The regression that shipped. A systemd HOOKS line carrying the busybox hook
+# must come back carrying the systemd one and *only* the systemd one -- adding
+# sd-encrypt while leaving encrypt in place would still boot to the timeout.
+@test "hooks_line replaces a mismatched encrypt hook with sd-encrypt" {
+    run hooks_line "$MISMATCHED_HOOKS" true
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"block sd-encrypt filesystems"* ]]
+    stripped=${output//sd-encrypt/}
+    [[ "$stripped" != *"encrypt"* ]]
+}
+
+@test "hooks_line drops a stale sd-encrypt when encryption is off" {
+    run hooks_line "$SYSTEMD_HOOKS" false
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"encrypt"* ]]
+}
+
+@test "hooks_line is idempotent on a systemd line" {
+    first=$(hooks_line "$SYSTEMD_HOOKS" true)
+    second=$(hooks_line "$first" true)
+    [ "$first" = "$second" ]
+}
+
+@test "hooks_line keeps keyboard before the LUKS hook on systemd" {
+    out=$(hooks_line "$SYSTEMD_HOOKS" true)
+    kb=${out%%sd-encrypt*}
+    [[ "$kb" == *"keyboard"* ]]
+}
+
+@test "hooks_line does not duplicate microcode already present on systemd" {
+    out=$(hooks_line "$SYSTEMD_HOOKS" true)
+    [ "$(grep -o 'microcode' <<< "$out" | wc -l)" -eq 1 ]
+}
+
+# --- crypt_cmdline ---------------------------------------------------------
+
+@test "crypt_cmdline gives rd.luks.name for a systemd initramfs" {
+    [ "$(crypt_cmdline systemd DEAD-BEEF)" = "rd.luks.name=DEAD-BEEF=cryptroot" ]
+}
+
+@test "crypt_cmdline gives cryptdevice for a udev initramfs" {
+    [ "$(crypt_cmdline udev DEAD-BEEF)" = "cryptdevice=UUID=DEAD-BEEF:cryptroot" ]
+}
+
+@test "crypt_cmdline rejects an unknown flavour rather than guessing" {
+    # -eq 1, not -ne 0: a missing function exits 127, which "non-zero" would
+    # accept -- the assertion would then pass before the function is written
+    # and keep passing if it were deleted.
+    run crypt_cmdline banana DEAD-BEEF
+    [ "$status" -eq 1 ]
+    [ -z "${output//*invalid*/}" ] || [[ "$output" == *"flavour"* || "$output" == *"flavor"* ]]
+}
+
+# --- grub_cmdline_remove ---------------------------------------------------
+
+@test "grub_cmdline_remove drops the named key" {
+    printf 'GRUB_CMDLINE_LINUX="quiet cryptdevice=UUID=old:cryptroot rw"\n' > "$TMP/grub"
+    grub_cmdline_remove "$TMP/grub" cryptdevice
+    grep -q 'GRUB_CMDLINE_LINUX="quiet rw"' "$TMP/grub"
+}
+
+@test "grub_cmdline_remove is a no-op when the key is absent" {
+    printf 'GRUB_CMDLINE_LINUX="quiet rw"\n' > "$TMP/grub"
+    grub_cmdline_remove "$TMP/grub" cryptdevice
+    grep -q 'GRUB_CMDLINE_LINUX="quiet rw"' "$TMP/grub"
+}
+
+# Switching flavour must not leave both parameters behind: the stale one is
+# inert on the new initramfs but reads as intent to anyone debugging later.
+@test "the two LUKS parameters never coexist after a flavour switch" {
+    printf 'GRUB_CMDLINE_LINUX="cryptdevice=UUID=old:cryptroot"\n' > "$TMP/grub"
+    grub_cmdline_remove "$TMP/grub" cryptdevice
+    grub_cmdline_add "$TMP/grub" "$(crypt_cmdline systemd NEW-UUID)"
+    grep -q 'rd.luks.name=NEW-UUID=cryptroot' "$TMP/grub"
+    assert_absent 'cryptdevice' "$TMP/grub"
 }

@@ -30,19 +30,73 @@ GPU_INTEL=(mesa vulkan-intel intel-media-driver)
 
 # --- pure transforms (no I/O) ----------------------------------------------
 
+# Which initramfs a HOOKS line builds: "systemd" when the systemd hook is
+# present, "udev" otherwise.
+#
+# This distinction is load-bearing and was missed for the whole of this
+# project's life, because every fixture assumed the udev-era default. A
+# current Arch ISO ships
+#   HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block filesystems fsck)
+# and the two initramfs do not share a LUKS mechanism: sd-encrypt ignores
+# cryptdevice=, encrypt ignores rd.luks.name=. Pairing them wrongly produces an
+# image that prompts for no passphrase and leaves systemd waiting on
+# /dev/mapper/cryptroot until it drops to an emergency shell that a locked root
+# account cannot even log into. Observed end to end in the VM.
+initramfs_flavor() {
+    local line=$1 inner hooks=()
+    inner=${line#*\(}; inner=${inner%\)*}
+    read -ra hooks <<< "$inner"
+    if printf '%s\n' "${hooks[@]}" | grep -qx systemd; then
+        echo systemd
+    else
+        echo udev
+    fi
+}
+
+# The LUKS hook that matches a flavour.
+luks_hook() {
+    case "$1" in
+        systemd) echo sd-encrypt ;;
+        udev)    echo encrypt ;;
+        *)       error "luks_hook: unknown initramfs flavour: '$1'"; return 1 ;;
+    esac
+}
+
+# The kernel parameter that matches a flavour. Refuses an unrecognised flavour
+# rather than defaulting: a wrong guess here is an unbootable system, and the
+# two spellings differ in separator as well as name -- rd.luks.name takes
+# UUID=NAME with an '=', cryptdevice takes UUID=...:NAME with a ':'.
+crypt_cmdline() {
+    local flavor=$1 uuid=$2
+    case "$flavor" in
+        systemd) echo "rd.luks.name=${uuid}=cryptroot" ;;
+        udev)    echo "cryptdevice=UUID=${uuid}:cryptroot" ;;
+        *)       error "crypt_cmdline: unknown initramfs flavour: '$flavor'"; return 1 ;;
+    esac
+}
+
 # hooks_line "HOOKS=(...)" <want_encrypt> -> new HOOKS line
 hooks_line() {
-    local line=$1 want_encrypt=$2 inner hooks=() out=() h
+    local line=$1 want_encrypt=$2 inner hooks=() out=() h flavor hook
     inner=${line#*\(}; inner=${inner%\)*}
     read -ra hooks <<< "$inner"
 
     printf '%s\n' "${hooks[@]}" | grep -qx filesystems \
         || { error "hooks_line: no 'filesystems' hook in: $line"; return 1; }
 
+    flavor=$(initramfs_flavor "$line")
+    hook=$(luks_hook "$flavor") || return 1
+
     for h in "${hooks[@]}"; do
-        # encrypt must come before filesystems, and only once
+        # Any LUKS hook already present is dropped here and the correct one
+        # re-inserted below. Adding sd-encrypt while leaving encrypt in place
+        # would still boot to the timeout, so this replaces rather than
+        # appends -- and it is what makes the function idempotent and
+        # self-healing on a config a previous version got wrong.
+        [[ "$h" == encrypt || "$h" == sd-encrypt ]] && continue
+        # the LUKS hook must come before filesystems, and only once
         if [[ "$h" == "filesystems" && "$want_encrypt" == true ]]; then
-            printf '%s\n' "${out[@]}" | grep -qx encrypt || out+=(encrypt)
+            out+=("$hook")
         fi
         out+=("$h")
         # microcode must come after autodetect, and only once
@@ -130,6 +184,29 @@ grub_cmdline_add() {
     sed -i "s|^GRUB_CMDLINE_LINUX=\".*\"$|GRUB_CMDLINE_LINUX=\"${new[*]}\"|" "$file"
     grep -qF -- "$kv" "$file" \
         || { error "grub_cmdline_add: failed to write '${kv}' to ${file}"; return 1; }
+}
+
+# grub_cmdline_remove <file> <key> -- drop every token whose key is <key>.
+#
+# Needed because switching initramfs flavour changes the *name* of the LUKS
+# parameter, not just its value: grub_cmdline_add only replaces prior values of
+# the key it is given, so adding rd.luks.name= leaves any cryptdevice= sitting
+# beside it. The stale one is inert on the new initramfs, but it reads as
+# intent to whoever debugs this next, and two contradictory LUKS parameters on
+# one command line is precisely the confusion that cost this project an
+# afternoon.
+grub_cmdline_remove() {
+    local file=$1 key=$2 current new=() tokens=() t
+
+    grep -qE '^GRUB_CMDLINE_LINUX="[^"]*"[[:space:]]*$' "$file" \
+        || { error "grub_cmdline_remove: ${file} has no double-quoted GRUB_CMDLINE_LINUX line"; return 1; }
+    current=$(grep -oP '(?<=^GRUB_CMDLINE_LINUX=").*(?="$)' "$file" || echo "")
+    read -ra tokens <<< "$current"
+    for t in "${tokens[@]}"; do
+        [[ "${t%%=*}" == "$key" ]] && continue
+        new+=("$t")
+    done
+    sed -i "s|^GRUB_CMDLINE_LINUX=\".*\"$|GRUB_CMDLINE_LINUX=\"${new[*]}\"|" "$file"
 }
 
 # locale_gen_uncomment <file> <locale> -- uncomment the locale.gen entry whose
