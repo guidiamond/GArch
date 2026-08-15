@@ -66,7 +66,10 @@ size_to_sectors() {
     local size=$1 sector=${2:-512} unit num
     [[ "$size" =~ ^([0-9]+)([MG])$ ]] \
         || { error "size_to_sectors: want an integer followed by M or G, got '${size}'"; return 1; }
-    num=${BASH_REMATCH[1]}
+    # 10# forces base 10: bash arithmetic reads a leading-zero numeral as octal,
+    # so "010M" silently produced 8 MiB and "08G" died on an invalid octal digit
+    # with a raw bash diagnostic instead of this function's own error.
+    num=$(( 10#${BASH_REMATCH[1]} ))
     unit=${BASH_REMATCH[2]}
     (( num > 0 )) || { error "size_to_sectors: zero-sized partition requested"; return 1; }
     case "$unit" in
@@ -85,6 +88,11 @@ size_to_sectors() {
 # partitions are the common case, not an error worth a message.
 align_gap() {
     local start=$1 end=$2 aligned_start aligned_end
+    # Validated before the arithmetic, not after: bash resolves a non-numeric
+    # token as a variable name rather than failing, so an unexpected field from
+    # a parser upstream would round some unrelated variable's value into a
+    # confident-looking sector range with a zero exit status.
+    [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] || return 1
     aligned_start=$(( (start + 2047) / 2048 * 2048 ))
     aligned_end=$(( (end + 1) / 2048 * 2048 - 1 ))
     (( aligned_end > aligned_start )) || return 1
