@@ -120,3 +120,35 @@ setup() {
     [[ "$output" == *"[dry-run]"* ]]
     [[ "$output" == *"cryptsetup close cryptroot"* ]]
 }
+
+@test "size_to_sectors converts M and G at 512-byte sectors" {
+    [ "$(size_to_sectors 1G)" = "2097152" ]
+    [ "$(size_to_sectors 512M)" = "1048576" ]
+}
+
+@test "size_to_sectors honours a non-512 sector size" {
+    [ "$(size_to_sectors 1G 4096)" = "262144" ]
+}
+
+@test "size_to_sectors rejects rest, bare numbers and garbage" {
+    run size_to_sectors rest
+    [ "$status" -ne 0 ]
+    run size_to_sectors 100
+    [ "$status" -ne 0 ]
+    run size_to_sectors "; rm -rf /"
+    [ "$status" -ne 0 ]
+}
+
+@test "align_gap rounds start up and end down to 1MiB" {
+    [ "$(align_gap 34 1000000)" = "2048 999423" ]
+}
+
+@test "align_gap leaves an already-aligned gap alone" {
+    [ "$(align_gap 2048 999423)" = "2048 999423" ]
+}
+
+@test "align_gap emits nothing when alignment collapses the gap" {
+    run align_gap 2049 4000
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}

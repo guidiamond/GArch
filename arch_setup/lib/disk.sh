@@ -56,6 +56,41 @@ size_to_sgdisk() {
     echo "+${size}"
 }
 
+# Sizes to sectors, for the carve path. size_to_sgdisk hands "+1G" to sgdisk
+# and lets it do the arithmetic, which is fine when sgdisk picks the start too.
+# Carving cannot do that: the plan has to know each partition's end before any
+# of them exist, so that --dry-run prints the same sectors a real run creates
+# and a plan that does not fit is rejected before the first sgdisk call rather
+# than halfway through the gap.
+size_to_sectors() {
+    local size=$1 sector=${2:-512} unit num
+    [[ "$size" =~ ^([0-9]+)([MG])$ ]] \
+        || { error "size_to_sectors: want an integer followed by M or G, got '${size}'"; return 1; }
+    num=${BASH_REMATCH[1]}
+    unit=${BASH_REMATCH[2]}
+    (( num > 0 )) || { error "size_to_sectors: zero-sized partition requested"; return 1; }
+    case "$unit" in
+        M) echo $(( num * 1048576 / sector )) ;;
+        G) echo $(( num * 1073741824 / sector )) ;;
+    esac
+}
+
+# GPT partitions want a 1 MiB-aligned start, and a last sector one below the
+# next alignment boundary. Misaligning costs read-modify-write on every 4Kn and
+# SSD write for the life of the install -- silent, and invisible in any test
+# that only checks the partition exists.
+#
+# Fails, printing nothing, when alignment eats the whole gap: the caller is
+# iterating gaps parted reported, and the sub-MiB slivers GPT leaves between
+# partitions are the common case, not an error worth a message.
+align_gap() {
+    local start=$1 end=$2 aligned_start aligned_end
+    aligned_start=$(( (start + 2047) / 2048 * 2048 ))
+    aligned_end=$(( (end + 1) / 2048 * 2048 - 1 ))
+    (( aligned_end > aligned_start )) || return 1
+    echo "${aligned_start} ${aligned_end}"
+}
+
 plan_reset() { PART_PLAN=(); }
 
 plan_add() {
