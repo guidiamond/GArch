@@ -152,3 +152,62 @@ setup() {
     [ "$status" -ne 0 ]
     [ -z "$output" ]
 }
+
+@test "parse_free_gaps finds the trailing gap and skips partitions" {
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/nvme0n1:1953525168s:nvme:512:512:gpt:NVMe Device:;
+1:34s:32767s:32734s::Microsoft reserved partition:msftres;
+2:32768s:1024032767s:1024000000s:ntfs:Basic data partition:msftdata;
+1:1024032768s:1953525134s:929492367s:free;
+PARTED"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1024032768 1953525134 929492367" ]
+}
+
+@test "parse_free_gaps drops slivers below the minimum" {
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/sda:1000s:scsi:512:512:gpt:Fixture:;
+1:34s:2047s:2014s:free;
+PARTED"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "parse_free_gaps scales the minimum by the disk's sector size" {
+    # 8192 sectors at 4096 bytes is 32 MiB, over the 16 MiB floor. The same
+    # sector count at 512 bytes would be 4 MiB and must be dropped -- so this
+    # fails if the parser hardcodes 512.
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/sda:2000000s:scsi:4096:4096:gpt:Fixture:;
+1:2048s:10239s:8192s:free;
+PARTED"
+    [ "$output" = "2048 10239 8192" ]
+}
+
+@test "parse_free_gaps reports every gap on a fragmented disk" {
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/sda:2000000000s:scsi:512:512:gpt:Fixture:;
+1:2048s:100000s:97953s:ext4::;
+1:100001s:600000s:499999s:free;
+2:600001s:700000s:100000s:ntfs::;
+1:700001s:1999999966s:1999299966s:free;
+PARTED"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [ "${lines[0]}" = "100001 600000 499999" ]
+    [ "${lines[1]}" = "700001 1999999966 1999299966" ]
+}
+
+@test "parse_free_gaps ignores an fstype column that is empty" {
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/sda:2000000s:scsi:512:512:gpt:Fixture:;
+1:2048s:1000000s:997953s::Some Label:;
+PARTED"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

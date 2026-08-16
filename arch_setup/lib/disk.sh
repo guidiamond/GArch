@@ -99,6 +99,59 @@ align_gap() {
     echo "${aligned_start} ${aligned_end}"
 }
 
+# Gaps smaller than this are not offered. GPT leaves a 34-sector header hole at
+# the front of every disk and alignment padding between partitions; listing
+# them as installable space is noise that makes the real gap harder to find.
+MIN_GAP_MIB=16
+
+# parse_free_gaps: parted machine output on stdin -> "start end size" in
+# sectors, one gap per line.
+#
+# Reads stdin rather than taking a disk, so the parser is testable against
+# canned output from a parted this machine does not have. disk_free_gaps below
+# is the half that touches a disk.
+#
+# Keys on the trailing "free" field, not on the field count: parted's free-space
+# rows carry five fields and partition rows seven, but that has changed between
+# releases and the marker has not. An fstype column can be empty; it cannot be
+# the string "free".
+#
+# `num` is read and unused -- parted repeats a meaningless partition number on
+# free rows, and reading it keeps the field list matching the row format.
+# shellcheck disable=SC2034
+parse_free_gaps() {
+    local sector_bytes=512 min_sectors line num start end size marker
+    while IFS= read -r line; do
+        line=${line%;}
+        # The disk row is the second line and carries the logical sector size
+        # in field 4. A 4Kn disk reports 4096 there, and taking 512 on faith
+        # would put the minimum-gap threshold out by a factor of eight.
+        if [[ "$line" == /dev/* ]]; then
+            IFS=: read -r _ _ _ sector_bytes _ <<< "$line"
+            [[ "$sector_bytes" =~ ^[0-9]+$ ]] || sector_bytes=512
+            continue
+        fi
+        IFS=: read -r num start end size marker <<< "$line"
+        [[ "$marker" == "free" ]] || continue
+        start=${start%s}; end=${end%s}; size=${size%s}
+        [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ && "$size" =~ ^[0-9]+$ ]] || continue
+        min_sectors=$(( MIN_GAP_MIB * 1048576 / sector_bytes ))
+        (( size >= min_sectors )) || continue
+        printf '%s %s %s\n' "$start" "$end" "$size"
+    done
+}
+
+# disk_free_gaps <disk> -- the same, for a real disk.
+#
+# Not run through run_cmd: it reads the partition table and writes nothing, so
+# a dry run wants the real answer. Suppressing stderr loses parted's "unknown
+# partition table" complaint on a blank disk, which is the expected case there
+# and would otherwise print mid-prompt.
+disk_free_gaps() {
+    local disk=$1
+    parted -m -s "$disk" unit s print free 2>/dev/null | parse_free_gaps
+}
+
 plan_reset() { PART_PLAN=(); }
 
 plan_add() {
