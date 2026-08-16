@@ -531,17 +531,15 @@ plan_disks() {
 # partition to sectors before the first sgdisk.
 plan_validate() {
     local entry e_disk e_role e_type e_label e_size e_src e_start e_end
-    local disk has_reuse has_placed has_sectored
+    local disk has_placed has_sectored
     while read -r disk; do
         [[ -z "$disk" ]] && continue
-        has_reuse=false
         has_placed=false
         has_sectored=false
         for entry in "${PART_PLAN[@]}"; do
             IFS='|' read -r e_disk e_role e_type e_label e_size e_src e_start e_end <<< "$entry"
             [[ "$e_disk" != "$disk" ]] && continue
             if [[ "$e_src" != "new" ]]; then
-                has_reuse=true
                 has_sectored=true
             elif [[ -n "$e_start" ]]; then
                 has_sectored=true
@@ -572,13 +570,22 @@ plan_validate() {
             return 1
         fi
         # PLAN_WIPE_DISKS is one flag for the whole plan while entries are
-        # per-disk, so "wipe this disk, adopt a partition on that one" cannot
-        # be expressed -- the zap destroys the partition the other entry
-        # adopts. Refused rather than given a per-disk field, which is a plan
-        # change Task 10 owns; "carve on one disk, reuse an ESP on another" is
-        # the shape that needs it.
-        if [[ "$PLAN_WIPE_DISKS" == true && "$has_reuse" == true ]]; then
-            error "plan_validate: ${disk} is set to be wiped, but the plan also reuses a partition on it"
+        # per-disk, so "wipe this disk, adopt something on that one" cannot be
+        # expressed -- the zap destroys what the other entry depends on.
+        #
+        # Tested against has_sectored, not just reuse: a carve entry's sectors
+        # were chosen to fit *around* the partitions already on that disk, so
+        # zapping it invalidates them exactly as it invalidates a reused
+        # partition. Measured, with the flag left true from a whole-disk choice
+        # on another disk: carving the root into nvme0n1's gap zapped nvme0n1,
+        # destroying the 488 GiB NTFS partition, then created the root at the
+        # carved sectors and reported success.
+        #
+        # Refused rather than given a per-disk field, which is a plan change
+        # Task 10 owns; "carve on one disk, reuse an ESP on another" is the
+        # shape that needs it.
+        if [[ "$PLAN_WIPE_DISKS" == true && "$has_sectored" == true ]]; then
+            error "plan_validate: ${disk} is set to be wiped, but the plan also depends on its existing layout (a reused partition or carved sectors)"
             return 1
         fi
     done < <(plan_disks)
@@ -629,7 +636,11 @@ plan_render() {
             else
                 shown="new, number assigned at write time"
             fi
-            printf '    %-6s %-6s %-30s %s\n' "$e_role" "$e_size" "$shown" "$e_label"
+            # 36, not 30: both "new, number assigned at write time" and
+            # "new, sectors 1024032768-1953525134" -- nvme0n1's actual gap on
+            # the target machine -- are 34 characters, and at 30 they ran into
+            # the label column on the confirmation screen.
+            printf '    %-6s %-6s %-36s %s\n' "$e_role" "$e_size" "$shown" "$e_label"
         done
     done < <(plan_disks)
 }
@@ -679,10 +690,16 @@ plan_execute() {
                 touched=true
             else
                 # Sequential placement is an explicit case now, not the branch
-                # anything unrecognised falls into. plan_validate has already
-                # refused this combination before a byte was written; this is
-                # the second lock, for a PART_PLAN assembled by some future
-                # caller that does not go through plan_add.
+                # anything unrecognised falls into.
+                #
+                # Unreachable as written: plan_execute calls plan_validate
+                # before this loop, and it refuses the same combination. Kept
+                # because the two are separate statements of one rule and can
+                # drift -- a later edit relaxing plan_validate, or a caller
+                # invoking this loop without it, would otherwise land straight
+                # on `sgdisk -n` against a table nobody agreed to change. Not
+                # kept for "a PART_PLAN built without plan_add": such a plan
+                # still goes through plan_validate and never reaches here.
                 [[ "$PLAN_WIPE_DISKS" == true ]] \
                     || { error "plan_execute: refusing to let sgdisk place ${e_role} on ${disk}, which is not being wiped"; return 1; }
                 seq_n=$(( seq_n + 1 ))

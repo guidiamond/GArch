@@ -630,6 +630,33 @@ MOUNT
     [[ "$output" != *"--zap-all"* ]]
 }
 
+@test "plan_execute refuses to wipe a disk the plan carves into" {
+    # A carve entry's sectors were chosen to fit around what is already on that
+    # disk, so zapping it invalidates them exactly as it invalidates a reused
+    # partition. With the flag left true from a whole-disk choice on another
+    # disk, this zapped the carve target and then reported success.
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdy root 8300 Root rest new 2099200 9999999
+    run plan_execute
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"dry-run"* ]]
+}
+
+@test "plan_render does not number an all-sequential plan on a disk it is not wiping" {
+    # The one shape that separates "predictable" from PLAN_WIPE_DISKS itself.
+    # plan_execute refuses this plan, so nothing is written wrongly -- but
+    # plan_render runs before that refusal, and printing /dev/sdz1 here puts a
+    # fabricated device name on the confirmation screen.
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdz root 8300 Root rest
+    run plan_render
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/dev/sdz1"* ]]
+    [[ "$output" == *"assigned at write time"* ]]
+}
+
 @test "plan_execute refuses a disk that mixes placed and sector-addressed partitions" {
     # Sequential entries are numbered 1,2,3... from a freshly zapped table;
     # carved and reused ones take their number from the live table. On one disk
