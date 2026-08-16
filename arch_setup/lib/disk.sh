@@ -128,7 +128,11 @@ parse_free_gaps() {
         # would put the minimum-gap threshold out by a factor of eight.
         if [[ "$line" == /dev/* ]]; then
             IFS=: read -r _ _ _ sector_bytes _ <<< "$line"
-            [[ "$sector_bytes" =~ ^[0-9]+$ ]] || sector_bytes=512
+            # Zero is numeric but not a valid divisor: a disk row reporting it
+            # would otherwise abort the function with a bash arithmetic error
+            # on the very next gap instead of falling back like any other
+            # unusable value.
+            [[ "$sector_bytes" =~ ^[0-9]+$ && "$sector_bytes" -gt 0 ]] || sector_bytes=512
             continue
         fi
         IFS=: read -r num start end size marker <<< "$line"
@@ -147,6 +151,14 @@ parse_free_gaps() {
 # a dry run wants the real answer. Suppressing stderr loses parted's "unknown
 # partition table" complaint on a blank disk, which is the expected case there
 # and would otherwise print mid-prompt.
+#
+# That same redirect also swallows a real failure -- a bad device path,
+# permission denied, a disk that vanished mid-read -- so this function cannot
+# tell "no free space" from "could not read the disk"; both print nothing and
+# exit success from parted's side of the pipe. Under a caller running
+# set -euo pipefail, a parted failure here aborts the whole script with no
+# diagnostic anywhere. Validating that $disk exists and is readable is the
+# caller's job, before calling this, not this function's.
 disk_free_gaps() {
     local disk=$1
     parted -m -s "$disk" unit s print free 2>/dev/null | parse_free_gaps

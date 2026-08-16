@@ -211,3 +211,15 @@ PARTED"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+@test "parse_free_gaps falls back to 512 when the disk row reports a zero sector size" {
+    # A zero here is numeric but not a valid divisor for the threshold
+    # arithmetic; the parser must fall back rather than divide by it.
+    run bash -c "MIN_GAP_MIB=16; $(declare -f parse_free_gaps); cat <<'PARTED' | parse_free_gaps
+BYT;
+/dev/sda:2000000s:scsi:0:0:gpt:Fixture:;
+1:2048s:50000s:47953s:free;
+PARTED"
+    [ "$status" -eq 0 ]
+    [ "$output" = "2048 50000 47953" ]
+}
