@@ -3,9 +3,18 @@
 # Requires lib/ui.sh to be sourced first.
 # shellcheck shell=bash
 
-# Plan entries: "disk|role|type_code|label|size"
+# Plan entries: "disk|role|type_code|label|size|source|start|end"
 # Roles: efi, root, data.  Size: "512M", "1G", or "rest".
+# Source: "new" to create it, or a /dev/... path to adopt an existing partition.
+# Start/end: sectors, set only when carving into a gap; empty means "let sgdisk
+# place it", which is only correct on a disk that was just wiped.
 PART_PLAN=()
+
+# Whole-disk mode sets this. It gates the single `sgdisk --zap-all` in this
+# file, and it is a separate flag rather than something inferred from the
+# entries because "no entry says otherwise" is the wrong default for a command
+# that destroys a partition table.
+PLAN_WIPE_DISKS=${PLAN_WIPE_DISKS:-false}
 
 DRY_RUN=${DRY_RUN:-false}
 
@@ -408,9 +417,30 @@ plan_reset() { PART_PLAN=(); }
 
 plan_add() {
     local disk=$1 role=$2 type_code=$3 label=$4 size=$5
+    local source=${6:-new} start=${7:-} end=${8:-}
     [[ "$disk" == /dev/* ]] || { error "plan_add: '$disk' is not an absolute device path"; return 1; }
-    size_to_sgdisk "$size" >/dev/null || return 1
-    PART_PLAN+=("${disk}|${role}|${type_code}|${label}|${size}")
+    [[ "$source" == "new" || "$source" == /dev/* ]] \
+        || { error "plan_add: source must be 'new' or a /dev path, got '${source}'"; return 1; }
+    # A reuse entry's size is descriptive only -- the partition already has one
+    # -- so it is not validated. A new entry's is what sgdisk gets handed.
+    if [[ "$source" == "new" ]]; then
+        size_to_sgdisk "$size" >/dev/null || return 1
+    fi
+    PART_PLAN+=("${disk}|${role}|${type_code}|${label}|${size}|${source}|${start}|${end}")
+}
+
+# plan_has_role <role> -- true if the plan contains one.
+#
+# Exists so callers can refuse an incomplete plan *before* the Type-YES gate. A
+# plan with a root and no ESP got as far as LUKS-formatting the root and then
+# died on `mkfs.fat ""`, leaving a wiped partition and no install.
+plan_has_role() {
+    local role=$1 entry e_role
+    for entry in "${PART_PLAN[@]}"; do
+        IFS='|' read -r _ e_role _ _ _ _ _ _ <<< "$entry"
+        [[ "$e_role" == "$role" ]] && return 0
+    done
+    return 1
 }
 
 # Unique disks, in the order they first appear.
@@ -425,40 +455,85 @@ plan_disks() {
 }
 
 plan_render() {
-    local disk entry e_disk e_role e_type e_label e_size n disk_size
+    local disk entry e_disk e_role e_type e_label e_size e_src e_start e_end
+    local disk_size n shown
     while read -r disk; do
         [[ -z "$disk" ]] && continue
         disk_size=$(lsblk -dnpo SIZE "$disk" 2>/dev/null | xargs || echo "?")
         printf '\n'
-        warn "${disk} (${disk_size}) -- WILL BE WIPED"
+        if [[ "$PLAN_WIPE_DISKS" == true ]]; then
+            warn "${disk} (${disk_size}) -- WILL BE WIPED"
+        else
+            info "${disk} (${disk_size}) -- WILL BE PRESERVED, only the partitions below are touched"
+        fi
         n=0
         for entry in "${PART_PLAN[@]}"; do
             # e_type is parsed for symmetry with the entry format but not
             # printed below.
             # shellcheck disable=SC2034
-            IFS='|' read -r e_disk e_role e_type e_label e_size <<< "$entry"
+            IFS='|' read -r e_disk e_role e_type e_label e_size e_src e_start e_end <<< "$entry"
             [[ "$e_disk" != "$disk" ]] && continue
-            n=$((n + 1))
-            printf '    %-16s %-6s %-6s %s\n' \
-                "$(part_device "$disk" "$n")" "$e_size" "$e_role" "$e_label"
+            if [[ "$e_src" != "new" ]]; then
+                shown="$e_src (reuse)"
+            elif [[ -n "$e_start" ]]; then
+                shown="new, sectors ${e_start}-${e_end}"
+            else
+                # Whole-disk mode numbers sequentially from 1, so the device
+                # name is predictable here and nowhere else. The pre-existing
+                # plan_render test asserts on exactly these strings.
+                n=$(( n + 1 ))
+                shown=$(part_device "$disk" "$n")
+            fi
+            printf '    %-6s %-6s %-30s %s\n' "$e_role" "$e_size" "$shown" "$e_label"
         done
     done < <(plan_disks)
 }
 
 plan_execute() {
-    local disk entry e_disk e_role e_type e_label e_size n partdev size_flag
+    local disk entry e_disk e_role e_type e_label e_size e_src e_start e_end
+    local n partdev size_flag touched
     while read -r disk; do
         [[ -z "$disk" ]] && continue
-        info "Partitioning ${disk}..."
-        run_cmd sgdisk --zap-all "$disk"
+        touched=false
+        # Initialised per disk, not inside the wipe branch: the sizeless-new
+        # path below does `n=$(( n + 1 ))`, and in carve mode that branch was
+        # reached with n never assigned -- an abort under set -u.
         n=0
+        if [[ "$PLAN_WIPE_DISKS" == true ]]; then
+            info "Partitioning ${disk}..."
+            run_cmd sgdisk --zap-all "$disk"
+            touched=true
+        fi
         for entry in "${PART_PLAN[@]}"; do
-            IFS='|' read -r e_disk e_role e_type e_label e_size <<< "$entry"
+            IFS='|' read -r e_disk e_role e_type e_label e_size e_src e_start e_end <<< "$entry"
             [[ "$e_disk" != "$disk" ]] && continue
-            n=$((n + 1))
-            size_flag=$(size_to_sgdisk "$e_size") || return 1
-            run_cmd sgdisk -n "${n}:0:${size_flag}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
-            partdev=$(part_device "$disk" "$n")
+
+            if [[ "$e_src" != "new" ]]; then
+                # Adopting an existing partition: no sgdisk, no partprobe, and
+                # deliberately no type-code fix-up. Rewriting the GPT type of a
+                # partition the operator is reusing is a write to a table this
+                # mode promised not to touch, and nothing in the install needs
+                # it -- GRUB finds the ESP by contents, not by type code.
+                partdev=$e_src
+            elif [[ -n "$e_start" ]]; then
+                # Under --dry-run nothing is created, so a second carve entry on
+                # the same disk prints the same partition number as the first.
+                # Not a bug to fix by faking a counter: the sectors are what the
+                # rehearsal is for, and a faked number would be wrong on any
+                # disk with a hole in its numbering. On a real run sgdisk has
+                # already written the GPT, so the next call reads the new one.
+                n=$(next_part_number "$disk") || return 1
+                run_cmd sgdisk -n "${n}:${e_start}:${e_end}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
+                partdev=$(part_device "$disk" "$n")
+                touched=true
+            else
+                n=$(( n + 1 ))
+                size_flag=$(size_to_sgdisk "$e_size") || return 1
+                run_cmd sgdisk -n "${n}:0:${size_flag}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
+                partdev=$(part_device "$disk" "$n")
+                touched=true
+            fi
+
             # PART_ROOT_RAW is consumed by luks_format/luks_open, not by
             # anything in this file.
             # shellcheck disable=SC2034
@@ -467,9 +542,11 @@ plan_execute() {
                 root) PART_ROOT_RAW="$partdev" ;;
             esac
         done
-        run_cmd partprobe "$disk"
-        [[ "$DRY_RUN" == true ]] || sleep 1
-        success "Partitioned ${disk}"
+        if [[ "$touched" == true ]]; then
+            run_cmd partprobe "$disk"
+            [[ "$DRY_RUN" == true ]] || sleep 1
+            success "Partitioned ${disk}"
+        fi
     done < <(plan_disks)
 }
 

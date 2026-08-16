@@ -4,6 +4,7 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
     source "${BATS_TEST_DIRNAME}/../lib/disk.sh"
     plan_reset
+    PLAN_WIPE_DISKS=true
 }
 
 @test "part_suffix is p for nvme" {
@@ -463,4 +464,106 @@ MOUNT
     [ "$status" -ne 0 ]
     run safe_to_format data
     [ "$status" -ne 0 ]
+}
+
+@test "plan_add defaults source to new and start/end to empty" {
+    plan_add /dev/sda efi ef00 EFI 1G
+    [ "${PART_PLAN[0]}" = "/dev/sda|efi|ef00|EFI|1G|new||" ]
+}
+
+@test "plan_add records a reuse source" {
+    plan_add /dev/sda efi ef00 EFI 1G /dev/sda1
+    [ "${PART_PLAN[0]}" = "/dev/sda|efi|ef00|EFI|1G|/dev/sda1||" ]
+}
+
+@test "plan_add records carve sectors" {
+    plan_add /dev/sda root 8300 Root rest new 2048 999423
+    [ "${PART_PLAN[0]}" = "/dev/sda|root|8300|Root|rest|new|2048|999423" ]
+}
+
+@test "plan_add rejects a source that is neither new nor a device" {
+    run plan_add /dev/sda efi ef00 EFI 1G sda1
+    [ "$status" -ne 0 ]
+}
+
+@test "plan_has_role finds a planned role" {
+    plan_add /dev/sda root 8300 Root rest
+    run plan_has_role root
+    [ "$status" -eq 0 ]
+    run plan_has_role efi
+    [ "$status" -ne 0 ]
+}
+
+@test "plan_execute wipes only when PLAN_WIPE_DISKS is true" {
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdz root 8300 Root rest
+    run plan_execute
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+}
+
+@test "plan_execute never wipes in carve mode" {
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI 1G   new 2048 2099199
+    plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"--zap-all"* ]]
+}
+
+@test "plan_execute carves at the planned sectors" {
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi ef00 EFI 1G new 2048 2099199
+    run plan_execute
+    [[ "$output" == *":2048:2099199"* ]]
+}
+
+@test "plan_execute issues no sgdisk at all for a reused partition" {
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi ef00 EFI 1G /dev/sdz5
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"sgdisk"* ]]
+}
+
+@test "plan_execute assigns role globals from a reused partition" {
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G   /dev/sdz5
+    plan_add /dev/sdz root 8300 Root rest /dev/sdz7
+    plan_execute
+    [ "$PART_EFI" = "/dev/sdz5" ]
+    [ "$PART_ROOT_RAW" = "/dev/sdz7" ]
+}
+
+@test "plan_execute does not abort on a sizeless new entry in carve mode" {
+    # Regression: n was initialised only inside the wipe branch, so this path
+    # died with "n: unbound variable" under set -u.
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz root 8300 Root 1G
+    run plan_execute
+    [ "$status" -eq 0 ]
+}
+
+@test "plan_render marks a carve plan as preserving the disk" {
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz root 8300 Root rest new 2048 999423
+    run plan_render
+    [[ "$output" != *"WILL BE WIPED"* ]]
+    [[ "$output" == *"WILL BE PRESERVED"* ]]
+}
+
+@test "plan_render still names devices in whole-disk mode" {
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/nvme0n1 efi  ef00 EFI  1G
+    plan_add /dev/nvme0n1 root 8300 Root rest
+    run plan_render
+    [[ "$output" == *"/dev/nvme0n1p1"* ]]
+    [[ "$output" == *"/dev/nvme0n1p2"* ]]
+    [[ "$output" == *"WILL BE WIPED"* ]]
 }
