@@ -7,7 +7,15 @@
 # Roles: efi, root, data.  Size: "512M", "1G", or "rest".
 # Source: "new" to create it, or a /dev/... path to adopt an existing partition.
 # Start/end: sectors, set only when carving into a gap; empty means "let sgdisk
-# place it", which is only correct on a disk that was just wiped.
+# place it" -- correct only on a disk that was just wiped, which plan_validate
+# enforces rather than trusting.
+#
+# Eight fields, and every `IFS='|' read` below must name all eight. The sites
+# that change together when a field is added: plan_add (which joins them),
+# plan_has_role, plan_disks, plan_render (twice) and plan_validate. A site left
+# at the old arity does not fail -- read's last variable silently absorbs the
+# remainder -- so the symptom is every later field shifted by one, which is the
+# same corruption a stray '|' in a field causes and which plan_add now refuses.
 PART_PLAN=()
 
 # Whole-disk mode sets this. It gates the single `sgdisk --zap-all` in this
@@ -421,15 +429,71 @@ safe_to_format() {
 plan_reset() { PART_PLAN=(); PLAN_WIPE_DISKS=false; }
 
 plan_add() {
+    # Arity first, before any $5 is read: a four-argument call otherwise dies
+    # with a raw `$5: unbound variable` from bash rather than this function's
+    # own diagnostic. size_to_sectors takes the same care for the same reason.
+    (( $# >= 5 && $# <= 8 )) \
+        || { error "plan_add: want 5 to 8 arguments (disk role type_code label size [source [start end]]), got $#"; return 1; }
     local disk=$1 role=$2 type_code=$3 label=$4 size=$5
     local source=${6:-new} start=${7:-} end=${8:-}
+    local field prefix index
+
+    # A '|' or newline in any field does not corrupt that field -- it forges
+    # the ones after it, because the entry is joined and split on '|'.
+    # Measured: a '|' in a label shifted every later field right and left
+    # PART_EFI holding "1G"; a newline truncated the entry into a reuse of the
+    # empty device, setting PART_ROOT_RAW="" -- the mkfs.fat "" failure
+    # plan_has_role exists to prevent; and a reuse entry whose size read
+    # "1|new|2048|999423" came back out as a carve entry, running sgdisk in the
+    # one mode that promises never to. Refused, not escaped, as
+    # chroot_write_config and grub_cmdline_add refuse their own metacharacters.
+    for field in "$disk" "$role" "$type_code" "$label" "$size" "$source" "$start" "$end"; do
+        [[ "$field" != *"|"* && "$field" != *$'\n'* ]] \
+            || { error "plan_add: '|' and newline separate entry fields and cannot appear inside one"; return 1; }
+    done
+    # An empty field reaches sgdisk as an empty argument (`-c 1:`) or matches
+    # no branch of plan_execute's role case, in both cases silently.
+    [[ -n "$role" && -n "$type_code" && -n "$label" && -n "$size" ]] \
+        || { error "plan_add: role, type_code, label and size must all be non-empty"; return 1; }
     [[ "$disk" == /dev/* ]] || { error "plan_add: '$disk' is not an absolute device path"; return 1; }
-    [[ "$source" == "new" || "$source" == /dev/* ]] \
-        || { error "plan_add: source must be 'new' or a /dev path, got '${source}'"; return 1; }
-    # A reuse entry's size is descriptive only -- the partition already has one
-    # -- so it is not validated. A new entry's is what sgdisk gets handed.
-    if [[ "$source" == "new" ]]; then
+
+    if [[ "$source" != "new" ]]; then
+        # Must be a partition *of this entry's disk*, checked by construction
+        # with part_suffix so both naming conventions (sda1, nvme0n1p5) come
+        # from the one place that already knows them. A bare `/dev/*` prefix
+        # test was not validation: it accepted the whole disk /dev/sdz (which
+        # btrfs_create_subvols would later mkfs, destroying every partition on
+        # it), '/dev/', '/dev/../etc/passwd', and a partition of a *different*
+        # disk -- which plan_render then listed under this disk's banner while
+        # never naming the disk it would actually touch.
+        prefix="${disk}$(part_suffix "$disk")"
+        index=${source#"$prefix"}
+        [[ "$source" != "$prefix" && "$index" != "$source" && "$index" =~ ^[0-9]+$ ]] \
+            || { error "plan_add: source must be 'new' or a partition of ${disk}, got '${source}'"; return 1; }
+        # The operator asked for two contradictory things; silently dropping
+        # one of them picks for them.
+        [[ -z "$start" && -z "$end" ]] \
+            || { error "plan_add: a reuse entry cannot also carve sectors (source '${source}' with '${start}'/'${end}')"; return 1; }
+        # A reuse entry's size is descriptive only -- the partition already has
+        # one -- so it is not validated against sgdisk's grammar.
+    else
         size_to_sgdisk "$size" >/dev/null || return 1
+        if [[ -n "$start" || -n "$end" ]]; then
+            # Both or neither. One alone is a half-built carve entry, and
+            # plan_execute's sequential branch would take it and create the
+            # partition at sgdisk's choice of offset rather than the
+            # operator's.
+            [[ -n "$start" && -n "$end" ]] \
+                || { error "plan_add: a carve entry needs both start and end, got '${start}'/'${end}'"; return 1; }
+            # Validated before any arithmetic, as align_gap and carve_layout
+            # do: bash resolves a non-numeric token in (( )) as a variable name
+            # instead of failing, and unvalidated sectors reach sgdisk verbatim
+            # (`sgdisk -n 1:abc:def`).
+            [[ "$start" =~ ^[0-9]+$ && "$end" =~ ^[0-9]+$ ]] \
+                || { error "plan_add: carve sectors must be plain integers, got '${start}'/'${end}'"; return 1; }
+            (( end > start )) \
+                || { error "plan_add: carve end (${end}) must be past its start (${start})"; return 1; }
+        fi
     fi
     PART_PLAN+=("${disk}|${role}|${type_code}|${label}|${size}|${source}|${start}|${end}")
 }
@@ -452,16 +516,77 @@ plan_has_role() {
 plan_disks() {
     local entry disk seen=""
     for entry in "${PART_PLAN[@]}"; do
-        IFS='|' read -r disk _ _ _ _ <<< "$entry"
+        IFS='|' read -r disk _ _ _ _ _ _ _ <<< "$entry"
         [[ "$seen" == *"|${disk}|"* ]] && continue
         seen="${seen}|${disk}|"
         echo "$disk"
     done
 }
 
+# plan_validate -- refuse an incoherent plan before anything is written.
+#
+# Runs over the whole plan up front rather than per disk inside plan_execute's
+# write loop: refusing on the second disk after the first has already been
+# zapped is not a refusal. Same reasoning as carve_layout resolving every
+# partition to sectors before the first sgdisk.
+plan_validate() {
+    local entry e_disk e_role e_type e_label e_size e_src e_start e_end
+    local disk has_reuse has_placed has_sectored
+    while read -r disk; do
+        [[ -z "$disk" ]] && continue
+        has_reuse=false
+        has_placed=false
+        has_sectored=false
+        for entry in "${PART_PLAN[@]}"; do
+            IFS='|' read -r e_disk e_role e_type e_label e_size e_src e_start e_end <<< "$entry"
+            [[ "$e_disk" != "$disk" ]] && continue
+            if [[ "$e_src" != "new" ]]; then
+                has_reuse=true
+                has_sectored=true
+            elif [[ -n "$e_start" ]]; then
+                has_sectored=true
+            elif [[ "$PLAN_WIPE_DISKS" == true ]]; then
+                has_placed=true
+            else
+                # A sizeless new entry lets sgdisk place the partition from
+                # sector 0 at the lowest free number, which only means anything
+                # on a table that was just zapped. On a live table
+                # `sgdisk -n 1:0:+1G` overwrites partition 1 -- on the target
+                # machine that is the Windows ESP -- under a banner that just
+                # told the operator the disk would be preserved.
+                error "plan_validate: ${e_role} on ${disk} has no sectors, and only whole-disk mode may let sgdisk place it"
+                return 1
+            fi
+        done
+        # Sequential placement counts 1, 2, 3... from a table that was just
+        # zapped; carving and reuse take their numbers from the live table via
+        # next_part_number. Mixing the two on one disk means two numbering
+        # schemes racing: measured, a carve and a sizeless-new entry were both
+        # issued as `sgdisk -n 1:`, the second overwriting the first. Sharing
+        # one counter instead only moves the damage -- it made plan_render's
+        # column disagree with the number actually created. Neither scheme is
+        # right for a mixed disk, so the mix is refused and each stays correct
+        # in the case it owns.
+        if [[ "$has_placed" == true && "$has_sectored" == true ]]; then
+            error "plan_validate: ${disk} mixes partitions placed by sgdisk with partitions at explicit sectors; the two cannot be numbered consistently"
+            return 1
+        fi
+        # PLAN_WIPE_DISKS is one flag for the whole plan while entries are
+        # per-disk, so "wipe this disk, adopt a partition on that one" cannot
+        # be expressed -- the zap destroys the partition the other entry
+        # adopts. Refused rather than given a per-disk field, which is a plan
+        # change Task 10 owns; "carve on one disk, reuse an ESP on another" is
+        # the shape that needs it.
+        if [[ "$PLAN_WIPE_DISKS" == true && "$has_reuse" == true ]]; then
+            error "plan_validate: ${disk} is set to be wiped, but the plan also reuses a partition on it"
+            return 1
+        fi
+    done < <(plan_disks)
+}
+
 plan_render() {
     local disk entry e_disk e_role e_type e_label e_size e_src e_start e_end
-    local disk_size n shown
+    local disk_size n shown predictable
     while read -r disk; do
         [[ -z "$disk" ]] && continue
         disk_size=$(lsblk -dnpo SIZE "$disk" 2>/dev/null | xargs || echo "?")
@@ -471,6 +596,22 @@ plan_render() {
         else
             info "${disk} (${disk_size}) -- WILL BE PRESERVED, only the partitions below are touched"
         fi
+        # Sequential numbering is predictable only on a disk whose entire plan
+        # is sequential-new on a table about to be zapped. Mix in a reuse or a
+        # carve and the numbers come from the live table via next_part_number,
+        # which this function never calls and cannot predict: measured, it
+        # printed /dev/sdz1 for a partition plan_execute went on to create as
+        # /dev/sdz2. Naming the wrong device on the screen the operator reads
+        # immediately before typing YES is the one thing this must not do, so
+        # an unpredictable row says so instead of guessing.
+        predictable=$PLAN_WIPE_DISKS
+        for entry in "${PART_PLAN[@]}"; do
+            IFS='|' read -r e_disk _ _ _ _ e_src e_start _ <<< "$entry"
+            [[ "$e_disk" != "$disk" ]] && continue
+            if [[ "$e_src" != "new" || -n "$e_start" ]]; then
+                predictable=false
+            fi
+        done
         n=0
         for entry in "${PART_PLAN[@]}"; do
             # e_type is parsed for symmetry with the entry format but not
@@ -482,12 +623,11 @@ plan_render() {
                 shown="$e_src (reuse)"
             elif [[ -n "$e_start" ]]; then
                 shown="new, sectors ${e_start}-${e_end}"
-            else
-                # Whole-disk mode numbers sequentially from 1, so the device
-                # name is predictable here and nowhere else. The pre-existing
-                # plan_render test asserts on exactly these strings.
+            elif [[ "$predictable" == true ]]; then
                 n=$(( n + 1 ))
                 shown=$(part_device "$disk" "$n")
+            else
+                shown="new, number assigned at write time"
             fi
             printf '    %-6s %-6s %-30s %s\n' "$e_role" "$e_size" "$shown" "$e_label"
         done
@@ -496,17 +636,23 @@ plan_render() {
 
 plan_execute() {
     local disk entry e_disk e_role e_type e_label e_size e_src e_start e_end
-    local n partdev size_flag touched
+    local seq_n part_n partdev size_flag touched
+    plan_validate || return 1
     while read -r disk; do
         [[ -z "$disk" ]] && continue
         touched=false
+        # Counts the sequential entries only, and is never seeded from
+        # next_part_number. One counter shared with the carve branch below let
+        # the sequential branch resume from a table-derived number, so a mixed
+        # plan created /dev/sdz2 for the row plan_render had called /dev/sdz1.
+        #
         # Initialised per disk, not inside the wipe branch: the sizeless-new
-        # path below does `n=$(( n + 1 ))`, and in carve mode that branch was
-        # reached with n never assigned -- an abort under set -u.
-        n=0
+        # path does `seq_n=$(( seq_n + 1 ))`, and in carve mode that branch was
+        # reached with it never assigned -- an abort under set -u.
+        seq_n=0
         if [[ "$PLAN_WIPE_DISKS" == true ]]; then
             info "Partitioning ${disk}..."
-            run_cmd sgdisk --zap-all "$disk"
+            run_cmd sgdisk --zap-all "$disk" || return 1
             touched=true
         fi
         for entry in "${PART_PLAN[@]}"; do
@@ -527,15 +673,22 @@ plan_execute() {
                 # rehearsal is for, and a faked number would be wrong on any
                 # disk with a hole in its numbering. On a real run sgdisk has
                 # already written the GPT, so the next call reads the new one.
-                n=$(next_part_number "$disk") || return 1
-                run_cmd sgdisk -n "${n}:${e_start}:${e_end}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
-                partdev=$(part_device "$disk" "$n")
+                part_n=$(next_part_number "$disk") || return 1
+                run_cmd sgdisk -n "${part_n}:${e_start}:${e_end}" -t "${part_n}:${e_type}" -c "${part_n}:${e_label}" "$disk" || return 1
+                partdev=$(part_device "$disk" "$part_n")
                 touched=true
             else
-                n=$(( n + 1 ))
+                # Sequential placement is an explicit case now, not the branch
+                # anything unrecognised falls into. plan_validate has already
+                # refused this combination before a byte was written; this is
+                # the second lock, for a PART_PLAN assembled by some future
+                # caller that does not go through plan_add.
+                [[ "$PLAN_WIPE_DISKS" == true ]] \
+                    || { error "plan_execute: refusing to let sgdisk place ${e_role} on ${disk}, which is not being wiped"; return 1; }
+                seq_n=$(( seq_n + 1 ))
                 size_flag=$(size_to_sgdisk "$e_size") || return 1
-                run_cmd sgdisk -n "${n}:0:${size_flag}" -t "${n}:${e_type}" -c "${n}:${e_label}" "$disk"
-                partdev=$(part_device "$disk" "$n")
+                run_cmd sgdisk -n "${seq_n}:0:${size_flag}" -t "${seq_n}:${e_type}" -c "${seq_n}:${e_label}" "$disk" || return 1
+                partdev=$(part_device "$disk" "$seq_n")
                 touched=true
             fi
 

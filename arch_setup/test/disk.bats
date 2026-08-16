@@ -5,6 +5,9 @@ setup() {
     source "${BATS_TEST_DIRNAME}/../lib/disk.sh"
     plan_reset
     PLAN_WIPE_DISKS=true
+    # Defaulted here, not left to each case: a plan_execute test that forgets
+    # its own DRY_RUN line runs sgdisk, mkfs and mount against this machine.
+    DRY_RUN=true
 }
 
 @test "part_suffix is p for nvme" {
@@ -540,15 +543,18 @@ MOUNT
     [ "$PART_ROOT_RAW" = "/dev/sdz7" ]
 }
 
-# Regression: n was initialised only inside the wipe branch, so the
-# sizeless-new path in carve mode reached `n=$(( n + 1 ))` with n never
-# assigned and died with "n: unbound variable".
+# A sizeless new entry lets sgdisk place the partition from sector 0 at the
+# lowest free number, which is only meaningful on a table that was just zapped.
+# In preserve mode it must be refused, not created: on a live table
+# `sgdisk -n 1:0:+1G` overwrites partition 1.
 #
-# Run in its own `set -euo pipefail` shell, not called directly: bats does not
-# set -u in the test shell, and install.sh -- the only caller that matters --
-# does. Called directly this case passes with the bug reintroduced, which is
-# how it was written first and why it is written this way now.
-@test "plan_execute does not abort on a sizeless new entry in carve mode" {
+# It must be refused *cleanly*, which is the second half of this case. The
+# branch that reaches it does `seq_n=$(( seq_n + 1 ))`, and with the counter
+# initialised only inside the wipe branch that was an abort on an unset
+# variable rather than a diagnosis. So this runs in its own `set -euo pipefail`
+# shell: bats does not set -u in the test shell and install.sh does, and called
+# directly this case passed with that bug reintroduced.
+@test "plan_execute refuses a sizeless new entry on a disk it is not wiping" {
     run bash -c "
         set -euo pipefail
         source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
@@ -559,8 +565,12 @@ MOUNT
         plan_add /dev/sdz root 8300 Root 1G
         plan_execute
     "
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
     [[ "$output" != *"unbound variable"* ]]
+    # Not matched on "sgdisk": the refusal names it. run_cmd prefixes every
+    # command it issues under DRY_RUN, so its absence is the real proof that
+    # nothing was issued.
+    [[ "$output" != *"dry-run"* ]]
 }
 
 @test "plan_execute issues no partprobe for a reuse-only plan" {
@@ -603,6 +613,178 @@ MOUNT
     run plan_render
     [[ "$output" != *"WILL BE WIPED"* ]]
     [[ "$output" == *"WILL BE PRESERVED"* ]]
+}
+
+@test "plan_execute refuses to wipe a disk the plan also reuses a partition on" {
+    # PLAN_WIPE_DISKS is one flag for a plan whose entries are per-disk, so
+    # this combination zapped the very disk holding the partition being
+    # adopted -- under a banner reading WILL BE WIPED directly above a row
+    # reading (reuse).
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/sdz efi  ef00 EFI  1G
+    plan_add /dev/sdy root 8300 Root rest /dev/sdy3
+    run plan_execute
+    [ "$status" -ne 0 ]
+    # Refused before anything was issued, not partway through: /dev/sdz is
+    # rendered first, so a per-disk check would already have zapped it.
+    [[ "$output" != *"--zap-all"* ]]
+}
+
+@test "plan_execute refuses a disk that mixes placed and sector-addressed partitions" {
+    # Sequential entries are numbered 1,2,3... from a freshly zapped table;
+    # carved and reused ones take their number from the live table. On one disk
+    # the two schemes race: both of these were issued as `sgdisk -n 1:`, the
+    # second overwriting the first. Sharing one counter instead only moved the
+    # damage into plan_render, whose column then disagreed with what was made.
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/sdz efi  ef00 EFI  1G  new 2048 2099199
+    plan_add /dev/sdz root 8300 Root 20G
+    run plan_execute
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"dry-run"* ]]
+}
+
+@test "plan_execute still carves several partitions into one disk" {
+    # The counterpart to the case above: refusing the mix must not refuse a
+    # plan that is carved throughout, which is what custom mode produces.
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G   new 2048 2099199
+    plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" == *":2048:2099199"* ]]
+    [[ "$output" == *":2099200:9999999"* ]]
+}
+
+@test "plan_execute still allows reusing one partition and carving another" {
+    # Reuse the ESP, carve the root -- the shape this whole feature exists for.
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G   /dev/sdz5
+    plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" == *":2099200:9999999"* ]]
+}
+
+@test "plan_render does not invent a device number it cannot predict" {
+    # Mixed plans are numbered from the live table by next_part_number, which
+    # plan_render cannot see. Guessing here names a device on the screen the
+    # operator reads immediately before typing YES.
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G /dev/sdz5
+    plan_add /dev/sdz root 8300 Root 20G
+    run plan_render
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"/dev/sdz1"* ]]
+    [[ "$output" == *"assigned at write time"* ]]
+}
+
+@test "plan_execute stops when sgdisk fails instead of reporting success" {
+    # Measured with a failing first sgdisk: the second carve entry got the same
+    # partition number, because the first write never landed, and plan_execute
+    # still printed Partitioned and returned 0. install.sh's set -e covered
+    # this; plan_execute should not need its caller to.
+    DRY_RUN=false
+    PLAN_WIPE_DISKS=true
+    sgdisk() { return 1; }
+    partprobe() { :; }
+    plan_add /dev/sdz efi ef00 EFI 1G
+    run plan_execute
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Partitioned /dev/sdz"* ]]
+}
+
+@test "plan_add refuses the entry separator in a field" {
+    # Fields are joined and split on '|', so a '|' does not corrupt its own
+    # field -- it forges every field after it. This payload turned a reuse
+    # entry into a carve entry that ran sgdisk in preserve mode.
+    run plan_add /dev/sdz root 8300 Root '1|new|2048|999423' /dev/sdz7
+    [ "$status" -ne 0 ]
+    run plan_add /dev/sdz root 8300 'Ro|ot' rest
+    [ "$status" -ne 0 ]
+    [ "${#PART_PLAN[@]}" -eq 0 ]
+}
+
+@test "plan_add refuses a newline in a field" {
+    # A newline truncated the entry into a reuse of the empty device, setting
+    # PART_ROOT_RAW="" -- the mkfs.fat "" failure plan_has_role exists to stop.
+    run plan_add /dev/sdz root 8300 "$(printf 'Ro\not')" rest
+    [ "$status" -ne 0 ]
+    [ "${#PART_PLAN[@]}" -eq 0 ]
+}
+
+@test "plan_add refuses an empty label" {
+    run plan_add /dev/sdz root 8300 "" rest
+    [ "$status" -ne 0 ]
+}
+
+@test "plan_add refuses a source that is not a partition of this entry's disk" {
+    # The whole disk: btrfs_create_subvols would later mkfs it, destroying
+    # every partition on it.
+    run plan_add /dev/sdz root 8300 Root rest /dev/sdz
+    [ "$status" -ne 0 ]
+    # A partition of a different disk: plan_render filed it under /dev/sdz's
+    # banner and never named /dev/sdy as touched at all.
+    run plan_add /dev/sdz root 8300 Root rest /dev/sdy3
+    [ "$status" -ne 0 ]
+    run plan_add /dev/sdz root 8300 Root rest /dev/
+    [ "$status" -ne 0 ]
+    run plan_add /dev/sdz root 8300 Root rest /dev/../etc/passwd
+    [ "$status" -ne 0 ]
+    [ "${#PART_PLAN[@]}" -eq 0 ]
+}
+
+@test "plan_add accepts a partition of an nvme disk, suffix and all" {
+    # The counterpart to the case above: the check is built with part_suffix,
+    # so it has to keep accepting the naming convention it encodes.
+    plan_add /dev/nvme0n1 efi ef00 EFI 1G /dev/nvme0n1p5
+    [ "${PART_PLAN[0]}" = "/dev/nvme0n1|efi|ef00|EFI|1G|/dev/nvme0n1p5||" ]
+}
+
+@test "plan_add refuses half a carve range" {
+    run plan_add /dev/sdz root 8300 Root 1G new "" 999423
+    [ "$status" -ne 0 ]
+    run plan_add /dev/sdz root 8300 Root 1G new 2048 ""
+    [ "$status" -ne 0 ]
+    [ "${#PART_PLAN[@]}" -eq 0 ]
+}
+
+@test "plan_add refuses carve sectors that are not plain integers" {
+    # Unvalidated, these reached sgdisk verbatim as `-n 1:abc:def`.
+    run plan_add /dev/sdz root 8300 Root rest new abc def
+    [ "$status" -ne 0 ]
+    run plan_add /dev/sdz root 8300 Root rest new 2048 '$(id)'
+    [ "$status" -ne 0 ]
+    [ "${#PART_PLAN[@]}" -eq 0 ]
+}
+
+@test "plan_add refuses a carve range that does not run forwards" {
+    run plan_add /dev/sdz root 8300 Root rest new 999423 2048
+    [ "$status" -ne 0 ]
+}
+
+@test "plan_add refuses a reuse entry that also carves sectors" {
+    # Two contradictory requests; silently dropping one picks for the operator.
+    run plan_add /dev/sdz root 8300 Root rest /dev/sdz7 2048 999423
+    [ "$status" -ne 0 ]
+}
+
+@test "plan_add reports its own error on a short call" {
+    # Without an arity check this died on a raw "$5: unbound variable" from
+    # bash, naming nothing the caller could act on. Run under set -u for the
+    # same reason as the sizeless-new case above: bats does not set it and
+    # install.sh does, and called directly this passes either way, because an
+    # unset $5 without set -u is just an empty size.
+    run bash -c "
+        set -euo pipefail
+        source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+        source '${BATS_TEST_DIRNAME}/../lib/disk.sh'
+        plan_reset
+        plan_add /dev/sdz efi ef00 EFI
+    "
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"unbound variable"* ]]
+    [[ "$output" == *"5 to 8 arguments"* ]]
 }
 
 @test "plan_render still names devices in whole-disk mode" {
