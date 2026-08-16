@@ -164,6 +164,77 @@ disk_free_gaps() {
     parted -m -s "$disk" unit s print free 2>/dev/null | parse_free_gaps
 }
 
+# carve_layout <gap_start> <gap_end> <size>... -> "start end" per size.
+#
+# The whole plan is resolved to sectors here, before any sgdisk runs, so a
+# request that does not fit is refused while the disk is still untouched. The
+# alternative -- letting sgdisk discover it -- fails with some partitions
+# already created, on a disk the operator chose precisely because it holds data
+# they are keeping.
+carve_layout() {
+    local gap_start=$1 gap_end=$2; shift 2
+    local cursor=$gap_start size sectors end i=0 n=$#
+    for size in "$@"; do
+        i=$(( i + 1 ))
+        if [[ "$size" == "rest" ]]; then
+            (( i == n )) \
+                || { error "carve_layout: only the last partition may be 'rest'"; return 1; }
+            end=$gap_end
+        else
+            sectors=$(size_to_sectors "$size") || return 1
+            end=$(( cursor + sectors - 1 ))
+        fi
+        (( end <= gap_end )) \
+            || { error "carve_layout: the requested layout does not fit in the gap (need through sector ${end}, gap ends at ${gap_end})"; return 1; }
+        (( end > cursor )) \
+            || { error "carve_layout: '${size}' leaves no sectors"; return 1; }
+        printf '%s %s\n' "$cursor" "$end"
+        # Next partition starts on the following 1 MiB boundary, not at end+1:
+        # sgdisk would silently align it forward anyway, and then the plan's
+        # printed sectors and the disk's actual ones disagree -- which is
+        # exactly what --dry-run exists to rule out.
+        cursor=$(( (end + 2048) / 2048 * 2048 ))
+    done
+}
+
+# parse_part_numbers: sgdisk -p output on stdin -> one partition number a line.
+parse_part_numbers() {
+    local line num
+    while IFS= read -r line; do
+        read -r num _ <<< "$line"
+        [[ "$num" =~ ^[0-9]+$ ]] || continue
+        echo "$num"
+    done
+}
+
+# lowest_free_number <used>... -> the lowest unused number >= 1.
+#
+# Computed, not counted: GPT numbers are neither contiguous nor ordered by
+# offset, so "one more than the count" hands sgdisk a number that already
+# exists on any disk a partition was ever deleted from -- and sgdisk -n onto an
+# existing number overwrites its entry.
+lowest_free_number() {
+    local candidate=1 used
+    while true; do
+        for used in "$@"; do
+            if [[ "$used" == "$candidate" ]]; then
+                candidate=$(( candidate + 1 ))
+                continue 2
+            fi
+        done
+        echo "$candidate"
+        return 0
+    done
+}
+
+# next_part_number <disk> -- lowest_free_number against a real partition table.
+next_part_number() {
+    local disk=$1
+    local -a used=()
+    mapfile -t used < <(sgdisk -p "$disk" 2>/dev/null | parse_part_numbers)
+    lowest_free_number "${used[@]}"
+}
+
 plan_reset() { PART_PLAN=(); }
 
 plan_add() {

@@ -223,3 +223,59 @@ PARTED"
     [ "$status" -eq 0 ]
     [ "$output" = "2048 50000 47953" ]
 }
+
+@test "carve_layout lays two partitions into a gap, second takes the rest" {
+    # 1G at 512b = 2097152 sectors, so the first runs 2048..2099199, and the
+    # next 1MiB boundary after that is 2099200.
+    run carve_layout 2048 10000000 1G rest
+    [ "$status" -eq 0 ]
+    [ "${lines[0]}" = "2048 2099199" ]
+    [ "${lines[1]}" = "2099200 10000000" ]
+}
+
+@test "carve_layout gives rest the whole gap when it is the only entry" {
+    run carve_layout 2048 999423 rest
+    [ "$status" -eq 0 ]
+    [ "$output" = "2048 999423" ]
+}
+
+@test "carve_layout refuses a 1G partition in a gap one MiB too small" {
+    run carve_layout 2048 2097151 1G
+    [ "$status" -ne 0 ]
+}
+
+@test "carve_layout rejects a plan larger than the gap" {
+    run carve_layout 2048 999423 1G
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"does not fit"* ]]
+}
+
+@test "carve_layout rejects rest anywhere but last" {
+    run carve_layout 2048 9999999 rest 1G
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"only the last"* ]]
+}
+
+@test "parse_part_numbers reads the numbers out of sgdisk -p" {
+    run bash -c "$(declare -f parse_part_numbers); cat <<'SGDISK' | parse_part_numbers
+Disk /dev/nvme0n1: 1953525168 sectors, 931.5 GiB
+Number  Start (sector)    End (sector)  Size       Code  Name
+   1              34           32767   16.0 MiB    0C01  Microsoft reserved partition
+   2           32768      1024032767   488.3 GiB   0700  Basic data partition
+SGDISK"
+    [ "${lines[0]}" = "1" ]
+    [ "${lines[1]}" = "2" ]
+    [ "${#lines[@]}" -eq 2 ]
+}
+
+@test "lowest_free_number fills a hole in the numbering" {
+    [ "$(lowest_free_number 1 2 4)" = "3" ]
+}
+
+@test "lowest_free_number starts at 1 on an empty table" {
+    [ "$(lowest_free_number)" = "1" ]
+}
+
+@test "lowest_free_number appends after a contiguous run" {
+    [ "$(lowest_free_number 1 2 3)" = "4" ]
+}
