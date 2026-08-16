@@ -540,14 +540,61 @@ MOUNT
     [ "$PART_ROOT_RAW" = "/dev/sdz7" ]
 }
 
+# Regression: n was initialised only inside the wipe branch, so the
+# sizeless-new path in carve mode reached `n=$(( n + 1 ))` with n never
+# assigned and died with "n: unbound variable".
+#
+# Run in its own `set -euo pipefail` shell, not called directly: bats does not
+# set -u in the test shell, and install.sh -- the only caller that matters --
+# does. Called directly this case passes with the bug reintroduced, which is
+# how it was written first and why it is written this way now.
 @test "plan_execute does not abort on a sizeless new entry in carve mode" {
-    # Regression: n was initialised only inside the wipe branch, so this path
-    # died with "n: unbound variable" under set -u.
+    run bash -c "
+        set -euo pipefail
+        source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+        source '${BATS_TEST_DIRNAME}/../lib/disk.sh'
+        DRY_RUN=true
+        PLAN_WIPE_DISKS=false
+        plan_reset
+        plan_add /dev/sdz root 8300 Root 1G
+        plan_execute
+    "
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
+@test "plan_execute issues no partprobe for a reuse-only plan" {
+    # partprobe re-reads the partition table it was just told not to touch.
+    # Harmless in isolation, but it is the one command in the reuse path that
+    # would still reach a disk this mode promised to leave alone.
     DRY_RUN=true
     PLAN_WIPE_DISKS=false
-    plan_add /dev/sdz root 8300 Root 1G
+    plan_add /dev/sdz efi  ef00 EFI  1G   /dev/sdz5
+    plan_add /dev/sdz root 8300 Root rest /dev/sdz7
     run plan_execute
     [ "$status" -eq 0 ]
+    [[ "$output" != *"partprobe"* ]]
+}
+
+@test "plan_render shows the device a reused partition will be adopted from" {
+    # This string is what the operator reads immediately before typing YES, so
+    # it has to name the partition that is actually being taken over.
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi ef00 EFI 1G /dev/sdz5
+    run plan_render
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/dev/sdz5"* ]]
+    [[ "$output" == *"reuse"* ]]
+}
+
+@test "plan_reset clears the wipe flag, not just the entries" {
+    # A mode selector lets an operator choose whole-disk, back out, and choose
+    # custom; a flag left standing from the first choice wipes the disk the
+    # second was picked to preserve.
+    PLAN_WIPE_DISKS=true
+    plan_add /dev/sdz root 8300 Root rest
+    plan_reset
+    [ "$PLAN_WIPE_DISKS" = false ]
 }
 
 @test "plan_render marks a carve plan as preserving the disk" {

@@ -413,7 +413,12 @@ safe_to_format() {
     esac
 }
 
-plan_reset() { PART_PLAN=(); }
+# Clears the wipe flag along with the entries. Once a mode selector exists, an
+# operator who picks whole-disk, backs out, and then picks custom would
+# otherwise carry `true` into carve mode and wipe the disk they chose the mode
+# precisely to preserve. Callers that do want the wipe set the flag *after*
+# calling this, which is the order install.sh's phase_disk uses.
+plan_reset() { PART_PLAN=(); PLAN_WIPE_DISKS=false; }
 
 plan_add() {
     local disk=$1 role=$2 type_code=$3 label=$4 size=$5

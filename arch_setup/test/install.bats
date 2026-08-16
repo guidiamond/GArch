@@ -376,10 +376,15 @@ with_answers() {
     [[ "$output" != *"PLAN_EXECUTE_REACHED"* ]]
 }
 
-# Structural, not behavioural, and deliberately: reaching plan_execute from
-# phase_disk means getting past `[[ -b "$disk" ]]`, which needs a real block
-# device. Creating one needs root, and test/run.sh refuses to run as root. So
-# this asserts on the source, in the same style as the disk-wipe gate above.
+# Structural, not behavioural, and deliberately. Reaching plan_execute from
+# phase_disk means getting past `[[ -b "$disk" ]]`, and there is no
+# *disposable* block device to answer that prompt with: -b is a stat, so an
+# unprivileged test can satisfy it, but only by naming one of the operator's
+# live disks -- and this suite runs on the machine those disks belong to, one
+# un-stubbed call away from partitioning one. A throwaway device would need
+# /dev/loop* (absent here) plus losetup or mknod, both root-only, and
+# test/run.sh refuses to run as root. So this asserts on the source instead,
+# in the same style as the disk-wipe gate above.
 #
 # Worth asserting at all because lib/disk.sh defaults PLAN_WIPE_DISKS to false,
 # so carve and reuse modes cannot wipe by omission -- which leaves whole-disk
