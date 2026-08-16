@@ -253,6 +253,118 @@ next_part_number() {
     lowest_free_number "${used[@]}"
 }
 
+# True when the partition is mounted, in use as swap, or open as a device
+# mapper / md member.
+#
+# Checked before the plan is built, not at format time: mkfs.btrfs on a mounted
+# filesystem fails, but mkfs.fat on one does not -- it happily writes a new FAT
+# over a mounted ESP, and the first thing to notice is the firmware at reboot.
+part_in_use() {
+    local dev=$1 holders
+    findmnt -S "$dev" >/dev/null 2>&1 && return 0
+    swapon --show=NAME --noheadings 2>/dev/null | grep -qxF "$dev" && return 0
+    # /sys/class/block/<name>/holders is non-empty while a LUKS mapping, LVM PV
+    # or md array sits on top -- none of which findmnt reports, because the
+    # thing that is mounted is the mapper device, not this partition.
+    holders=$(ls -A "/sys/class/block/${dev##*/}/holders" 2>/dev/null || true)
+    [[ -n "$holders" ]]
+}
+
+# part_occupancy <dev> -> encrypted | lvm | raid | swap | unformatted | fs:<type>
+#
+# Read from the filesystem signature, before any mount is attempted. This is
+# the check that makes the probe fail *closed*: a LUKS container cannot be
+# mounted, so a mount-first probe reports it as "could not identify" -- which
+# on this machine is the neighbour's encrypted root, the exact partition that
+# must never be formatted by accident.
+part_occupancy() {
+    local dev=$1 fstype
+    # The failure and the empty answer must not collapse into the same value.
+    # `lsblk ... 2>/dev/null | tr -d ... || true` made "lsblk errored" and
+    # "no filesystem signature" both the empty string, which maps to
+    # unformatted, which safe_to_format accepts -- a fail-open path in the one
+    # function whose entire job is to fail closed. No pipe, so no `|| true` is
+    # needed to satisfy pipefail either.
+    fstype=$(lsblk -dno FSTYPE "$dev" 2>/dev/null) \
+        || { echo "unknown"; return 0; }
+    fstype=${fstype//[[:space:]]/}
+    case "$fstype" in
+        crypto_LUKS)       echo "encrypted"   ;;
+        LVM2_member)       echo "lvm"         ;;
+        linux_raid_member) echo "raid"        ;;
+        swap)              echo "swap"        ;;
+        "")                echo "unformatted" ;;
+        *)                 echo "fs:${fstype}" ;;
+    esac
+}
+
+# classify_mounted_tree <dir> -> linux:<NAME> | windows | esp | data | empty
+#
+# Split from part_probe_os so the classification is testable against a
+# directory tree instead of needing a loop device and root.
+classify_mounted_tree() {
+    local root=$1 name
+    if [[ -r "${root}/etc/os-release" ]]; then
+        # Read with a grep+cut rather than sourcing it: /etc/os-release on an
+        # unknown partition is an untrusted file, and sourcing runs it as root.
+        name=$(grep -m1 '^NAME=' "${root}/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
+        echo "linux:${name:-unknown}"
+        return 0
+    fi
+    [[ -d "${root}/Windows/System32" || -e "${root}/bootmgr" ]] && { echo "windows"; return 0; }
+    [[ -d "${root}/EFI" ]] && { echo "esp"; return 0; }
+    [[ -z "$(ls -A "$root" 2>/dev/null || true)" ]] && { echo "empty"; return 0; }
+    echo "data"
+}
+
+# part_probe_os <dev> -> what is on it, in as much detail as can be had safely.
+#
+# Occupancy first, mount second. Read-only with noload, and unmounted on every
+# exit path including failure: this runs against partitions the operator is
+# *keeping*. A plain `mount -o ro` on ext4 replays a dirty journal, which is a
+# write to a neighbour's filesystem -- during a phase that promises not to
+# write, and during --dry-run, which promises to touch nothing at all.
+part_probe_os() {
+    local dev=$1 occ tmp result
+    occ=$(part_occupancy "$dev")
+    case "$occ" in
+        encrypted|lvm|raid|swap|unformatted)
+            # unformatted maps to empty so safe_to_format can accept it; the
+            # other four are terminal -- there is nothing to mount and nothing
+            # about them that makes formatting safe.
+            [[ "$occ" == "unformatted" ]] && { echo "empty"; return 0; }
+            echo "$occ"
+            return 0 ;;
+    esac
+
+    tmp=$(mktemp -d) || { echo "unknown"; return 0; }
+    if mount -o ro,noload "$dev" "$tmp" 2>/dev/null \
+        || mount -o ro,subvol=@ "$dev" "$tmp" 2>/dev/null \
+        || mount -o ro "$dev" "$tmp" 2>/dev/null; then
+        result=$(classify_mounted_tree "$tmp")
+        umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
+    else
+        # It has a filesystem signature but would not mount: a dirty NTFS, a
+        # type this ISO has no driver for, or corruption. Not empty, and not
+        # identifiable -- so it must not be treated as free space.
+        result="unmountable:${occ#fs:}"
+    fi
+    rmdir "$tmp" 2>/dev/null || true
+    echo "$result"
+}
+
+# safe_to_format <probe_result> -- true only for a provably empty partition.
+#
+# Allowlist, not a denylist. The first draft of this used a denylist and
+# accepted "unknown" as free space, which meant every partition the probe
+# could not open -- every encrypted one included -- was formatted silently.
+safe_to_format() {
+    case "$1" in
+        empty|unformatted) return 0 ;;
+        *)                 return 1 ;;
+    esac
+}
+
 plan_reset() { PART_PLAN=(); }
 
 plan_add() {

@@ -294,3 +294,136 @@ SGDISK"
 @test "lowest_free_number appends after a contiguous run" {
     [ "$(lowest_free_number 1 2 3)" = "4" ]
 }
+
+@test "part_in_use is true for a mounted partition" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/findmnt"
+    chmod +x "${stub}/findmnt"
+    PATH="${stub}:${PATH}" run part_in_use /dev/sdz1
+    [ "$status" -eq 0 ]
+}
+
+@test "part_in_use is true for active swap" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/findmnt"
+    printf '#!/bin/bash\necho /dev/sdz1\n' > "${stub}/swapon"
+    chmod +x "${stub}/findmnt" "${stub}/swapon"
+    PATH="${stub}:${PATH}" run part_in_use /dev/sdz1
+    [ "$status" -eq 0 ]
+}
+
+@test "part_in_use is false for an idle partition" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/findmnt"
+    printf '#!/bin/bash\ntrue\n' > "${stub}/swapon"
+    chmod +x "${stub}/findmnt" "${stub}/swapon"
+    PATH="${stub}:${PATH}" run part_in_use /dev/sdz1
+    [ "$status" -ne 0 ]
+}
+
+@test "part_occupancy reports an encrypted container without mounting it" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho crypto_LUKS\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "encrypted" ]
+}
+
+@test "part_occupancy reports lvm, raid and swap members" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho LVM2_member\n' > "${stub}/lsblk"; chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "lvm" ]
+    printf '#!/bin/bash\necho linux_raid_member\n' > "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "raid" ]
+    printf '#!/bin/bash\necho swap\n' > "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "swap" ]
+}
+
+@test "part_occupancy says unknown when lsblk itself fails" {
+    # Regression: lsblk failing and lsblk reporting no signature both produced
+    # the empty string, which meant "unformatted", which safe_to_format accepts.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 3\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "unknown" ]
+}
+
+@test "part_occupancy reports an unformatted partition" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "unformatted" ]
+}
+
+@test "part_occupancy passes a plain filesystem through with its type" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho ext4\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run part_occupancy /dev/sdz1
+    [ "$output" = "fs:ext4" ]
+}
+
+@test "classify_mounted_tree reports a linux install by its os-release NAME" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc"
+    printf 'NAME="Arch Linux"\nID=arch\n' > "${root}/etc/os-release"
+    [ "$(classify_mounted_tree "$root")" = "linux:Arch Linux" ]
+}
+
+@test "classify_mounted_tree reports windows" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/Windows/System32"
+    [ "$(classify_mounted_tree "$root")" = "windows" ]
+}
+
+@test "classify_mounted_tree reports an esp" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/EFI/BOOT"
+    [ "$(classify_mounted_tree "$root")" = "esp" ]
+}
+
+@test "classify_mounted_tree reports an empty tree as empty" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "$root"
+    [ "$(classify_mounted_tree "$root")" = "empty" ]
+}
+
+@test "classify_mounted_tree reports unrecognised content as data" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/photos"
+    [ "$(classify_mounted_tree "$root")" = "data" ]
+}
+
+@test "safe_to_format accepts only a provably empty partition" {
+    run safe_to_format empty
+    [ "$status" -eq 0 ]
+    run safe_to_format unformatted
+    [ "$status" -eq 0 ]
+}
+
+@test "safe_to_format refuses an encrypted container" {
+    run safe_to_format encrypted
+    [ "$status" -ne 0 ]
+}
+
+@test "safe_to_format refuses anything it could not identify" {
+    run safe_to_format "unmountable:ext4"
+    [ "$status" -ne 0 ]
+    run safe_to_format unknown
+    [ "$status" -ne 0 ]
+    run safe_to_format data
+    [ "$status" -ne 0 ]
+}
