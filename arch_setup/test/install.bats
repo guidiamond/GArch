@@ -375,3 +375,28 @@ with_answers() {
     [ "$status" -ne 0 ]
     [[ "$output" != *"PLAN_EXECUTE_REACHED"* ]]
 }
+
+# Structural, not behavioural, and deliberately: reaching plan_execute from
+# phase_disk means getting past `[[ -b "$disk" ]]`, which needs a real block
+# device. Creating one needs root, and test/run.sh refuses to run as root. So
+# this asserts on the source, in the same style as the disk-wipe gate above.
+#
+# Worth asserting at all because lib/disk.sh defaults PLAN_WIPE_DISKS to false,
+# so carve and reuse modes cannot wipe by omission -- which leaves whole-disk
+# mode as the one path that has to opt in, and nothing else in this suite
+# notices if it stops. plan_execute would skip --zap-all and then run
+# `sgdisk -n 1:0:...` onto the live partition table, overwriting partition 1 on
+# a disk whose operator had just answered a prompt reading "Type YES to wipe".
+#
+# The ordering matters as much as the presence: set after plan_execute, the
+# flag is true only for whoever runs next.
+@test "phase_disk opts in to wiping before it reaches plan_execute" {
+    local body set_line exec_line
+    body=$(sed -n '/^phase_disk()/,/^}/p' "$INSTALL_SH")
+    [ -n "$body" ]
+    set_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*PLAN_WIPE_DISKS=true[[:space:]]*$' | cut -d: -f1) || true
+    exec_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*plan_execute[[:space:]]*$' | cut -d: -f1) || true
+    [ -n "$set_line" ]
+    [ -n "$exec_line" ]
+    [ "$set_line" -lt "$exec_line" ]
+}

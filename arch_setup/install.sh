@@ -310,6 +310,13 @@ phase_disk() {
     done
 
     plan_reset
+    # Said explicitly because lib/disk.sh defaults PLAN_WIPE_DISKS to false, so
+    # that carve and reuse modes cannot wipe a disk by omission. That makes this
+    # -- the one path that really does destroy the partition table -- the one
+    # that has to opt in. Dropping this line does not fail loudly: plan_execute
+    # skips --zap-all and then runs `sgdisk -n 1:0:...` onto the live table,
+    # overwriting partition 1 on a disk the operator was told would be wiped.
+    PLAN_WIPE_DISKS=true
     plan_add "$disk" efi  ef00 "EFI System" "$esp_size"
     plan_add "$disk" root 8300 "Root"       "rest"
 
