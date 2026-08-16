@@ -407,6 +407,43 @@ SGDISK"
     [ "$(classify_mounted_tree "$root")" = "data" ]
 }
 
+@test "part_probe_os probes a dirty xfs partition with norecovery, never a bare ro mount" {
+    local stub="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/mount.log"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho xfs\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+echo "\$*" >> "${log}"
+exit 1
+MOUNT
+    chmod +x "${stub}/mount"
+    PATH="${stub}:${PATH}" run part_probe_os /dev/sdz1
+    [ "$status" -eq 0 ]
+    [ "$output" = "unmountable:xfs" ]
+    grep -qF -- '-o ro,norecovery /dev/sdz1' "$log"
+    ! grep -qE -- '-o ro /dev/sdz1' "$log"
+}
+
+@test "part_probe_os refuses an unrecognised filesystem instead of a bare ro mount" {
+    local stub="${BATS_TEST_TMPDIR}/bin" log="${BATS_TEST_TMPDIR}/mount.log"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho reiserfs\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+echo "\$*" >> "${log}"
+exit 0
+MOUNT
+    chmod +x "${stub}/mount"
+    PATH="${stub}:${PATH}" run part_probe_os /dev/sdz1
+    [ "$status" -eq 0 ]
+    [ "$output" = "unmountable:reiserfs" ]
+    # mount must never even be invoked for a type with no known-safe option --
+    # not attempted-and-refused, simply not attempted.
+    [ ! -e "$log" ]
+}
+
 @test "safe_to_format accepts only a provably empty partition" {
     run safe_to_format empty
     [ "$status" -eq 0 ]
