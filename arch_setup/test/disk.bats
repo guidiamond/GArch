@@ -256,6 +256,21 @@ PARTED"
     [[ "$output" == *"only the last"* ]]
 }
 
+@test "carve_layout rejects a non-numeric gap bound instead of resolving it as a variable" {
+    # gap_start="i" collides with carve_layout's own loop counter: unvalidated,
+    # (( )) resolved it to that variable's value instead of failing.
+    run carve_layout i 5000000 1G
+    [ "$status" -ne 0 ]
+}
+
+@test "carve_layout rejects a gap bound that is an arithmetic expression" {
+    # (( )) evaluates "2048+1" to 2049 while printf would emit the raw string,
+    # so an unvalidated bound lets the printed range and the arithmetic used
+    # to check it disagree about what the start or end actually was.
+    run carve_layout "2048+1" 5000000 1G
+    [ "$status" -ne 0 ]
+}
+
 @test "parse_part_numbers reads the numbers out of sgdisk -p" {
     run bash -c "$(declare -f parse_part_numbers); cat <<'SGDISK' | parse_part_numbers
 Disk /dev/nvme0n1: 1953525168 sectors, 931.5 GiB

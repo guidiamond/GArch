@@ -173,6 +173,14 @@ disk_free_gaps() {
 # they are keeping.
 carve_layout() {
     local gap_start=$1 gap_end=$2; shift 2
+    # Validated before any (( )) touches them, same as align_gap: bash
+    # resolves a non-numeric token as a variable name in arithmetic context
+    # rather than failing (gap_start=i collided with this function's own loop
+    # counter below and printed a fabricated-looking range at status 0), and
+    # (( )) also expands $(...) and arithmetic expressions, so an unvalidated
+    # bound can silently evaluate to a different number than the one printed.
+    [[ "$gap_start" =~ ^[0-9]+$ && "$gap_end" =~ ^[0-9]+$ ]] \
+        || { error "carve_layout: gap bounds must be plain integers, got '${gap_start}' '${gap_end}'"; return 1; }
     local cursor=$gap_start size sectors end i=0 n=$#
     for size in "$@"; do
         i=$(( i + 1 ))
@@ -228,6 +236,16 @@ lowest_free_number() {
 }
 
 # next_part_number <disk> -- lowest_free_number against a real partition table.
+#
+# Stderr is suppressed the same way disk_free_gaps suppresses parted's, so
+# this function cannot tell "disk has no partitions" from "could not read the
+# disk" -- a bad device path or a disk that vanished mid-read makes sgdisk -p
+# fail and print nothing, mapfile then populates an empty array without the
+# process substitution's failure ever being observed, and lowest_free_number
+# on an empty set returns 1 with success status. Per lowest_free_number's own
+# comment, sgdisk -n onto number 1 overwrites whatever already holds it, so a
+# caller must validate $disk exists and is readable before calling this, not
+# trust a returned "1" to mean an empty table.
 next_part_number() {
     local disk=$1
     local -a used=()
