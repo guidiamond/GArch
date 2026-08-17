@@ -24,11 +24,12 @@ _echo_e_literal() { printf '%s' "${1//\\/\\\\}"; }
 # in the firmware's own boot menu, which is where it shows up when NVRAM is the
 # only thing that survived.
 #
-# Unsafe characters are mapped, never dropped. Mapping does not avoid
-# collisions -- "my box" and "my/box" both become MY_BOX either way -- it keeps
-# the id the same length as the name, so a stripped newline cannot splice two
-# lines into one id that then becomes two arguments the first time anything
-# interpolates it unquoted.
+# Unsafe characters are mapped, never dropped. This does not eliminate
+# collisions -- "my box" and "my/box" both become MY_BOX either way -- but
+# dropping causes strictly more of them, because "ab" would then collide with
+# "a/b" as well, and it silently shortens every id, so the string the operator
+# has to pick out of the firmware's own boot menu stops resembling the name
+# they typed.
 bootloader_id_from() {
     local name=$1 id
     id=${name^^}
@@ -138,10 +139,12 @@ ENTRY
 # pointed at belong to a system that is already working.
 #
 # The block always ends up at the *end*, it is not rewritten where it stood.
-# If an operator has moved our block into the middle of a foreign 40_custom, a
-# re-run shifts every entry that followed it up by one -- and a foreign
-# GRUB_DEFAULT set by index then selects a different operating system. Callers
-# that care must set GRUB_DEFAULT by title or by id, never by number.
+# Two of our own ids in one file is enough to show it: write AAA then BBB, then
+# re-run AAA, and BBB is now first. Phase 6 writes a Windows entry and an Arch
+# entry into the same file, so this is the ordinary case and not an edge one.
+# Everything that followed the rewritten block shifts up by one, and a
+# GRUB_DEFAULT set by index then selects a different operating system -- it has
+# to be set by title or by id, never by number.
 #
 # The mode argument is not decoration. /etc/grub.d/40_custom is only read by
 # grub-mkconfig if it is executable, and mktemp creates 0600 whatever the umask
@@ -158,7 +161,7 @@ ENTRY
 # chroot_write_config. Callers that honour --dry-run must not call it.
 custom_cfg_upsert() {
     local file=$1 id=$2 block=$3 mode=${4:-0644}
-    local _ccu_tmp="" begin end n_begin n_end
+    local _ccu_tmp="" begin end n_begin n_end link_target
     # A backstop, not the mechanism -- every failure below still removes the
     # temp file explicitly. This only catches a return path a later edit
     # forgets. It deliberately does not trap INT/TERM: a trap set inside a
@@ -172,7 +175,13 @@ custom_cfg_upsert() {
     # registered after this one returns and fires again at the end of the next
     # `source`, so a plain `tmp` would put an rm one name collision away from
     # a path this function never created.
-    trap '[[ -z "$_ccu_tmp" ]] || rm -f "$_ccu_tmp"' RETURN
+    #
+    # ${_ccu_tmp:-}, not "$_ccu_tmp": by that later RETURN event the local is
+    # gone, and under install.sh's `set -u` the bare form aborts the installer
+    # on an unbound variable -- the guard meant to make the trap harmless was
+    # itself the thing that killed the run (measured). No bats test sees this,
+    # because bats does not run under set -u.
+    trap '[[ -z "${_ccu_tmp:-}" ]] || rm -f "$_ccu_tmp"' RETURN
     [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] \
         || { error "custom_cfg_upsert: marker id must be [A-Za-z0-9_-], got '$(_echo_e_literal "$id")'"; return 1; }
     begin="# BEGIN arch-installer:${id}"
@@ -197,7 +206,13 @@ custom_cfg_upsert() {
     # as exactly such a symlink into the ESP, and writing into another distro's
     # config is what this function is for, so this is a path we will meet.
     if [[ -L "$file" ]]; then
-        error "custom_cfg_upsert: $(_echo_e_literal "$file") is a symlink to $(_echo_e_literal "$(readlink -f -- "$file" 2>/dev/null)"); point at that path instead"
+        # readlink -f canonicalises, so it fails and prints nothing when any
+        # component of the target is missing -- which named the file as "a
+        # symlink to ", the one message the operator needs in order to act.
+        link_target=$(readlink -f -- "$file" 2>/dev/null) \
+            || link_target=$(readlink -- "$file" 2>/dev/null) \
+            || link_target="(unreadable)"
+        error "custom_cfg_upsert: $(_echo_e_literal "$file") is a symlink to $(_echo_e_literal "$link_target"); point at that path instead"
         return 1
     fi
     # [[ -f ]] is false for a directory, and `mv tmp somedir` moves the temp
@@ -217,8 +232,17 @@ custom_cfg_upsert() {
     if [[ -f "$file" ]]; then
         n_begin=$(grep -cFx -- "$begin" "$file" || true)
         n_end=$(grep -cFx -- "$end" "$file" || true)
-        if [[ "$n_begin" != "$n_end" ]] || (( n_begin > 1 )); then
+        if [[ "$n_begin" != "$n_end" ]]; then
             error "custom_cfg_upsert: the arch-installer:${id} markers in $(_echo_e_literal "$file") are not a matched pair (${n_begin} BEGIN, ${n_end} END); refusing to guess where the block ends"
+            return 1
+        fi
+        # Counted separately from the pairing check, which would otherwise
+        # report two whole blocks as "not a matched pair" while naming two of
+        # each. A second complete block is a different fault: the original
+        # collapsed them silently, and which one is ours is not knowable.
+        # Reachable through the CRLF limitation documented above.
+        if (( n_begin > 1 )); then
+            error "custom_cfg_upsert: $(_echo_e_literal "$file") already holds ${n_begin} blocks for arch-installer:${id}, expected at most one; refusing to guess which is ours"
             return 1
         fi
     fi

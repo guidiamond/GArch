@@ -19,9 +19,9 @@ setup() {
 
 @test "bootloader_id_from replaces every unsafe character rather than dropping it" {
     # Mapping is length-preserving, which is the point: dropping would turn
-    # "a/b c" into ABC and silently shorten every id, and a dropped newline
-    # would splice two lines into one id that then becomes two arguments the
-    # first time it is interpolated unquoted.
+    # "a/b c" into ABC, shortening every id and making it collide with names
+    # it no longer resembles. The newline case is the same rule, and the one
+    # most likely to arrive by accident from a pasted name.
     [ "$(bootloader_id_from "a/b c")" = "A_B_C" ]
     [ "$(bootloader_id_from "$(printf 'a\nb')")" = "A_B" ]
 }
@@ -260,6 +260,51 @@ setup() {
     [ -L "$dir/link_custom" ]
     [ "$(cat "$dir/real/40_custom")" = "original" ]
     [ "$(stat -c %a "$dir/real/40_custom")" = "755" ]
+}
+
+@test "custom_cfg_upsert's cleanup trap does not abort a later source under set -u" {
+    # The RETURN trap stays registered after the function returns, but its
+    # local is gone with it. Under install.sh's `set -euo pipefail` the next
+    # RETURN event -- the end of any later `source` -- then dereferences an
+    # unbound variable and kills the run.
+    #
+    # bats does not run tests under set -u (nothing here inherits install.sh's
+    # `set`), so this test has to turn it on itself; without that it passes
+    # whether or not the guard is there and proves nothing.
+    custom_cfg_upsert "${BATS_TEST_TMPDIR}/t" WORK "blk" 0644
+    printf 'true\n' > "${BATS_TEST_TMPDIR}/later.sh"
+    set -u
+    source "${BATS_TEST_TMPDIR}/later.sh"
+    set +u
+}
+
+@test "custom_cfg_upsert names a dangling symlink's target in the refusal" {
+    # readlink -f canonicalises, so it fails and prints nothing when a
+    # component of the target is missing -- which told the operator the file
+    # "is a symlink to ; point at that path instead".
+    local dir="${BATS_TEST_TMPDIR}/dangling"
+    mkdir -p "$dir"
+    ln -s missing_dir/40_custom "$dir/link_custom"
+    run custom_cfg_upsert "$dir/link_custom" WORK "blk" 0644
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"symlink"* ]]
+    [[ "$output" == *"missing_dir/40_custom"* ]]
+}
+
+@test "custom_cfg_upsert refuses a file that already holds two of our blocks" {
+    # Reachable through the documented CRLF path: a CRLF target gains a second
+    # LF block, and normalising the line endings afterwards leaves two matched
+    # pairs. Refusing is right -- which of the two is ours is not knowable --
+    # but the message has to say that, not claim the markers are unmatched.
+    local f="${BATS_TEST_TMPDIR}/dup"
+    printf '# BEGIN arch-installer:WORK\none\n# END arch-installer:WORK\n' > "$f"
+    printf '# BEGIN arch-installer:WORK\ntwo\n# END arch-installer:WORK\n' >> "$f"
+    run custom_cfg_upsert "$f" WORK "new" 0644
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"2 blocks"* ]]
+    [[ "$output" == *"at most one"* ]]
+    [[ "$(cat "$f")" == *"one"* ]]
+    [[ "$(cat "$f")" == *"two"* ]]
 }
 
 @test "custom_cfg_upsert refuses a target that is a directory" {
