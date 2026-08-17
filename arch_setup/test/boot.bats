@@ -1579,3 +1579,114 @@ echo DONE"
     [ "$status" -ne 0 ]
     [[ "$output" == *"carriage return"* ]]
 }
+
+# --- closing review ----------------------------------------------------------
+
+@test "esp_fallback_binary aborts on a missing argument rather than reporting no fallback" {
+    # The same swallowed set -u abort that esp_fallback_kind had, in the half
+    # that matters more: this one's "no" becomes esp_dir_inventory's
+    # "fallback no", which is the answer removable_policy acts on by offering to
+    # overwrite \\EFI\\BOOT\\BOOTX64.EFI -- on this machine, the operator's own
+    # bootloader. ${1%/} expanded inside $( ) killed only the subshell, and
+    # `|| return 1` caught a programming error and returned it as an answer.
+    run bash -c "set -u
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+if esp_fallback_binary; then echo 'FALLBACK YES'; else echo 'FALLBACK NO'; fi
+echo REACHED"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"unbound variable"* ]]
+    # The point of the test: the run must not continue past the abort with an
+    # answer in hand. See the BW01 note on the esp_fallback_kind test above.
+    [[ "$output" != *"FALLBACK NO"* ]]
+    [[ "$output" != *"REACHED"* ]]
+
+    # Control: one argument, and the same harness reaches the end and answers.
+    run bash -c "set -u
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+if esp_fallback_binary '${BATS_TEST_TMPDIR}'; then echo 'FALLBACK YES'; else echo 'FALLBACK NO'; fi
+echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"FALLBACK NO"* ]]
+    [[ "$output" == *"REACHED"* ]]
+}
+
+@test "linux_installs strips the carriage return a CRLF os-release leaves in the name" {
+    # chain_entry refuses a bare CR, and under the installer's set -euo pipefail
+    # that aborts phase 6 -- because of a file on a partition that is only
+    # staying. The refusal is the backstop; the producer is where it is fixed.
+    local stub="${BATS_TEST_TMPDIR}/bin" src="${BATS_TEST_TMPDIR}/src"
+    mkdir -p "$stub" "${src}/etc" "${src}/boot/grub"
+    printf 'NAME="Neighbour Linux"\r\nID=neighbour\r\n' > "${src}/etc/os-release"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+cp -a "${src}/." "\${!#}/"
+exit 0
+MOUNT
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/umount"
+    chmod +x "${stub}/lsblk" "${stub}/mount" "${stub}/umount"
+
+    local out
+    out=$(PATH="${stub}:${PATH}" linux_installs 2>/dev/null)
+    [ "$out" = "/dev/sdz1 1b13ff14-95ae-46f1-b975-a4233c5ed17f yes Neighbour Linux" ]
+    # Asserted directly rather than only via the string compare, so the failure
+    # message names the actual defect if this ever regresses.
+    [[ "$out" != *$'\r'* ]]
+
+    # End to end: the name this produces must be one chain_entry accepts.
+    local name
+    name=${out#* * * }
+    run chain_entry "$name" "1A2B-3C4D" "/EFI/X/grubx64.efi"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"menuentry 'Neighbour Linux' {"* ]]
+}
+
+@test "linux_installs reports a mounted partition whose os-release it cannot read" {
+    # Asymmetric with the mount-failure path until now: this one mounted, could
+    # not read, and emitted nothing at all. "Present but unreadable" is a
+    # filesystem nobody read, which is the case the banner is about.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    # The stub builds the unreadable file at the mountpoint rather than copying
+    # one in: `cp -a` has to read the source, so a mode-000 fixture never
+    # reaches the destination and the test would exercise the ABSENT branch
+    # instead -- which it did, and passed, before this was fixed.
+    cat > "${stub}/mount" <<'MOUNT'
+#!/bin/bash
+mkdir -p "${!#}/etc"
+: > "${!#}/etc/os-release"
+chmod 000 "${!#}/etc/os-release"
+exit 0
+MOUNT
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/umount"
+    chmod +x "${stub}/lsblk" "${stub}/mount" "${stub}/umount"
+
+    PATH="${stub}:${PATH}" run linux_installs
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/dev/sdz1 1b13ff14-95ae-46f1-b975-a4233c5ed17f unknown (unreadable)"* ]]
+    [[ "$output" == *"unreadable /etc/os-release"* ]]
+}
+
+@test "linux_installs drops a partition with no os-release without calling it unreadable" {
+    # The one "nothing here" answer in this function that is a fact about the
+    # machine rather than a tool breaking: a data partition is not a Linux
+    # install. The target machine's own sda2 -- 172.8G ext4, unlabelled -- is
+    # this shape, and it must not appear in phase 6's list as an unknown.
+    local stub="${BATS_TEST_TMPDIR}/bin" src="${BATS_TEST_TMPDIR}/src"
+    mkdir -p "$stub" "${src}/some-data"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+cp -a "${src}/." "\${!#}/"
+exit 0
+MOUNT
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/umount"
+    chmod +x "${stub}/lsblk" "${stub}/mount" "${stub}/umount"
+
+    PATH="${stub}:${PATH}" run linux_installs
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}

@@ -356,11 +356,17 @@ custom_cfg_upsert() {
 # The three lsblk readers -- esp_list, fs_uuid_for_partuuid and linux_installs
 # -- follow one rule between them, because they drifted apart when they did
 # not. Each checks lsblk's exit status and fails loudly rather than returning
-# an empty result; each shape-checks the field it identifies a partition by,
+# an empty result; each validates the field it identifies a partition by,
 # because lsblk leaves middle columns empty for whole-disk and unformatted rows
 # and default-IFS `read` then shifts every later column left; and none of them
 # emits a record in which an optional field can be empty, since a consumer
 # reading positionally cannot tell a shifted record from a short one.
+#
+# "Validates" differs by what the field is. fs_uuid_for_partuuid and
+# linux_installs shape-check a GUID against a regex. parse_esp_list identifies
+# an ESP by an exact PARTTYPE match, which no shifted value can pass, and
+# shape-checks the SIZE it would otherwise carry across -- a numeric test,
+# because that is the column a shift puts a non-number in.
 #
 # Whitespace contract for every record emitted below: fields are
 # space-separated and the LAST field is the only one that may contain spaces
@@ -378,11 +384,16 @@ ESP_TYPE_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 # claiming otherwise was wrong. Measured on the operator's live vfat mount:
 # `[[ -f /boot/EFI/EFI/BoOt/BoOtX64.eFi ]]` is true, because Linux's vfat
 # driver resolves lookups in any case. The plan's two-spelling test for
-# BOOTX64.EFI was therefore never broken in production, and the exact-match
-# branch below wins on the first try for whatever spelling it is handed -- so
-# what comes back is the spelling *asked for*, not the one on disk. That is
-# harmless: GRUB's fat module is case-insensitive too, so either spelling
-# chainloads.
+# BOOTX64.EFI was therefore never broken in production.
+#
+# What comes back is the spelling ON DISK, not the one asked for. The exact
+# spelling is tried first, so when it exists that is also the spelling asked
+# for and the distinction does not arise; when it does not exist, the
+# case-insensitive match returns the name as the filesystem holds it. Callers
+# depend on this -- esp_fallback_binary documents its result as "as it is
+# actually spelled on this ESP", and a test pins EFI/bOOt/BOOTX64.EFI coming
+# back under that spelling. Either spelling chainloads regardless, since GRUB's
+# fat module is case-insensitive too.
 #
 # What this does buy is that the case-insensitivity is ours rather than an
 # undeclared dependency on the vfat driver's lookup behaviour, so the same
@@ -502,10 +513,20 @@ esp_dir_inventory() {
 }
 
 # esp_fallback_binary <mountpoint> -> the path of \EFI\BOOT\BOOTX64.EFI as it
-# is actually spelled on this ESP, or 1 if there is none.
+# is actually spelled on this ESP -- which is not necessarily the spelling asked
+# for, since _esp_resolve matches case-insensitively -- or 1 if there is none.
+#
+# ${1%/} is expanded before the command substitution, for the reason spelled out
+# over esp_fallback_kind below, and this is the half that matters more. Under
+# set -u a missing argument expanded inside $( ) killed only the subshell, and
+# `|| return 1` then caught a programming error and returned it as "there is no
+# fallback binary on this ESP" -- which esp_dir_inventory turns into
+# "fallback no", the one answer removable_policy acts on by offering to write
+# \EFI\BOOT\BOOTX64.EFI over whatever is there. esp_fallback_kind's swallowed
+# "none" is only a label; this one reaches the operator as a prompt.
 esp_fallback_binary() {
-    local found
-    found=$(_esp_resolve "${1%/}" "EFI/BOOT/BOOTX64.EFI" f) || return 1
+    local mnt=${1%/} found
+    found=$(_esp_resolve "$mnt" "EFI/BOOT/BOOTX64.EFI" f) || return 1
     printf '%s\n' "$found"
 }
 
@@ -723,6 +744,17 @@ parse_nvram_loaders() {
     # immediately after this node's closing ")/" -- which is what ties them
     # together, and what makes a line carrying two HD nodes take both fields
     # from whichever node actually carries the loader.
+    #
+    # It requires ADJACENCY, not merely order: a device path that puts another
+    # node between the HD node and the file path node --
+    # HD(...)/CDROM(0x1,0x2,0x3)/\EFI\B\g.efi -- matches nothing and the entry
+    # is dropped, where the old unanchored form emitted it. That is the
+    # fail-closed direction and it is deliberate, because the whole point of
+    # this regex is that the guid and the path came from one node; but it is a
+    # narrowing, so it is written down. Not observed on this machine
+    # (efibootmgr 18 / libefivar 38) -- a loader on an optical device is the
+    # shape that would produce it, and such an entry has no partition to
+    # resolve to a filesystem UUID anyway.
     local hd_re='HD\([0-9]+,GPT,([0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}),[^)]*\)/(\\.*)$'
     # Anchored at the first backslash and ending at the *last* ".EFI" in the
     # run. Measured on the target machine, efibootmgr appends the option data
@@ -808,6 +840,16 @@ nvram_loaders() { _nvram_read parse_nvram_loaders; }
 # Fails rather than emitting an empty uuid for a partition that has none: an
 # empty one reaching chain_entry is refused there anyway, and failing here says
 # which lookup went wrong.
+#
+# GPT only. The shape check below accepts the 8-4-4-4-12 form and nothing else,
+# so an MBR PARTUUID -- lsblk reports those as <disk-signature>-<nn>, e.g.
+# 12345678-01 -- never matches any row and the lookup fails. That is the same
+# boundary parse_nvram_loaders draws when it drops MBR HD() nodes, and for the
+# same reason: an MBR signature is not a partition GUID and resolving one to a
+# filesystem UUID by coincidence is worse than failing. Every disk on the target
+# machine is GPT, so this is a limit of the contract rather than a live gap --
+# but this function is public, and a caller holding a PARTUUID from anywhere
+# else needs to know it will be refused rather than answered.
 fs_uuid_for_partuuid() {
     local want=${1,,} raw path pu uuid
     local partuuid_re='^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$'
@@ -913,6 +955,15 @@ esp_probe() {
 # that mounts its ESP at /boot -- which is what this installer itself produces
 # -- reports no. A third install on the same machine would therefore not see
 # the second one here. Phase 6 covers that case from the ESP inventory instead.
+#
+# Second known limitation: identification is by /etc/os-release, which on Arch
+# and every other systemd distribution is a SYMLINK to ../usr/lib/os-release
+# (checked on this machine). It therefore resolves only once the root carrying
+# /usr is mounted, which is the ordinary layout; a neighbour keeping /usr on a
+# separate partition leaves the link dangling, so -e is false and the install is
+# classified as "not Linux" rather than as unreadable. Rare enough on modern
+# systems -- systemd requires /usr mounted from the initramfs -- to document
+# rather than chase.
 linux_installs() {
     local -a exclude=() rows=() try_opts=()
     local dev fstype uuid raw row tmp skip ex name has_grub mounted opts
@@ -970,10 +1021,6 @@ linux_installs() {
                 break
             fi
         done
-        # As in esp_probe: nothing in this branch can currently return non-zero
-        # before the umount, so there is no trap and no leak. A future edit that
-        # adds a failing call here leaks a mount of a neighbour's root into
-        # phase 4's genfstab.
         if [[ "$mounted" != true ]]; then
             # A candidate that would not mount is reported, not dropped. It
             # used to vanish with a success status and nothing said, so an ext4
@@ -985,18 +1032,46 @@ linux_installs() {
             rmdir "$tmp" 2>/dev/null || true
             continue
         fi
-        if [[ "$mounted" == true ]]; then
-            if [[ -r "${tmp}/etc/os-release" ]]; then
-                # Read with grep+cut rather than sourcing it: /etc/os-release
-                # on a partition belonging to someone else is an untrusted
-                # file, and sourcing runs it as root.
-                name=$(grep -m1 '^NAME=' "${tmp}/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"' || true)
-                has_grub=no
-                [[ -d "${tmp}/boot/grub" ]] && has_grub=yes
-                printf '%s %s %s %s\n' "$dev" "$uuid" "$has_grub" "${name:-unknown}"
-            fi
-            umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
+        # As in esp_probe: nothing below can currently return non-zero before
+        # the umount, so there is no trap and no leak. A future edit that adds
+        # a failing call here leaks a mount of a neighbour's root into phase
+        # 4's genfstab. (The not-mounted branch above `continue`s before
+        # reaching here, and has no mount to leak.)
+        if [[ -r "${tmp}/etc/os-release" ]]; then
+            # Read with grep+cut rather than sourcing it: /etc/os-release
+            # on a partition belonging to someone else is an untrusted
+            # file, and sourcing runs it as root.
+            # tr strips the CR as well as the quotes, and both for the same
+            # reason: they are os-release *file syntax*, not part of the
+            # name. A CRLF /etc/os-release is ordinary on a partition
+            # touched by a Windows editor, and the bare CR it leaves rides
+            # this record into every consumer and onto the operator's
+            # terminal -- and into chain_entry, which refuses it and, under
+            # the installer's set -euo pipefail, takes the whole run down
+            # because of a file on a partition that is only staying.
+            #
+            # chain_entry's refusal stays as the backstop it is meant to be.
+            # The apostrophe hazard (note: "Bob's Linux") is deliberately
+            # NOT sanitised here and still refuses: an apostrophe is part of
+            # the name a human chose, and silently rewriting a neighbour's
+            # OS name in the boot menu is worse than saying so. A carriage
+            # return is nobody's name.
+            name=$(grep -m1 '^NAME=' "${tmp}/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"\r' || true)
+            has_grub=no
+            [[ -d "${tmp}/boot/grub" ]] && has_grub=yes
+            printf '%s %s %s %s\n' "$dev" "$uuid" "$has_grub" "${name:-unknown}"
+        elif [[ -e "${tmp}/etc/os-release" ]]; then
+            # Present and unreadable is the same shape as a mount that failed --
+            # a filesystem nobody could read -- and is reported the same way,
+            # rather than dropped. Distinguished from ABSENT deliberately: a
+            # partition with no /etc/os-release at all is not a Linux install
+            # and has no business in this list. That drop is a fact about the
+            # filesystem, like the fstype and exclude tests above it, and not
+            # the "a tool broke, so nothing was found" the banner forbids.
+            error "linux_installs: ${dev} (${fstype}) has an unreadable /etc/os-release; it is reported as unknown rather than skipped"
+            printf '%s %s unknown (unreadable)\n' "$dev" "$uuid"
         fi
+        umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
         rmdir "$tmp" 2>/dev/null || true
     done
 }
