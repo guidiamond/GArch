@@ -142,6 +142,14 @@ chain_entry() {
         *"'"*|*$'\n'*)
             error "chain_entry: title must not contain a single quote or a newline: '$(_echo_e_literal "$title")'"
             return 1 ;;
+        *$'\r'*)
+            # A CRLF /etc/os-release reaches this through linux_installs' NAME
+            # field. A bare CR does not break the entry the way a newline does,
+            # it corrupts the rendering of the menu row -- which nobody
+            # diagnoses, because the file it came from looks correct in an
+            # editor.
+            error "chain_entry: title must not contain a carriage return: '$(_echo_e_literal "$title")'"
+            return 1 ;;
     esac
     # Shape, not just character set: a bare "-" passed a [A-Za-z0-9-]+ rule and
     # emitted `search --fs-uuid --set=root -`, which matches nothing and leaves
@@ -344,6 +352,22 @@ custom_cfg_upsert() {
 # "no neighbour to protect" and an empty NVRAM list reads as "the firmware
 # knows about nothing", and both are the answer that lets every later guard
 # through.
+#
+# The three lsblk readers -- esp_list, fs_uuid_for_partuuid and linux_installs
+# -- follow one rule between them, because they drifted apart when they did
+# not. Each checks lsblk's exit status and fails loudly rather than returning
+# an empty result; each shape-checks the field it identifies a partition by,
+# because lsblk leaves middle columns empty for whole-disk and unformatted rows
+# and default-IFS `read` then shifts every later column left; and none of them
+# emits a record in which an optional field can be empty, since a consumer
+# reading positionally cannot tell a shifted record from a short one.
+#
+# Whitespace contract for every record emitted below: fields are
+# space-separated and the LAST field is the only one that may contain spaces
+# (a vendor directory name, an OS name, an NVRAM label). Consumers must read
+# with `read -r a b c rest`, never `awk '{print $N}'` -- a vendor directory
+# called "My Vendor" makes the fourth field of an awk-split record "/EFI/My",
+# which chain_entry accepts and which boots nothing.
 
 ESP_TYPE_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
@@ -366,33 +390,41 @@ ESP_TYPE_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 # image unpacked into a directory, or the fixtures this file's tests build.
 # Without it those tests would be testing something the production path does
 # not do.
+# The optional third argument is the type the *last* component must have, f or
+# d. It is not decoration: a directory named BOOTX64.EFI is legal on FAT, and
+# resolving to it made esp_fallback_binary's own -f test fail -- which reads as
+# "no fallback binary on this ESP", the answer that lets removable_policy offer
+# to overwrite one.
+#
+# Every candidate is *tried* rather than committed to, and the recursion
+# backtracks. Committing to the first match by collation order meant that an
+# empty EFI/BOOT/ alongside a populated EFI/bOOt/ resolved to the empty one and
+# stopped -- again reporting no fallback where one exists.
 _esp_resolve() {
-    local dir=${1%/} rest=$2 comp entry base match
-    while :; do
-        comp=${rest%%/*}
-        [[ -n "$comp" ]] || return 1
-        match=""
-        # Exact first: on a case-sensitive filesystem -- which is what the
-        # tests build, and what an ESP image unpacked into a directory is --
-        # both spellings can exist side by side, and the one asked for is the
-        # one meant.
-        if [[ -e "${dir}/${comp}" ]]; then
-            match="${dir}/${comp}"
-        else
-            for entry in "$dir"/*; do
-                base=${entry##*/}
-                [[ "${base,,}" == "${comp,,}" ]] || continue
-                match=$entry
-                break
-            done
+    local dir=${1%/} rest=$2 want=${3:-} comp tail cand base
+    comp=${rest%%/*}
+    [[ -n "$comp" ]] || return 1
+    if [[ "$rest" == */* ]]; then tail=${rest#*/}; else tail=""; fi
+    # The exact spelling is tried first and then again as part of the glob;
+    # the repeat costs one stat on a path at most three components deep and is
+    # cheaper than tracking which candidate has already been seen.
+    for cand in "${dir}/${comp}" "$dir"/*; do
+        [[ -e "$cand" ]] || continue
+        base=${cand##*/}
+        [[ "${base,,}" == "${comp,,}" ]] || continue
+        if [[ -n "$tail" ]]; then
+            [[ -d "$cand" ]] || continue
+            _esp_resolve "$cand" "$tail" "$want" && return 0
+            continue
         fi
-        [[ -n "$match" ]] || return 1
-        dir=$match
-        [[ "$rest" == */* ]] || break
-        rest=${rest#*/}
-        [[ -d "$dir" ]] || return 1
+        case "$want" in
+            f) [[ -f "$cand" ]] || continue ;;
+            d) [[ -d "$cand" ]] || continue ;;
+        esac
+        printf '%s\n' "$cand"
+        return 0
     done
-    printf '%s\n' "$dir"
+    return 1
 }
 
 # parse_esp_list: "<path> <parttype> <size> <uuid>" lines on stdin
@@ -408,11 +440,22 @@ _esp_resolve() {
 # lsblk's whole-disk rows arrive here too, and they shift: measured,
 # "/dev/sda  500107862016 " puts the size in parttype. They are dropped by the
 # type-GUID test, which no size can satisfy.
+#
+# The emitted record keeps UUID in the middle, so the same collapse would
+# happen again on the way OUT: an unformatted ESP -- the very case this header
+# is about -- gave `read -r dev uuid size` a size in $uuid and nothing in
+# $size. A missing UUID is therefore emitted as a literal "-" rather than as an
+# empty field. It is not a UUID, so chain_entry refuses it exactly as it
+# refuses the empty string, and no consumer can silently read the size as one.
 parse_esp_list() {
     local path parttype size uuid
     while read -r path parttype size uuid; do
         [[ "${parttype,,}" == "$ESP_TYPE_GUID" ]] || continue
-        printf '%s %s %s\n' "$path" "$uuid" "$size"
+        # A non-numeric size means the columns shifted anyway, which for a row
+        # that matched the type GUID should be impossible -- so it is a fault
+        # to drop, not to pass on as an ESP the operator might adopt.
+        [[ "$size" =~ ^[0-9]+$ ]] || continue
+        printf '%s %s %s\n' "$path" "${uuid:--}" "$size"
     done
 }
 
@@ -438,7 +481,7 @@ esp_list() {
 # esp_dir_inventory <mountpoint> -> "vendor <DIR>" lines plus "fallback yes|no".
 esp_dir_inventory() {
     local mnt=${1%/} efi dir
-    if efi=$(_esp_resolve "$mnt" EFI) && [[ -d "$efi" ]]; then
+    if efi=$(_esp_resolve "$mnt" EFI d); then
         for dir in "$efi"/*/; do
             [[ -d "$dir" ]] || continue
             dir=${dir%/}
@@ -462,8 +505,7 @@ esp_dir_inventory() {
 # is actually spelled on this ESP, or 1 if there is none.
 esp_fallback_binary() {
     local found
-    found=$(_esp_resolve "${1%/}" "EFI/BOOT/BOOTX64.EFI") || return 1
-    [[ -f "$found" ]] || return 1
+    found=$(_esp_resolve "${1%/}" "EFI/BOOT/BOOTX64.EFI" f) || return 1
     printf '%s\n' "$found"
 }
 
@@ -479,8 +521,13 @@ esp_fallback_binary() {
 # the label is affected, since the --removable policy keys on presence, but a
 # mislabelled row is what the operator reads the inventory for.
 esp_fallback_kind() {
-    local bin
-    bin=$(esp_fallback_binary "${1%/}") || { echo "none"; return 0; }
+    # ${1%/} is expanded here rather than inside the command substitution
+    # below. Under set -u a missing argument aborts, and inside $( ) only the
+    # subshell died -- so `|| { echo none; }` caught a programming error and
+    # turned it into "there is no bootloader on this ESP", which is the answer
+    # that lets removable_policy offer to write one.
+    local mnt=${1%/} bin
+    bin=$(esp_fallback_binary "$mnt") || { echo "none"; return 0; }
     if grep -qai 'systemd-boot' "$bin" 2>/dev/null; then echo "systemd-boot"; return 0; fi
     if grep -qai 'refind' "$bin" 2>/dev/null;       then echo "refind";       return 0; fi
     if grep -qai 'grub' "$bin" 2>/dev/null;         then echo "grub";         return 0; fi
@@ -508,27 +555,32 @@ esp_fallback_kind() {
 #   further down. Looking only for grubx64.efi returned nothing at all for the
 #   Windows ESP on the target machine, so phase 6 could not have produced the
 #   one chainload entry this whole feature exists for.
-# Exactly one loader is returned per ESP, and if an ESP carries two vendor
-# directories -- which a shared ESP with two neighbours on it does -- the one
-# that wins is whichever the glob reaches first, i.e. shell collation order.
-# That is arbitrary rather than wrong: the caller wants a chainload target for
-# this ESP, and both are one. Phase 6 needing every loader on an ESP would need
-# this to return a list.
-ESP_LOADER_CANDIDATES=(shimx64.efi grubx64.efi systemd-bootx64.efi Boot/bootmgfw.efi bootmgfw.efi)
-
+# Exactly one loader is returned per ESP. The search is candidate-major -- the
+# outer loop is over loader names and the inner one over vendor directories --
+# so a shim in ANY vendor directory beats a bare grub in any other. Vendor-major
+# ranked the candidates only within one directory and then picked the directory
+# by glob collation, which made the Secure Boot reasoning above false in exactly
+# the case it is written for: with EFI/arch/grubx64.efi and
+# EFI/fedora/shimx64.efi present, "arch" sorts first and the unbootable-under-SB
+# one won.
+#
+# Which vendor wins among equally-ranked candidates is still collation order,
+# and that genuinely is arbitrary rather than wrong -- both are a chainload
+# target for this ESP, and neither is more correct than the other. Phase 6
+# needing every loader on an ESP would need this to return a list.
 esp_vendor_efi_path() {
     local mnt=${1%/} efi dir name cand found
-    if efi=$(_esp_resolve "$mnt" EFI) && [[ -d "$efi" ]]; then
-        for dir in "$efi"/*/; do
-            [[ -d "$dir" ]] || continue
-            name=${dir%/}; name=${name##*/}
-            [[ "${name^^}" == "BOOT" ]] && continue
-            for cand in "${ESP_LOADER_CANDIDATES[@]}"; do
-                found=$(_esp_resolve "${dir%/}" "$cand") || continue
-                # A directory called grubx64.efi is legal on FAT, and a
-                # chainloader pointed at one boots nothing and only says so at
-                # the boot menu.
-                [[ -f "$found" ]] || continue
+    # Local rather than a file-scope global: it is one function's detail, and an
+    # unprefixed mutable global is one assignment away from being changed by
+    # something that has no business knowing about it.
+    local -a candidates=(shimx64.efi grubx64.efi systemd-bootx64.efi Boot/bootmgfw.efi bootmgfw.efi)
+    if efi=$(_esp_resolve "$mnt" EFI d); then
+        for cand in "${candidates[@]}"; do
+            for dir in "$efi"/*/; do
+                [[ -d "$dir" ]] || continue
+                name=${dir%/}; name=${name##*/}
+                [[ "${name^^}" == "BOOT" ]] && continue
+                found=$(_esp_resolve "${dir%/}" "$cand" f) || continue
                 printf '%s\n' "${found#"$mnt"}"
                 return 0
             done
@@ -559,14 +611,24 @@ esp_vendor_efi_path() {
 esp_has_own_grub() {
     local mnt=${1%/} dir found
     for dir in grub grub2; do
-        found=$(_esp_resolve "$mnt" "$dir") || continue
-        [[ -d "$found" ]] || continue
+        found=$(_esp_resolve "$mnt" "$dir" d) || continue
         [[ -n "$(ls -A "$found" 2>/dev/null || true)" ]] && return 0
     done
     return 1
 }
 
 # bootloader_id_free <mountpoint> <id> -- false if \EFI\<id> already exists.
+#
+# Precondition: <id> is a bare directory name, as bootloader_id_from produces.
+# It is interpolated into a path and not re-checked here. Measured, both bad
+# shapes currently answer "not free", which is the refusing direction, but they
+# answer it for the wrong reason and neither is a guarantee to lean on: "" makes
+# the path "EFI/", which resolves to the ESP's own EFI directory, and "../.."
+# makes it "EFI/../..", which resolves outside the ESP entirely and then reports
+# on whatever is there. Every caller today goes through bootloader_id_from,
+# which maps everything outside [A-Z0-9_] to an underscore and refuses an id
+# with no letters or digits, so neither shape is reachable -- a future caller
+# that skips that step is where it would start.
 #
 # grub-install onto an existing vendor directory overwrites its grubx64.efi
 # without complaint, which on a shared ESP is another install's bootloader.
@@ -575,8 +637,8 @@ esp_has_own_grub() {
 # directory, and comparing exactly would call an occupied id free.
 bootloader_id_free() {
     local mnt=${1%/} id=$2 found
-    found=$(_esp_resolve "$mnt" "EFI/${id}") || return 0
-    [[ -d "$found" ]] && return 1
+    found=$(_esp_resolve "$mnt" "EFI/${id}" d) || return 0
+    [[ -n "$found" ]] && return 1
     return 0
 }
 
@@ -590,6 +652,15 @@ bootloader_id_free() {
 # the label can sit one or two columns in -- and an entry with no label at all
 # is a lone tab, which a greedy [[:space:]]+ swallowed, reporting the device
 # path as the label.
+#
+# Locale note: `[[ =~ ]]` fails on a byte sequence that is not valid in the
+# current locale, so in a UTF-8 locale a stray non-UTF-8 byte anywhere in a
+# label drops that whole NVRAM entry, while LC_ALL=C parses it. That is a
+# partial instance of the failure this file's banner forbids -- an entry
+# vanishing rather than being reported. It is benign on the Arch ISO, where
+# these labels are firmware-written ASCII, and left alone rather than papered
+# over with a locale override that would change how every other string in the
+# installer compares.
 #
 # BootCurrent, BootOrder and BootNext are excluded by the four-hex-digit rule
 # ('u', 'r' and 'e' are not hex digits); -v's "dp:" and "data:" continuation
@@ -613,6 +684,7 @@ _nvram_split() {
 # parse_nvram_entries: efibootmgr -v output on stdin -> "<num> <label>".
 parse_nvram_entries() {
     local line
+    local _NV_NUM _NV_LABEL _NV_DP
     while IFS= read -r line; do
         _nvram_split "$line" || continue
         # A blank row reads as a rendering fault rather than as a real NVRAM
@@ -641,8 +713,17 @@ parse_nvram_entries() {
 # plausible-looking guid that resolves to the wrong partition is worse than no
 # entry at all.
 parse_nvram_loaders() {
-    local line partuuid path
-    local hd_re='HD\([0-9]+,GPT,([0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}),'
+    local line partuuid tailpart path
+    # Declared here so _nvram_split's assignments land in this function's scope
+    # under bash's dynamic scoping, rather than leaking into whatever sourced
+    # the library.
+    local _NV_NUM _NV_LABEL _NV_DP
+    # One regex for the guid AND the start of the file path, so both come from
+    # the same device path node. The trailing (\\.*)$ requires a backslash
+    # immediately after this node's closing ")/" -- which is what ties them
+    # together, and what makes a line carrying two HD nodes take both fields
+    # from whichever node actually carries the loader.
+    local hd_re='HD\([0-9]+,GPT,([0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}),[^)]*\)/(\\.*)$'
     # Anchored at the first backslash and ending at the *last* ".EFI" in the
     # run. Measured on the target machine, efibootmgr appends the option data
     # to the device path with no separator at all:
@@ -656,55 +737,67 @@ parse_nvram_loaders() {
     # hex, and text can contain ".EFI" -- at which point the leftmost-longest
     # match overruns the real path silently. Do not add -u here.
     #
-    # A loader path containing a space stops [^[:space:]]* early, the truncated
-    # run has no ".EFI", and the entry is dropped. That fails closed, which is
-    # the right direction, but a legitimate neighbour then vanishes from the
-    # inventory with nothing said. It cannot be a warn: lib/ui.sh's warn writes
-    # to stdout, and this function's stdout is parsed by its callers, so a
-    # warning here would arrive as a malformed inventory row. If it ever needs
-    # reporting, the caller of nvram_loaders is the place.
-    local path_re='(\\[^[:space:]]*\.[Ee][Ff][Ii])'
+    # ANCHORED at ^, against the tail the regex above captured. Bash's =~ is
+    # leftmost-longest but unanchored, so the previous unanchored form retried
+    # from a later backslash whenever the run starting at the first one could
+    # not reach a ".EFI". Measured: a legal FAT long name with a space in it,
+    # \EFI\My Vendor\grubx64.efi, came out as /grubx64.efi -- a well-formed
+    # entry, accepted by chain_entry, chainloading a path that does not exist.
+    # The operator finds out at the boot menu.
+    #
+    # Greedy .* backtracks to the LAST ".EFI", which is where the real path
+    # ends because the appended option data is hex and hex cannot spell a dot.
+    # A path this extracts but chain_entry cannot represent -- a space is
+    # outside its character class -- is refused by efi_path_to_slashes, which
+    # says so on stderr. That diagnostic is why the extraction has to be
+    # faithful rather than merely fail-closed: a truncated path is accepted
+    # everywhere and wrong, while the whole path is refused loudly.
+    local path_re='^(\\.*\.[Ee][Ff][Ii])'
     while IFS= read -r line; do
         _nvram_split "$line" || continue
         [[ -n "$_NV_DP" ]] || continue
         [[ "$_NV_DP" =~ $hd_re ]] || continue
         partuuid=${BASH_REMATCH[1]}
-        [[ "$_NV_DP" =~ $path_re ]] || continue
+        tailpart=${BASH_REMATCH[3]}
+        [[ "$tailpart" =~ $path_re ]] || continue
         path=$(efi_path_to_slashes "${BASH_REMATCH[1]}") || continue
         printf '%s %s %s %s\n' "$_NV_NUM" "$partuuid" "$path" "${_NV_LABEL:-(unlabelled)}"
     done
 }
 
-# nvram_entries -- shown to the operator during phase 3 so the inventory they
-# confirm against includes what the firmware already knows about.
+# _nvram_read <parser> -- run efibootmgr once and pipe it through <parser>.
 #
 # efibootmgr's failure is reported, not swallowed: "the firmware has no boot
 # entries" and "efibootmgr is not installed, or this machine booted in BIOS
-# mode" are different facts, and only the first one is safe to act on.
-nvram_entries() {
-    local raw err
-    err=$(mktemp) || { error "nvram_entries: cannot create a temp file"; return 1; }
+# mode" are different facts, and only the first one is safe to act on. stderr
+# is captured rather than discarded so the refusal can say which it was.
+#
+# Note for phase 6, which wants both views: this reads NVRAM once per call, so
+# calling nvram_entries and nvram_loaders is two efibootmgr invocations of the
+# same unchanging data.
+_nvram_read() {
+    local parser=$1 raw err
+    # The refusal names the function the operator's code called, not this
+    # helper and not the parser it was handed. Naming the parser sent them
+    # looking for "parse_nvram_entries", which is not a name that appears
+    # anywhere in the phase that failed.
+    local who=${FUNCNAME[1]:-_nvram_read}
+    err=$(mktemp) || { error "${who}: cannot create a temp file"; return 1; }
     if ! raw=$(efibootmgr -v 2>"$err"); then
-        error "nvram_entries: efibootmgr failed: $(_echo_e_literal "$(tr '\n' ' ' < "$err")")"
+        error "${who}: efibootmgr failed: $(_echo_e_literal "$(tr '\n' ' ' < "$err")")"
         rm -f "$err"
         return 1
     fi
     rm -f "$err"
-    printf '%s\n' "$raw" | parse_nvram_entries
+    printf '%s\n' "$raw" | "$parser"
 }
 
+# nvram_entries -- shown to the operator during phase 3 so the inventory they
+# confirm against includes what the firmware already knows about.
+nvram_entries() { _nvram_read parse_nvram_entries; }
+
 # nvram_loaders -- the same NVRAM read, as chainloadable entries.
-nvram_loaders() {
-    local raw err
-    err=$(mktemp) || { error "nvram_loaders: cannot create a temp file"; return 1; }
-    if ! raw=$(efibootmgr -v 2>"$err"); then
-        error "nvram_loaders: efibootmgr failed: $(_echo_e_literal "$(tr '\n' ' ' < "$err")")"
-        rm -f "$err"
-        return 1
-    fi
-    rm -f "$err"
-    printf '%s\n' "$raw" | parse_nvram_loaders
-}
+nvram_loaders() { _nvram_read parse_nvram_loaders; }
 
 # fs_uuid_for_partuuid <partition_guid> -> that partition's filesystem UUID.
 #
@@ -717,12 +810,18 @@ nvram_loaders() {
 # which lookup went wrong.
 fs_uuid_for_partuuid() {
     local want=${1,,} raw path pu uuid
+    local partuuid_re='^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$'
     [[ -n "$want" ]] || return 1
     raw=$(lsblk -pnro PATH,PARTUUID,UUID) || {
         error "fs_uuid_for_partuuid: lsblk failed; cannot resolve $(_echo_e_literal "$1")"
         return 1
     }
     while read -r path pu uuid; do
+        # Same shape check linux_installs applies, for the same reason: PARTUUID
+        # sits in the middle and lsblk leaves it empty for whole-disk rows, so
+        # default-IFS read shifts the columns and $pu can hold a filesystem
+        # UUID from the next column along.
+        [[ "$pu" =~ $partuuid_re ]] || continue
         [[ "${pu,,}" == "$want" ]] || continue
         [[ -n "$uuid" ]] || return 1
         printf '%s\n' "$uuid"
@@ -792,7 +891,7 @@ esp_probe() {
     printf 'kind unreadable\n'
 }
 
-# linux_installs <exclude_dev>... -> "<dev> <uuid> <has_grub yes|no> <name>"
+# linux_installs <exclude_dev>... -> "<dev> <uuid> <has_grub yes|no|unknown> <name>"
 #
 # Candidates are ext4 and btrfs partitions that are not part of this install.
 # An encrypted root reports as crypto_LUKS and is skipped: there is nothing to
@@ -856,7 +955,14 @@ linux_installs() {
         else
             try_opts=("ro,noload")
         fi
-        tmp=$(mktemp -d) || continue
+        # Not `|| continue`: mktemp failing is the tool breaking, and silently
+        # dropping the candidate answers "there is no other Linux here" for a
+        # reason that has nothing to do with the machine. esp_probe treats the
+        # same failure the same way.
+        tmp=$(mktemp -d) || {
+            error "linux_installs: cannot create a mountpoint for $(_echo_e_literal "$dev")"
+            return 1
+        }
         mounted=false
         for opts in "${try_opts[@]}"; do
             if mount -o "$opts" "$dev" "$tmp" 2>/dev/null; then
@@ -868,6 +974,17 @@ linux_installs() {
         # before the umount, so there is no trap and no leak. A future edit that
         # adds a failing call here leaks a mount of a neighbour's root into
         # phase 4's genfstab.
+        if [[ "$mounted" != true ]]; then
+            # A candidate that would not mount is reported, not dropped. It
+            # used to vanish with a success status and nothing said, so an ext4
+            # neighbour with a dirty journal simply stopped existing as far as
+            # phase 6 was concerned. has_grub is "unknown" rather than "no",
+            # because "no" is a claim about a filesystem nobody read.
+            error "linux_installs: ${dev} (${fstype}) could not be read; it is reported as unknown rather than skipped"
+            printf '%s %s unknown (unreadable)\n' "$dev" "$uuid"
+            rmdir "$tmp" 2>/dev/null || true
+            continue
+        fi
         if [[ "$mounted" == true ]]; then
             if [[ -r "${tmp}/etc/os-release" ]]; then
                 # Read with grep+cut rather than sourcing it: /etc/os-release

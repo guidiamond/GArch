@@ -459,7 +459,9 @@ setup() {
     for fn in parse_esp_list esp_list esp_dir_inventory esp_fallback_kind \
               esp_vendor_efi_path esp_has_own_grub bootloader_id_free \
               efi_path_to_slashes parse_nvram_entries parse_nvram_loaders \
-              nvram_entries esp_probe linux_installs fs_uuid_for_partuuid; do
+              nvram_entries nvram_loaders esp_fallback_binary \
+              esp_probe linux_installs fs_uuid_for_partuuid _esp_resolve \
+              _nvram_split _nvram_read; do
         declare -F "$fn" >/dev/null || { echo "not defined: $fn"; return 1; }
     done
 }
@@ -766,7 +768,9 @@ LSBLK"
     run bash -c "ESP_TYPE_GUID=c12a7328-f81f-11d2-ba4b-00a0c93ec93b; $(declare -f parse_esp_list); cat <<'LSBLK' | parse_esp_list
 /dev/sda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 2147483648
 LSBLK"
-    [ "$output" = "/dev/sda1  2147483648" ]
+    # A literal "-" rather than an empty field: with UUID in the middle of the
+    # emitted record, an empty one shifts the size into a consumer's $uuid.
+    [ "$output" = "/dev/sda1 - 2147483648" ]
 }
 
 @test "parse_esp_list ignores the whole-disk rows lsblk emits" {
@@ -909,6 +913,16 @@ EFIBOOT"
     PATH="${stub}:${PATH}" run nvram_entries
     [ "$status" -ne 0 ]
     [[ "$output" == *"efibootmgr"* ]]
+    # Named for the function that was called, not for the parser it delegates
+    # to. Both halves share one reader, and reporting "parse_nvram_entries"
+    # sends the operator looking for a name that appears in no phase. Asserted
+    # as an absence too: "parse_nvram_entries: efibootmgr failed" contains
+    # "nvram_entries: efibootmgr failed", so the positive form alone passes
+    # against exactly the wording it is meant to rule out.
+    [[ "$output" == *"nvram_entries: efibootmgr failed"* ]]
+    [[ "$output" != *"parse_nvram"* ]]
+    [[ "$output" != *"_nvram_read"* ]]
+    [[ "$output" == *"EFI variables are not supported"* ]]
 }
 
 @test "nvram_entries reports the entries efibootmgr lists" {
@@ -1279,4 +1293,289 @@ MOUNT
     [[ "$output" == *"kind systemd-boot"* ]]
     [[ "$output" == *"owngrub yes"* ]]
     [[ "$output" == *"efipath /EFI/Microsoft/Boot/bootmgfw.efi"* ]]
+}
+
+# --- review round 2 -----------------------------------------------------------
+
+@test "parse_nvram_loaders takes the path from the HD node it took the guid from" {
+    # `=~` is leftmost-longest but UNANCHORED: when the run starting at the
+    # first backslash cannot reach a ".EFI", the engine retries from a later
+    # backslash and succeeds there. Measured before the fix, a legal FAT long
+    # name with a space in it produced:
+    #     0000 db04a6e9-... /grubx64.efi Neighbour OS
+    # -- a well-formed entry chainloading a path that does not exist, which
+    # chain_entry accepts because /grubx64.efi is a valid absolute EFI path.
+    # The operator finds out at the boot menu.
+    local fixture
+    fixture=$(printf 'Boot0000* Neighbour OS\tHD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\\EFI\\My Vendor\\grubx64.efi\n')
+    local out
+    out=$(parse_nvram_loaders <<<"$fixture" 2>/dev/null)
+    # A space is outside chain_entry's character class, so no row is emitted --
+    # but it must be dropped, never silently truncated to a different path.
+    [ -z "$out" ]
+    # And dropped LOUDLY: efi_path_to_slashes refuses the whole path on stderr,
+    # naming it. Faithful extraction is what makes that diagnostic possible; a
+    # truncated path is accepted everywhere and simply wrong.
+    run parse_nvram_loaders <<<"$fixture"
+    [[ "$output" == *"not an absolute EFI path"* ]]
+    [[ "$output" == *"My Vendor"* ]]
+}
+
+@test "parse_nvram_loaders pairs the guid and the path from one device path node" {
+    # Two HD nodes on a line took the guid from the first and the path from
+    # wherever the unanchored search landed, which can be the second.
+    local fixture
+    fixture=$(printf 'Boot0000* Odd\tHD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/HD(2,GPT,620c1fcb-07fd-ca4f-a2a0-09c21869c7d6,0x0,0x0)/\\EFI\\B\\g.efi\n')
+    run parse_nvram_loaders <<<"$fixture"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0000 620c1fcb-07fd-ca4f-a2a0-09c21869c7d6 /EFI/B/g.efi Odd" ]
+}
+
+@test "parse_nvram_loaders ignores a loader path that precedes the HD node" {
+    local fixture
+    fixture=$(printf 'Boot0000* Odd\tFv(\\EFI\\decoy\\x.efi)/HD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\\EFI\\B\\g.efi\n')
+    run parse_nvram_loaders <<<"$fixture"
+    [ "$output" = "0000 db04a6e9-6005-473c-b45b-ac2ca8af3a2a /EFI/B/g.efi Odd" ]
+}
+
+@test "parse_esp_list never hands a consumer a size where a uuid belongs" {
+    # The header explains why UUID is read LAST on input: an empty middle field
+    # shifts every later column. The record emitted put UUID back in the
+    # middle, so an unformatted ESP -- the exact case the header is about --
+    # gave a positional consumer uuid=[2147483648] and size=[].
+    local out dev uuid size
+    out=$(printf '/dev/sda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 2147483648\n' | parse_esp_list)
+    read -r dev uuid size <<<"$out"
+    [ "$dev" = "/dev/sda1" ]
+    [ "$size" = "2147483648" ]
+    [ "$uuid" != "2147483648" ]
+    # chain_entry must still refuse whatever stands in for the missing uuid.
+    run chain_entry "X" "$uuid" "/EFI/B/g.efi"
+    [ "$status" -ne 0 ]
+}
+
+@test "linux_installs reports a partition it could not mount instead of dropping it" {
+    # The banner promises no probe answers "nothing found" because a tool
+    # broke. An ext4 neighbour whose noload mount fails used to vanish with a
+    # success status and nothing said, and phase 6 then had no entry for it.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/mount"
+    chmod +x "${stub}/lsblk" "${stub}/mount"
+    PATH="${stub}:${PATH}" run linux_installs
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"/dev/sdz1 1b13ff14-95ae-46f1-b975-a4233c5ed17f unknown"* ]]
+    [[ "$output" == *"could not be read"* ]]
+}
+
+@test "linux_installs fails when it cannot create a mountpoint" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/mktemp"
+    chmod +x "${stub}/lsblk" "${stub}/mktemp"
+    PATH="${stub}:${PATH}" run linux_installs
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"mountpoint"* ]]
+}
+
+@test "esp_vendor_efi_path prefers a shim in any vendor dir over a bare grub" {
+    # The loop was vendor-major, so the candidate order only ranked loaders
+    # WITHIN one vendor directory and the vendor was picked by glob collation.
+    # That contradicts the Secure Boot reasoning the candidate order is written
+    # for: chainloading a distro's grubx64.efi directly fails under SB, and
+    # "arch" sorts before "fedora".
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/arch" "${esp}/EFI/fedora"
+    touch "${esp}/EFI/arch/grubx64.efi" "${esp}/EFI/fedora/shimx64.efi" "${esp}/EFI/fedora/grubx64.efi"
+    [ "$(esp_vendor_efi_path "$esp")" = "/EFI/fedora/shimx64.efi" ]
+}
+
+@test "_esp_resolve backtracks past a component that matches but leads nowhere" {
+    # It committed to the first case-insensitive match by collation order and
+    # never tried the second, so the miss landed on "fallback no" -- the answer
+    # that makes removable_policy OFFER to overwrite \\EFI\\BOOT\\BOOTX64.EFI.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    # The empty directory is the one spelled exactly as asked for, so the
+    # exact-match-first branch commits to it and the binary in the other one is
+    # never reached.
+    mkdir -p "${esp}/EFI/BOOT" "${esp}/EFI/bOOt"
+    touch "${esp}/EFI/bOOt/BOOTX64.EFI"
+    run esp_dir_inventory "$esp"
+    [[ "$output" == *"fallback yes"* ]]
+    [ "$(esp_fallback_binary "$esp")" = "${esp}/EFI/bOOt/BOOTX64.EFI" ]
+}
+
+@test "_esp_resolve finds an exact match and a differently-cased one" {
+    local root="${BATS_TEST_TMPDIR}/r"
+    mkdir -p "${root}/EFI/BOOT"
+    touch "${root}/EFI/BOOT/BOOTX64.EFI"
+    [ "$(_esp_resolve "$root" "EFI/BOOT/BOOTX64.EFI")" = "${root}/EFI/BOOT/BOOTX64.EFI" ]
+    [ "$(_esp_resolve "$root" "efi/boot/bootx64.efi")" = "${root}/EFI/BOOT/BOOTX64.EFI" ]
+}
+
+@test "_esp_resolve fails for a path that is not there" {
+    local root="${BATS_TEST_TMPDIR}/r"
+    mkdir -p "${root}/EFI"
+    run _esp_resolve "$root" "EFI/BOOT/BOOTX64.EFI"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "_esp_resolve honours the required type so a directory cannot shadow a file" {
+    # A directory named BOOTX64.EFI is legal on FAT. Returning it made
+    # esp_fallback_binary's -f test fail, which reads as "no fallback here".
+    local root="${BATS_TEST_TMPDIR}/r"
+    mkdir -p "${root}/EFI/BOOT/BOOTX64.EFI" "${root}/EFI/boot2"
+    touch "${root}/EFI/boot2/BOOTX64.EFI"
+    run _esp_resolve "$root" "EFI/BOOT/BOOTX64.EFI" f
+    [ "$status" -ne 0 ]
+    [ "$(_esp_resolve "$root" "EFI/boot2/BOOTX64.EFI" f)" = "${root}/EFI/boot2/BOOTX64.EFI" ]
+    [ "$(_esp_resolve "$root" "EFI/BOOT/BOOTX64.EFI" d)" = "${root}/EFI/BOOT/BOOTX64.EFI" ]
+}
+
+@test "nvram_loaders fails instead of reporting no loaders when efibootmgr fails" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\necho "EFI variables are not supported" >&2\nexit 1\n' > "${stub}/efibootmgr"
+    chmod +x "${stub}/efibootmgr"
+    PATH="${stub}:${PATH}" run nvram_loaders
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"nvram_loaders: efibootmgr failed"* ]]
+    [[ "$output" != *"parse_nvram"* ]]
+    [[ "$output" != *"_nvram_read"* ]]
+    [[ "$output" == *"EFI variables are not supported"* ]]
+}
+
+@test "nvram_loaders reports the loaders efibootmgr lists" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    cat > "${stub}/efibootmgr" <<'EFIBOOTMGR'
+#!/bin/bash
+printf 'BootCurrent: 0000\n'
+printf 'Boot0000* Windows Boot Manager\tHD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\\EFI\\MICROSOFT\\BOOT\\BOOTMGFW.EFI57494e\n'
+printf 'Boot0001* UEFI:CD/DVD Drive\tBBS(129,,0x0)\n'
+EFIBOOTMGR
+    chmod +x "${stub}/efibootmgr"
+    PATH="${stub}:${PATH}" run nvram_loaders
+    [ "$status" -eq 0 ]
+    [ "$output" = "0000 db04a6e9-6005-473c-b45b-ac2ca8af3a2a /EFI/MICROSOFT/BOOT/BOOTMGFW.EFI Windows Boot Manager" ]
+}
+
+@test "fs_uuid_for_partuuid fails instead of reporting no match when lsblk fails" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 3\n' > "${stub}/lsblk"
+    chmod +x "${stub}/lsblk"
+    PATH="${stub}:${PATH}" run fs_uuid_for_partuuid db04a6e9-6005-473c-b45b-ac2ca8af3a2a
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"lsblk"* ]]
+}
+
+@test "esp_probe removes its mountpoint when the mount fails" {
+    local stub="${BATS_TEST_TMPDIR}/bin" tmp="${BATS_TEST_TMPDIR}/mnt"
+    mkdir -p "$stub" "$tmp"
+    printf '#!/bin/bash\necho vfat\n' > "${stub}/lsblk"
+    printf '#!/bin/bash\nexit 32\n' > "${stub}/mount"
+    chmod +x "${stub}/lsblk" "${stub}/mount"
+    PATH="${stub}:${PATH}" TMPDIR="$tmp" run esp_probe /dev/sdz1
+    [[ "$output" == *"fallback unknown"* ]]
+    [ -z "$(ls -A "$tmp")" ]
+}
+
+@test "esp_fallback_kind aborts on a missing argument rather than answering none" {
+    # It is the only probe that turned a programming error into an answer:
+    # under set -u the ${1%/} abort happened inside a command substitution, so
+    # only the subshell died and `|| { echo none; }` caught it -- reporting
+    # "no bootloader here" for a call that never named an ESP.
+    run bash -c "set -u
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+esp_fallback_kind
+echo REACHED"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"none"* ]]
+    [[ "$output" != *"REACHED"* ]]
+    # Positively, that it aborted for the reason claimed. Without this the
+    # three assertions above are all satisfied by a status of 127 and no output
+    # at all -- which is what a renamed function or a broken heredoc produces,
+    # and the test would pass for the rest of its life without ever running
+    # esp_fallback_kind.
+    #
+    # bash's own status for an expansion abort here IS 127, so bats prints a
+    # BW01 "Command not found" warning for this run. It is expected and it is
+    # not what happened. Do not quiet it with `run -127`: that pins an
+    # undocumented bash exit status, and the day it changes this test starts
+    # failing for a reason unrelated to what it checks. The assertion below is
+    # what distinguishes the abort from a genuinely missing command.
+    [[ "$output" == *"unbound variable"* ]]
+
+    # And the control: the same harness, one argument, reaches the end. This is
+    # what makes the negative assertions above mean something.
+    run bash -c "set -u
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+esp_fallback_kind '${BATS_TEST_TMPDIR}'
+echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"none"* ]]
+    [[ "$output" == *"REACHED"* ]]
+}
+
+@test "bootloader_id_free's unsanitised ids resolve where the header says they do" {
+    # Not reachable through bootloader_id_from, which is the only caller today.
+    # Pinned because the header makes a claim about both shapes, and the claim
+    # was wrong once already: "" was documented as reporting free while it
+    # resolves EFI/ to the ESP's own EFI directory and reports taken.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/ARCH"
+    run bootloader_id_free "$esp" "OTHER"
+    [ "$status" -eq 0 ]
+    # FAT is case-insensitive, so both spellings are the one occupied directory.
+    run bootloader_id_free "$esp" "ARCH"
+    [ "$status" -eq 1 ]
+    run bootloader_id_free "$esp" "arch"
+    [ "$status" -eq 1 ]
+    # The two shapes the header documents: each reports "not free", which is the
+    # refusing direction, but for a path that is not \EFI\<id> at all.
+    run bootloader_id_free "$esp" ""
+    [ "$status" -eq 1 ]
+    run bootloader_id_free "$esp" "../.."
+    [ "$status" -eq 1 ]
+}
+
+@test "the nvram parsers do not leak _NV_ variables into the sourcing shell" {
+    # _nvram_split assigns three unprefixed names under bash's dynamic scoping.
+    # Undeclared, they landed in whatever sourced lib/boot.sh -- install.sh,
+    # which runs under set -u and whose own locals are one collision away.
+    #
+    # Fed by REDIRECTION, not by a pipeline. `printf ... | parse_nvram_entries`
+    # runs the parser in a subshell, so the assignments die with it and this
+    # test would pass with every `local` deleted. That is also why the leak was
+    # never observed in production -- _nvram_read pipes -- and why the guard is
+    # still right: a caller reading a file into a parser does not subshell.
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+parse_nvram_loaders <<<\"\$(printf 'Boot0001* X\t%s' 'HD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x0,0x0)/\\EFI\\B\\g.efi')\"
+parse_nvram_entries <<<'Boot0002* Y'
+for v in _NV_NUM _NV_LABEL _NV_DP; do
+    declare -p \"\$v\" >/dev/null 2>&1 && echo \"LEAKED \$v\"
+done
+echo DONE"
+    [ "$status" -eq 0 ]
+    # The parsers must still have worked -- a leak test that passes because
+    # nothing was parsed proves nothing.
+    [[ "$output" == *"0001 db04a6e9-6005-473c-b45b-ac2ca8af3a2a /EFI/B/g.efi X"* ]]
+    [[ "$output" == *"0002 Y"* ]]
+    [[ "$output" != *"LEAKED"* ]]
+    [[ "$output" == *"DONE"* ]]
+}
+
+@test "chain_entry refuses a carriage return in the title" {
+    # A CRLF /etc/os-release reaches this through linux_installs' NAME, and a
+    # bare CR in a GRUB menu title is a display corruption nobody diagnoses.
+    run chain_entry "$(printf 'Arch\r')" "1A2B-3C4D" "/EFI/X/grubx64.efi"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"carriage return"* ]]
 }
