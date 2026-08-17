@@ -1,7 +1,7 @@
 #!/bin/bash
-# Boot environment: what is already installed, and what to write so that
-# everything on the machine stays reachable. Reads disks; writes only the two
-# files custom_cfg_upsert is pointed at.
+# Boot environment: what to write so that everything already on the machine
+# stays reachable. Nothing here reads a disk or destroys anything -- the only
+# write is to the one file custom_cfg_upsert is pointed at.
 # Requires lib/ui.sh to be sourced first.
 # shellcheck shell=bash
 
@@ -24,16 +24,21 @@ _echo_e_literal() { printf '%s' "${1//\\/\\\\}"; }
 # in the firmware's own boot menu, which is where it shows up when NVRAM is the
 # only thing that survived.
 #
-# Unsafe characters are mapped, never dropped: dropping them would let two
-# different names land on the same ESP directory, where the second install
-# overwrites the first one's bootloader.
+# Unsafe characters are mapped, never dropped. Mapping does not avoid
+# collisions -- "my box" and "my/box" both become MY_BOX either way -- it keeps
+# the id the same length as the name, so a stripped newline cannot splice two
+# lines into one id that then becomes two arguments the first time anything
+# interpolates it unquoted.
 bootloader_id_from() {
     local name=$1 id
     id=${name^^}
     id=${id//[^A-Z0-9_]/_}
     id=${id:0:16}
-    [[ -n "$id" ]] || {
-        error "bootloader_id_from: '$(_echo_e_literal "$name")' leaves nothing usable as an id"
+    # An all-underscore id is a legal FAT directory and a useless one: this id
+    # is what the operator has to recognise in the firmware's own boot menu,
+    # which is the only menu left when NVRAM is all that survived.
+    [[ "$id" =~ [A-Z0-9] ]] || {
+        error "bootloader_id_from: '$(_echo_e_literal "$name")' leaves nothing usable as an id -- it has no letters or digits"
         return 1
     }
     echo "$id"
@@ -99,13 +104,22 @@ chain_entry() {
             error "chain_entry: title must not contain a single quote or a newline: '$(_echo_e_literal "$title")'"
             return 1 ;;
     esac
-    [[ "$uuid" =~ ^[A-Za-z0-9-]+$ ]] \
+    # Shape, not just character set: a bare "-" passed a [A-Za-z0-9-]+ rule and
+    # emitted `search --fs-uuid --set=root -`, which matches nothing and leaves
+    # chainloader resolving against whatever root was set -- the same "boots
+    # nothing and only says so at the boot menu" failure the path rule avoids.
+    # FAT's XXXX-XXXX covers every ESP; 8-4-4-4-12 covers everything else.
+    [[ "$uuid" =~ ^([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})$ ]] \
         || { error "chain_entry: '$(_echo_e_literal "$uuid")' is not a filesystem UUID"; return 1; }
     [[ "$efi_path" =~ ^/[A-Za-z0-9_./-]+$ ]] \
         || { error "chain_entry: '$(_echo_e_literal "$efi_path")' is not an absolute EFI path"; return 1; }
+    # Both partmaps, as grub-mkconfig emits: search needs the module for the
+    # label it is enumerating, and the disk this entry names is whatever the
+    # inventory found, not necessarily GPT.
     cat <<ENTRY
 menuentry '${title}' {
     insmod part_gpt
+    insmod part_msdos
     insmod fat
     insmod chain
     search --no-floppy --fs-uuid --set=root ${uuid}
@@ -114,23 +128,51 @@ menuentry '${title}' {
 ENTRY
 }
 
+# --- config files (writers) ------------------------------------------------
+
 # custom_cfg_upsert <file> <marker_id> <block> [mode]
 #
-# Replaces the region between the markers, or appends it. Idempotent: running
-# the installer twice leaves one block, not two, which a plain >> cannot
-# promise and which matters because both files this is pointed at belong to a
-# system that is already working.
+# Removes any existing block for this id and appends a fresh one at the end of
+# the file. Idempotent: running the installer twice leaves one block, not two,
+# which a plain >> cannot promise and which matters because both files this is
+# pointed at belong to a system that is already working.
+#
+# The block always ends up at the *end*, it is not rewritten where it stood.
+# If an operator has moved our block into the middle of a foreign 40_custom, a
+# re-run shifts every entry that followed it up by one -- and a foreign
+# GRUB_DEFAULT set by index then selects a different operating system. Callers
+# that care must set GRUB_DEFAULT by title or by id, never by number.
 #
 # The mode argument is not decoration. /etc/grub.d/40_custom is only read by
 # grub-mkconfig if it is executable, and mktemp creates 0600 whatever the umask
-# -- so an upsert that did not restore the mode would silently drop the entry
-# from that system's next regenerated config, months later.
+# -- so an upsert that did not set the mode would silently drop the entry from
+# that system's next regenerated config, months later. It applies to a file
+# this creates; an existing file keeps its own mode and ACL.
+#
+# Known limitation: the marker comparison is exact, so a target converted to
+# CRLF line endings stops matching and each run appends another block. That is
+# duplicate menu entries, not a broken boot -- content outside the markers is
+# still preserved, which is the guarantee that matters. Pinned by a test.
 #
 # This writes unconditionally and does not go through run_cmd, the same as
 # chroot_write_config. Callers that honour --dry-run must not call it.
 custom_cfg_upsert() {
     local file=$1 id=$2 block=$3 mode=${4:-0644}
-    local tmp begin end
+    local _ccu_tmp="" begin end n_begin n_end
+    # A backstop, not the mechanism -- every failure below still removes the
+    # temp file explicitly. This only catches a return path a later edit
+    # forgets. It deliberately does not trap INT/TERM: a trap set inside a
+    # function persists in the caller after it returns (measured), so trapping
+    # them here would leave install.sh with a handler that swallows Ctrl-C for
+    # the rest of a destructive run. A signal can therefore still leak the
+    # temp file; that is the lesser fault.
+    #
+    # The _ccu_ prefix is the one ask_password uses, for the same reason. A
+    # RETURN trap is not inherited by other functions, but it does stay
+    # registered after this one returns and fires again at the end of the next
+    # `source`, so a plain `tmp` would put an rm one name collision away from
+    # a path this function never created.
+    trap '[[ -z "$_ccu_tmp" ]] || rm -f "$_ccu_tmp"' RETURN
     [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] \
         || { error "custom_cfg_upsert: marker id must be [A-Za-z0-9_-], got '$(_echo_e_literal "$id")'"; return 1; }
     begin="# BEGIN arch-installer:${id}"
@@ -147,9 +189,41 @@ custom_cfg_upsert() {
             return 1 ;;
     esac
 
-    [[ -f "$file" ]] && mode=$(stat -c %a "$file" 2>/dev/null || echo "$mode")
+    # A symlink is replaced by the rename, so the real config would keep its old
+    # content and silently stop receiving this block -- and the replacement
+    # would take the *link's* mode, which is always 0777, because stat -c %a
+    # does not dereference. In /etc/grub.d that is a world-writable file root
+    # executes on every regeneration. Fedora and RHEL ship /boot/grub2/grub.cfg
+    # as exactly such a symlink into the ESP, and writing into another distro's
+    # config is what this function is for, so this is a path we will meet.
+    if [[ -L "$file" ]]; then
+        error "custom_cfg_upsert: $(_echo_e_literal "$file") is a symlink to $(_echo_e_literal "$(readlink -f -- "$file" 2>/dev/null)"); point at that path instead"
+        return 1
+    fi
+    # [[ -f ]] is false for a directory, and `mv tmp somedir` moves the temp
+    # file *into* it and reports success -- so pointing at /etc/grub.d instead
+    # of /etc/grub.d/40_custom used to leave an executable stray file there
+    # that grub-mkconfig runs forever and no marker will ever match.
+    if [[ -e "$file" && ! -f "$file" ]]; then
+        error "custom_cfg_upsert: $(_echo_e_literal "$file") exists and is not a regular file"
+        return 1
+    fi
 
-    tmp=$(mktemp "${file}.XXXXXX") \
+    # An unmatched BEGIN sets awk's skip flag with nothing left to clear it, so
+    # every line to EOF would be dropped -- silently, reporting success, in a
+    # working system's bootloader config. We never write an orphan (the marker
+    # guard above and the atomic rename below both hold), so this means the
+    # file was hand-edited, and guessing where the block ends is not ours.
+    if [[ -f "$file" ]]; then
+        n_begin=$(grep -cFx -- "$begin" "$file" || true)
+        n_end=$(grep -cFx -- "$end" "$file" || true)
+        if [[ "$n_begin" != "$n_end" ]] || (( n_begin > 1 )); then
+            error "custom_cfg_upsert: the arch-installer:${id} markers in $(_echo_e_literal "$file") are not a matched pair (${n_begin} BEGIN, ${n_end} END); refusing to guess where the block ends"
+            return 1
+        fi
+    fi
+
+    _ccu_tmp=$(mktemp "${file}.XXXXXX") \
         || { error "custom_cfg_upsert: cannot create a temp file next to $(_echo_e_literal "$file")"; return 1; }
 
     if [[ -f "$file" ]]; then
@@ -160,22 +234,36 @@ custom_cfg_upsert() {
             $0 == b { skip = 1; next }
             $0 == e { skip = 0; next }
             !skip   { print }
-        ' "$file" > "$tmp" || { rm -f "$tmp"; error "custom_cfg_upsert: failed to read $(_echo_e_literal "$file")"; return 1; }
+        ' "$file" > "$_ccu_tmp" || { rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to read $(_echo_e_literal "$file")"; return 1; }
     fi
 
-    # Every failure below removes the temp file before returning: it is a
+    # Every *handled* failure below removes the temp file before returning --
+    # signals are the trap's problem, and it cannot cover them. The file is a
     # sibling of the target, so in /etc/grub.d a leaked one is a second copy of
-    # this entry in every config that system regenerates from then on.
-    if ! { printf '%s\n' "$begin"; printf '%s\n' "$block"; printf '%s\n' "$end"; } >> "$tmp"; then
-        rm -f "$tmp"; error "custom_cfg_upsert: failed to write $(_echo_e_literal "$file")"; return 1
+    # this entry in every config that system regenerates from then on, and the
+    # window between the mode being set and the rename leaks it at the
+    # target's mode rather than mktemp's 0600.
+    if ! { printf '%s\n' "$begin"; printf '%s\n' "$block"; printf '%s\n' "$end"; } >> "$_ccu_tmp"; then
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to write $(_echo_e_literal "$file")"; return 1
     fi
-    # chmod before the rename, not after: between the two there is a moment
-    # where a 0600 40_custom is the live one, and a grub-mkconfig landing there
-    # skips it.
-    if ! chmod "$mode" "$tmp"; then
-        rm -f "$tmp"; error "custom_cfg_upsert: failed to chmod $(_echo_e_literal "$file")"; return 1
+    # Mode before the rename, not after: between the two there is a moment where
+    # a 0600 40_custom is the live one, and a grub-mkconfig landing there skips
+    # it.
+    #
+    # For an existing target, cp --attributes-only rather than
+    # `chmod $(stat -c %a)`: %a reports the ACL *mask* in the group bits, so an
+    # ACL'd 0644 file reads back as 0664 and restoring that turns the mask into
+    # a real group-write bit while dropping the ACL entirely (measured).
+    # --attributes-only copies mode and ACL and no data, so the block just
+    # written to the temp file survives.
+    if [[ -f "$file" ]]; then
+        if ! cp --attributes-only --preserve=mode -- "$file" "$_ccu_tmp"; then
+            rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to copy the mode of $(_echo_e_literal "$file")"; return 1
+        fi
+    elif ! chmod "$mode" "$_ccu_tmp"; then
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to chmod $(_echo_e_literal "$file")"; return 1
     fi
-    if ! mv "$tmp" "$file"; then
-        rm -f "$tmp"; error "custom_cfg_upsert: failed to move $(_echo_e_literal "$file") into place"; return 1
+    if ! mv "$_ccu_tmp" "$file"; then
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to move $(_echo_e_literal "$file") into place"; return 1
     fi
 }
