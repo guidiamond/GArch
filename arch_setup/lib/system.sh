@@ -355,10 +355,22 @@ detect_gpu() {
     esac
 }
 
-# True (0) when GRUB still needs installing. Takes the ESP mountpoint.
+# True (0) when GRUB still needs installing under <bootloader_id>. Takes the
+# ESP mountpoint and the id, defaulting to /boot and GRUB.
+#
+# The id is a parameter because a second install on a shared ESP uses its own
+# vendor directory. Hardcoding GRUB meant the check was satisfied by *any*
+# GRUB on the ESP -- so a second install skipped grub-install entirely and then
+# wrote a grub.cfg the first install's binary would load, quietly replacing its
+# menu.
+#
+# This is only half the fix. Parameterising the id stops a *different* id from
+# being mistaken for ours; it does nothing about our id already being taken by
+# somebody else, which is what bootloader_id_free is for -- phase 3 must call
+# that before phase 5 relies on this.
 needs_grub_install() {
-    local esp=${1:-/boot}
-    [[ -f "${esp}/EFI/GRUB/grubx64.efi" ]] && return 1
+    local esp=${1:-/boot} id=${2:-GRUB}
+    [[ -f "${esp}/EFI/${id}/grubx64.efi" ]] && return 1
     return 0
 }
 

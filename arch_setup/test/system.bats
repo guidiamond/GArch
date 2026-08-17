@@ -398,6 +398,30 @@ stub_net() {
     [ "$status" -eq 1 ]
 }
 
+@test "needs_grub_install is false when the given id is already installed" {
+    mkdir -p "$TMP/esp/EFI/ARCH_WORK"
+    touch "$TMP/esp/EFI/ARCH_WORK/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK
+    [ "$status" -eq 1 ]
+}
+
+# The one that matters for a second install on a shared ESP: somebody else's
+# GRUB sitting in EFI/GRUB must not be mistaken for ours, or phase 5 skips
+# grub-install and then writes a grub.cfg their binary loads.
+@test "needs_grub_install is true when only a different id is installed" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK
+    [ "$status" -eq 0 ]
+}
+
+@test "needs_grub_install defaults to the GRUB id" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp"
+    [ "$status" -eq 1 ]
+}
+
 # --- refresh_keyring / rank_mirrors ----------------------------------------
 #
 # Extracted from install.sh's phase_preflight, which left the path its own
