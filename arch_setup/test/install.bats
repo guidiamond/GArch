@@ -269,7 +269,7 @@ with_answers() {
                | tr ' ' '\n' | grep -E '^[A-Z][A-Z0-9_]*$' | sort -u)
     # If the extraction silently stopped matching, this test would pass by
     # comparing two empty sets.
-    [ "$(printf '%s\n' "$required" | grep -c .)" -eq 9 ]
+    [ "$(printf '%s\n' "$required" | grep -c .)" -eq 11 ]
 
     local written
     written=$(in_install "$(with_answers); chroot_config_args AAAA BBBB" | cut -d= -f1 | sort)
@@ -292,6 +292,23 @@ with_answers() {
     # Empty is correct and accepted: the generated script only requires
     # LUKS_UUID when LUKS_ENABLED is true.
     [[ "$output" == *"LUKS_UUID="* ]]
+}
+
+@test "chroot_config_args carries the bootloader id and removable flag" {
+    run in_install "$(with_answers); BOOTLOADER_ID=ARCH_WORK; GRUB_REMOVABLE=false; chroot_config_args AAAA BBBB"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"BOOTLOADER_ID=ARCH_WORK"* ]]
+    [[ "$output" == *"GRUB_REMOVABLE=false"* ]]
+}
+
+# The defaults matter on their own: phase 3 is the only thing that ever
+# changes them, and until it runs they are what the chroot would be handed.
+# GRUB alone on a shared ESP is a collision, but the fallback path stays
+# unwritten unless the inventory says it is free.
+@test "install.sh defaults to the GRUB id and to not claiming the fallback path" {
+    run in_install 'printf "%s %s\n" "$BOOTLOADER_ID" "$GRUB_REMOVABLE"'
+    [ "$status" -eq 0 ]
+    [ "$output" = "GRUB false" ]
 }
 
 @test "chroot_write_config accepts what chroot_config_args produces, LUKS on and off" {

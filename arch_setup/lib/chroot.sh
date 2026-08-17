@@ -184,7 +184,8 @@ HELPERS
 # Fail before touching anything, naming every key at once: a half-configured
 # system found at the second reboot is far worse than a run that never began.
 if ! require_vars HOSTNAME_VAR USERNAME_VAR TIMEZONE LOCALE KEYMAP \
-                  LUKS_ENABLED ROOT_PASS_B64 USER_PASS_B64; then
+                  LUKS_ENABLED ROOT_PASS_B64 USER_PASS_B64 \
+                  BOOTLOADER_ID GRUB_REMOVABLE; then
     exit 1
 fi
 case "$LUKS_ENABLED" in
@@ -198,6 +199,25 @@ esac
 if [[ "$LUKS_ENABLED" == "true" ]] && ! require_vars LUKS_UUID; then
     exit 1
 fi
+# The id names a directory under EFI/ and is handed to grub-install as
+# --bootloader-id. chroot_write_config already refuses " ` $ \ and newlines,
+# none of which is needed to write ../MICROSOFT and install this bootloader
+# over another operating system's. bootloader_id_from emits a subset of this
+# set, so a value it produced always passes; anything else arrived by a route
+# that skipped it.
+if [[ ! "$BOOTLOADER_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    error "BOOTLOADER_ID must be a bare directory name of [A-Za-z0-9_-], got '${BOOTLOADER_ID}'"
+    exit 1
+fi
+case "$GRUB_REMOVABLE" in
+    true|false) ;;
+    *)  # The bootloader block tests for exactly "true", so "yes" or "True"
+        # silently means "no": an install told to claim the firmware fallback
+        # path that never writes it, and firmware holding no NVRAM entry for
+        # this install then finds nothing to boot.
+        error "GRUB_REMOVABLE must be exactly 'true' or 'false', got '${GRUB_REMOVABLE}'"
+        exit 1 ;;
+esac
 
 ROOT_PASSWORD=$(printf '%s' "$ROOT_PASS_B64" | base64 -d)
 USER_PASSWORD=$(printf '%s' "$USER_PASS_B64" | base64 -d)
@@ -328,11 +348,41 @@ if [[ "$LUKS_ENABLED" == "true" ]]; then
     grub_cmdline_add /etc/default/grub "root=/dev/mapper/cryptroot"
 fi
 
-if needs_grub_install /boot; then
-    info "Installing GRUB..."
-    grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
+info "Enabling os-prober so other operating systems appear in the menu..."
+# Not fatal, and the `if` is what makes it so: this script runs under
+# `set -Eeuo pipefail`, so a bare `pacman -S os-prober` would let a flaky
+# mirror abort the run here -- one step short of grub-install, leaving a
+# pacstrapped system with no bootloader at all, over a menu convenience.
+# The chainload entries phase 6 writes do not need os-prober.
+if pacman -S --needed --noconfirm os-prober; then
+    if grep -q '^GRUB_DISABLE_OS_PROBER=' /etc/default/grub; then
+        sed -i 's|^GRUB_DISABLE_OS_PROBER=.*|GRUB_DISABLE_OS_PROBER=false|' /etc/default/grub
+    else
+        echo 'GRUB_DISABLE_OS_PROBER=false' >> /etc/default/grub
+    fi
 else
-    success "GRUB already installed on the ESP, skipping grub-install"
+    warn "os-prober unavailable -- other operating systems will not be auto-detected."
+    warn "The static chainload entries from phase 6 still work."
+fi
+
+if needs_grub_install /boot "${BOOTLOADER_ID}"; then
+    info "Installing GRUB as ${BOOTLOADER_ID}..."
+    if [[ "${GRUB_REMOVABLE}" == "true" ]]; then
+        # --removable also writes \EFI\BOOT\BOOTX64.EFI, the path the firmware
+        # falls back to when it has no NVRAM entry -- so on an ESP where that
+        # path is already taken, this overwrites another operating system's
+        # only bootloader. Nothing here can tell: the obligation is on the
+        # caller, and lib/boot.sh's removable_policy is what decides it: never
+        # true on `forbid`, and on either `offer-` verdict only after the
+        # operator says yes. install.sh's own default is false.
+        grub-install --target=x86_64-efi --efi-directory=/boot \
+            --bootloader-id="${BOOTLOADER_ID}" --removable
+    else
+        grub-install --target=x86_64-efi --efi-directory=/boot \
+            --bootloader-id="${BOOTLOADER_ID}"
+    fi
+else
+    success "GRUB ${BOOTLOADER_ID} already installed on the ESP, skipping grub-install"
 fi
 grub-mkconfig -o /boot/grub/grub.cfg
 success "bootloader ready"

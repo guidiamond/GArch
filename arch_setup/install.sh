@@ -19,6 +19,8 @@ export ARCH_SETUP_DIR
 source "${ARCH_SETUP_DIR}/lib/ui.sh"
 # shellcheck source=lib/disk.sh
 source "${ARCH_SETUP_DIR}/lib/disk.sh"
+# shellcheck source=lib/boot.sh
+source "${ARCH_SETUP_DIR}/lib/boot.sh"
 # shellcheck source=lib/system.sh
 source "${ARCH_SETUP_DIR}/lib/system.sh"
 # shellcheck source=lib/chroot.sh
@@ -45,6 +47,18 @@ TOTAL_PHASES=5
 KEYMAP=""; LOCALE=""; TIMEZONE=""
 HOSTNAME_VAR=""; USERNAME_VAR=""
 ROOT_PASSWORD=""; USER_PASSWORD=""; LUKS_PASSPHRASE=""
+
+# Boot integration. BOOTLOADER_ID is the ESP vendor directory this install
+# claims; GRUB_REMOVABLE decides whether it *also* writes the firmware
+# fallback path \EFI\BOOT\BOOTX64.EFI. Both are resolved in phase 3 and
+# consumed by the chroot in phase 5.
+#
+# The defaults are the conservative pair, because they are what a run that
+# never reaches phase 3's boot questions would hand the chroot: the historical
+# id, and no claim on the fallback path -- which on this hardware is another
+# Arch install's only bootloader.
+BOOTLOADER_ID="GRUB"
+GRUB_REMOVABLE=false
 
 # lib/disk.sh seeds this with ${DRY_RUN:-false} at source time, so it is always
 # defined by the time anything below runs under `set -u`. Repeated here anyway:
@@ -414,7 +428,9 @@ chroot_config_args() {
         "LOCALE=${LOCALE}" \
         "KEYMAP=${KEYMAP}" \
         "LUKS_ENABLED=${LUKS_ENABLED}" \
-        "LUKS_UUID=${LUKS_UUID}"
+        "LUKS_UUID=${LUKS_UUID}" \
+        "BOOTLOADER_ID=${BOOTLOADER_ID}" \
+        "GRUB_REMOVABLE=${GRUB_REMOVABLE}"
 }
 
 # A faithful clone of lib/packages.sh's pkg_read, kept in that shape on purpose.

@@ -302,3 +302,259 @@ extract_helpers() {
     grep -qF 'the pacstrap set should have installed zsh' "$TMP/root/setup.sh"
     assert_absent 'USER_SHELL=/bin/bash' "$TMP/root/setup.sh"
 }
+
+# --- the generated script's bootloader section ------------------------------
+
+# Slice the bootloader section out of the artifact.
+#
+# Guarded like extract_helpers above: run_bootloader feeds the result to
+# `bash`, so if either marker moves this must fail rather than hand a
+# different part of the chroot body to a shell on the developer's machine.
+extract_bootloader() {
+    local artifact=$1 out=$2
+    awk '/^# ---- bootloader ----$/ { on = 1 }
+         /^# ---- zram ----$/ { exit }
+         on { print }' "$artifact" > "$out"
+    [ -s "$out" ]
+    grep -q 'grub-mkconfig' "$out"
+    assert_absent 'mkinitcpio|useradd|usermod|chpasswd|systemctl|locale-gen|hwclock|zram' \
+        "$out"
+}
+
+# Run that slice with /etc/default/grub redirected into the test tmpdir and
+# the tools it drives replaced by recorders that print their arguments.
+#
+# Grepping the script text cannot tell "--removable appears in the file" from
+# "--removable is passed only when GRUB_REMOVABLE is true", and the second is
+# the whole point of the flag: passed unasked it overwrites whatever already
+# owns the firmware fallback path. Only executing the block answers that.
+#
+# grub_cmdline_add/remove are deliberately left real, so the command line
+# asserted afterwards is the one the function actually writes.
+#
+# needs_grub_install is left real too, against a fake ESP: stubbing it would
+# hide the argument it is called with, and calling it without the id is
+# exactly the bug Task 8 removed from the function itself.
+#
+# <luks> <removable> <vendor dir to pre-seed on the fake ESP, or "">
+run_bootloader() {
+    local luks=$1 removable=$2 preseed=$3
+    local artifact="$TMP/root/setup.sh" slice="$TMP/bootloader.sh"
+    local fixture="$TMP/default_grub" esp="$TMP/esp"
+    chroot_write_script "$artifact"
+    extract_bootloader "$artifact" "$slice"
+    # A test that wants to start from a non-empty grub config seeds the file
+    # itself; `run` subshells this function, so nothing set here escapes it.
+    [ -f "$fixture" ] || printf 'GRUB_CMDLINE_LINUX=""\n' > "$fixture"
+    mkdir -p "$esp"
+    if [ -n "$preseed" ]; then
+        mkdir -p "${esp}/EFI/${preseed}"
+        touch "${esp}/EFI/${preseed}/grubx64.efi"
+    fi
+    sed -i -e "s|/etc/default/grub|${fixture}|g" -e "s|/boot|${esp}|g" "$slice"
+    # Nothing may still address a real system path once the rewrite is done.
+    assert_absent '/etc/default/grub|(^|[ =])/boot' "$slice"
+    # `env`, not a prefix assignment: a comment cannot be put between a prefix
+    # assignment and its command without silently turning the assignments into
+    # ordinary locals, which the block then does not see.
+    #
+    # Same shell options as the generated script's own header, because a block
+    # that only survives with errexit off is not one the chroot survives.
+    env LUKS_ENABLED="$luks" GRUB_REMOVABLE="$removable" BOOTLOADER_ID=ARCH_WORK \
+        LUKS_UUID=1111-2222 \
+        NEW_HOOKS='HOOKS=(base udev autodetect modconf block encrypt filesystems fsck)' \
+        bash -c "
+        set -Eeuo pipefail
+        source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+        source '${BATS_TEST_DIRNAME}/../lib/system.sh'
+        pacman() { echo \"PACMAN \$*\"; }
+        grub-install() { echo \"GRUB-INSTALL \$*\"; }
+        grub-mkconfig() { echo \"GRUB-MKCONFIG \$*\"; }
+        source '${slice}'
+    "
+}
+
+@test "generated script installs grub under the configured bootloader id" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -q 'bootloader-id="${BOOTLOADER_ID}"' "$TMP/root/setup.sh"
+    assert_absent 'bootloader-id=GRUB' "$TMP/root/setup.sh"
+}
+
+@test "generated script enables os-prober" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -q 'GRUB_DISABLE_OS_PROBER=false' "$TMP/root/setup.sh"
+    assert_absent 'GRUB_DISABLE_OS_PROBER=true' "$TMP/root/setup.sh"
+}
+
+# The os-prober package is a menu convenience. Aborting the install for it
+# after pacstrap already succeeded would leave a machine with no bootloader
+# over a cosmetic failure, which is the opposite of this file's own rule.
+@test "generated script does not abort when os-prober cannot be installed" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -q 'if pacman -S --needed --noconfirm os-prober; then' "$TMP/root/setup.sh"
+    grep -qF 'os-prober unavailable' "$TMP/root/setup.sh"
+}
+
+# The os-prober stanza is INSERTED into the bootloader section, not a
+# replacement for it. Replacing the whole section deletes the crypt cmdline
+# and yields an encrypted install that boots to a rescue shell -- with every
+# other test in this file still green.
+@test "generated script still writes the LUKS kernel command line" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -qF 'root=/dev/mapper/cryptroot' "$TMP/root/setup.sh"
+    grep -qF 'grub_cmdline_remove /etc/default/grub cryptdevice' "$TMP/root/setup.sh"
+    grep -qF 'grub_cmdline_remove /etc/default/grub rd.luks.name' "$TMP/root/setup.sh"
+    grep -qF 'grub_cmdline_add /etc/default/grub "$CRYPT_PARAM"' "$TMP/root/setup.sh"
+}
+
+# The behavioural half of the test above: not "the text is present" but "the
+# kernel command line the block leaves behind can unlock and mount the root".
+@test "bootloader section puts the crypt parameters on the kernel command line" {
+    run run_bootloader true false ""
+    [ "$status" -eq 0 ]
+    grep -qF 'cryptdevice=UUID=1111-2222:cryptroot' "$TMP/default_grub"
+    grep -qF 'root=/dev/mapper/cryptroot' "$TMP/default_grub"
+}
+
+@test "bootloader section leaves the kernel command line alone without LUKS" {
+    run run_bootloader false false ""
+    [ "$status" -eq 0 ]
+    assert_absent 'cryptdevice|rd\.luks\.name|/dev/mapper/cryptroot' "$TMP/default_grub"
+}
+
+@test "bootloader section passes --removable only when GRUB_REMOVABLE is true" {
+    run run_bootloader false true ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GRUB-INSTALL "*"--removable"* ]]
+}
+
+@test "bootloader section omits --removable when GRUB_REMOVABLE is false" {
+    run run_bootloader false false ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GRUB-INSTALL "* ]]
+    [[ "$output" != *"--removable"* ]]
+}
+
+@test "bootloader section installs under the configured id, not GRUB" {
+    run run_bootloader false false ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--bootloader-id=ARCH_WORK"* ]]
+}
+
+@test "bootloader section skips grub-install when our own id is already there" {
+    run run_bootloader false false ARCH_WORK
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"GRUB-INSTALL"* ]]
+    [[ "$output" == *"GRUB-MKCONFIG"* ]]
+}
+
+# The shared-ESP case. Somebody else's GRUB in EFI/GRUB must not be read as
+# ours: skipping grub-install here leaves this install with no binary of its
+# own, while grub-mkconfig below still writes the grub.cfg their binary loads.
+@test "bootloader section installs anyway when only a foreign id is present" {
+    run run_bootloader false false GRUB
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--bootloader-id=ARCH_WORK"* ]]
+}
+
+@test "bootloader section appends the os-prober switch when grub has none" {
+    run run_bootloader false false ""
+    [ "$status" -eq 0 ]
+    grep -qxF 'GRUB_DISABLE_OS_PROBER=false' "$TMP/default_grub"
+}
+
+# A grub config that already disables os-prober must be rewritten, not have a
+# second, contradictory line appended after it.
+@test "bootloader section rewrites an existing os-prober switch in place" {
+    printf 'GRUB_CMDLINE_LINUX=""\nGRUB_DISABLE_OS_PROBER=true\n' > "$TMP/default_grub"
+    run run_bootloader false false ""
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^GRUB_DISABLE_OS_PROBER=' "$TMP/default_grub")" -eq 1 ]
+    grep -qxF 'GRUB_DISABLE_OS_PROBER=false' "$TMP/default_grub"
+}
+
+# --- the generated script's preflight ---------------------------------------
+
+# Slice and run the preflight section only. It reads its config and decodes
+# two base64 blobs and touches nothing else, so it is safe to execute here --
+# and executing it is the only way to show a guard actually stops the run
+# rather than merely appearing in the file.
+#
+# KEY=VALUE... ; every key left out is simply unset for the run.
+run_preflight() {
+    local artifact="$TMP/root/setup.sh" slice="$TMP/preflight.sh" assign=()
+    local kv
+    chroot_write_script "$artifact"
+    awk '/^# ---- preflight ----$/ { on = 1 }
+         /^# ---- time, locale, hostname ----$/ { exit }
+         on { print }' "$artifact" > "$slice"
+    [ -s "$slice" ]
+    grep -q 'require_vars' "$slice"
+    assert_absent 'grub-install|mkinitcpio|useradd|chpasswd|systemctl' "$slice"
+    for kv in "$@"; do assign+=("$kv"); done
+    # `env` rather than a prefix assignment, and the generated script's own
+    # shell options: under `set -u` an omitted key has to be genuinely unset
+    # for the refusal under test to be the one the chroot would hit.
+    env "${assign[@]}" bash -c "
+        set -Eeuo pipefail
+        source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+        source '${BATS_TEST_DIRNAME}/../lib/system.sh'
+        source '${slice}'
+        echo PREFLIGHT_OK
+    "
+}
+
+# Every key the preflight needs, with LUKS off. Callers word-split this on
+# purpose -- one KEY=VALUE per word -- and drop or override a line with grep
+# to build the case they want. (run.sh does not shellcheck .bats files, so
+# there is no SC2046 to disable here; this comment is the whole warning.)
+preflight_env() {
+    printf '%s\n' HOSTNAME_VAR=box USERNAME_VAR=me TIMEZONE=UTC \
+        LOCALE=en_US.UTF-8 KEYMAP=us LUKS_ENABLED=false \
+        ROOT_PASS_B64=cGFzcw== USER_PASS_B64=cGFzcw== \
+        BOOTLOADER_ID=ARCH_WORK GRUB_REMOVABLE=false
+}
+
+# The control: proves run_preflight can distinguish a pass from a refusal, so
+# the two cases below are not both passing on a broken harness.
+@test "preflight accepts a complete config" {
+    run run_preflight $(preflight_env)
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PREFLIGHT_OK"* ]]
+}
+
+@test "preflight refuses a missing bootloader id" {
+    run run_preflight $(preflight_env | grep -v '^BOOTLOADER_ID=')
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"BOOTLOADER_ID"* ]]
+    [[ "$output" != *"PREFLIGHT_OK"* ]]
+}
+
+# The block below tests GRUB_REMOVABLE for exactly "true". "yes" or "True"
+# would silently mean "no", so the install would never write the firmware
+# fallback path it was told to -- found only when the machine will not boot.
+@test "preflight refuses a GRUB_REMOVABLE that is not true or false" {
+    run run_preflight $(preflight_env | grep -v '^GRUB_REMOVABLE=') GRUB_REMOVABLE=yes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"GRUB_REMOVABLE"* ]]
+    [[ "$output" != *"PREFLIGHT_OK"* ]]
+}
+
+# The id is interpolated into ${esp}/EFI/${id}/grubx64.efi and handed to
+# grub-install as a directory name. chroot_write_config already refuses " ` $
+# and \, none of which is enough to stop ../MICROSOFT from installing this
+# bootloader over somebody else's.
+@test "preflight refuses a bootloader id that is not a bare directory name" {
+    run run_preflight $(preflight_env | grep -v '^BOOTLOADER_ID=') BOOTLOADER_ID=../MICROSOFT
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"BOOTLOADER_ID"* ]]
+    [[ "$output" != *"PREFLIGHT_OK"* ]]
+}
+
+# Pre-existing guard, kept under test now that a harness exists for it.
+@test "preflight refuses a LUKS_ENABLED that is not true or false" {
+    run run_preflight $(preflight_env | grep -v '^LUKS_ENABLED=') LUKS_ENABLED=yes
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"LUKS_ENABLED"* ]]
+    [[ "$output" != *"PREFLIGHT_OK"* ]]
+}
