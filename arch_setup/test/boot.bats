@@ -538,6 +538,22 @@ setup() {
     [ "$(esp_fallback_kind "$esp")" = "systemd-boot" ]
 }
 
+@test "esp_fallback_kind identifies the most distinctive signature, not grub" {
+    # The probe order is a behaviour change from grub-first, and both orders
+    # pass every other test in this file -- a binary is normally only one
+    # loader. "grub" is a substring that turns up inside other loaders,
+    # rEFInd's included, because they scan for it; "systemd-boot" and "refind"
+    # appear in nothing but themselves. Grub-first therefore labels somebody
+    # else's loader as grub, and the inventory is what the operator reads to
+    # decide what is on the machine.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/BOOT"
+    printf 'x systemd-boot x grub x' > "${esp}/EFI/BOOT/BOOTX64.EFI"
+    [ "$(esp_fallback_kind "$esp")" = "systemd-boot" ]
+    printf 'x refind x grub x' > "${esp}/EFI/BOOT/BOOTX64.EFI"
+    [ "$(esp_fallback_kind "$esp")" = "refind" ]
+}
+
 @test "esp_fallback_kind says unknown for an unrecognised binary" {
     local esp="${BATS_TEST_TMPDIR}/esp"
     mkdir -p "${esp}/EFI/BOOT"
@@ -654,6 +670,10 @@ setup() {
     mkdir -p "${esp}/EFI/MICROSOFT/BOOT"
     run esp_has_own_grub "$esp"
     [ "$status" -ne 0 ]
+    # This predicate is silent, so a missing function's exit 127 is the only
+    # thing that could put text here -- which is what makes the status
+    # assertion above mean something on its own.
+    [ -z "$output" ]
 }
 
 @test "bootloader_id_free is false when the vendor dir exists" {
@@ -661,6 +681,7 @@ setup() {
     mkdir -p "${esp}/EFI/GRUB"
     run bootloader_id_free "$esp" GRUB
     [ "$status" -ne 0 ]
+    [ -z "$output" ]
 }
 
 @test "bootloader_id_free is true when it does not" {
@@ -1162,31 +1183,74 @@ LSBLK
     chmod +x "${stub}/lsblk"
     PATH="${stub}:${PATH}" run fs_uuid_for_partuuid db04a6e9-6005-473c-b45b-ac2ca8af3a2a
     [ "$status" -ne 0 ]
+    [ -z "$output" ]
 }
 
 @test "the inventory functions survive install.sh's set -euo pipefail" {
     # bats runs no test under `set -u` -- install.sh's `set -euo pipefail`
     # governs nothing here -- so a test that means to catch an unbound variable
     # or an errexit abort has to turn them on itself. A subshell is used rather
-    # than `set -u` in the body so that errexit is genuinely in force for the
-    # whole sequence, including the trailing-`&&` returns that bit Task 6.
+    # than `set -u` in the body so errexit is genuinely in force for the whole
+    # sequence, including the trailing-`&&` returns that bit Task 6.
+    #
+    # Every call below is BARE. An earlier version wrote three of them as
+    # `fn ... || true`, which put them in an AND-OR list -- and errexit is
+    # suppressed inside a function called from one, so those three had no
+    # coverage at all while the test's name claimed they did. The predicates
+    # are therefore given inputs on which they must SUCCEED; their failure path
+    # legitimately returns non-zero and aborting on it is the documented
+    # contract, not a bug to test for here.
     local esp="${BATS_TEST_TMPDIR}/esp" empty="${BATS_TEST_TMPDIR}/empty"
-    mkdir -p "${esp}/EFI/GRUB" "${esp}/EFI/BOOT" "$empty"
-    touch "${esp}/EFI/GRUB/grubx64.efi" "${esp}/EFI/BOOT/BOOTX64.EFI"
-    run bash -c "set -euo pipefail
+    local stub="${BATS_TEST_TMPDIR}/survivebin" tmp="${BATS_TEST_TMPDIR}/survivetmp"
+    mkdir -p "${esp}/EFI/GRUB" "${esp}/EFI/BOOT" "${esp}/grub" "$empty" "$stub" "$tmp"
+    touch "${esp}/EFI/GRUB/grubx64.efi" "${esp}/EFI/BOOT/BOOTX64.EFI" "${esp}/grub/grub.cfg"
+    # One stub branching on the column list, because the six shell-out
+    # functions each ask lsblk a different question.
+    cat > "${stub}/lsblk" <<'LSBLK'
+#!/bin/bash
+case "$*" in
+    *PARTTYPE*)    echo "/dev/sdz1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 104857600 38BD-4D38" ;;
+    *FSTYPE,UUID*) echo "/dev/sdz2 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f" ;;
+    *PARTUUID*)    echo "/dev/sdz1 db04a6e9-6005-473c-b45b-ac2ca8af3a2a 38BD-4D38" ;;
+    *FSTYPE*)      echo vfat ;;
+esac
+LSBLK
+    cat > "${stub}/efibootmgr" <<'EFIBOOTMGR'
+#!/bin/bash
+printf 'BootCurrent: 0000\n'
+printf 'Boot0000* Windows Boot Manager\tHD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\\EFI\\MICROSOFT\\BOOT\\BOOTMGFW.EFI57494e\n'
+EFIBOOTMGR
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/mount"
+    printf '#!/bin/bash\nexit 0\n' > "${stub}/umount"
+    chmod +x "${stub}/lsblk" "${stub}/efibootmgr" "${stub}/mount" "${stub}/umount"
+
+    run env "PATH=${stub}:${PATH}" "TMPDIR=${tmp}" bash -c "set -euo pipefail
 source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
 source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+# Tree walkers, on a populated ESP and on an empty one -- the two take
+# different branches, and the empty one is where the trailing-&& returns live.
 for d in '${esp}' '${empty}'; do
     esp_dir_inventory \"\$d\" >/dev/null
     esp_fallback_kind \"\$d\" >/dev/null
-    esp_vendor_efi_path \"\$d\" >/dev/null || true
-    esp_has_own_grub \"\$d\" || true
-    bootloader_id_free \"\$d\" ARCH_WORK || true
 done
+# Predicates, on inputs where each must succeed, so the call can stay bare.
+esp_vendor_efi_path '${esp}' >/dev/null
+esp_fallback_binary '${esp}' >/dev/null
+esp_has_own_grub '${esp}'
+bootloader_id_free '${esp}' ARCH_WORK
+# Pure transforms.
 efi_path_to_slashes '\\EFI\\BOOT\\BOOTX64.EFI' >/dev/null
 printf 'x\n' | parse_esp_list >/dev/null
 printf 'x\n' | parse_nvram_entries >/dev/null
 printf 'x\n' | parse_nvram_loaders >/dev/null
+# The six that shell out, none of which the earlier version touched.
+esp_list >/dev/null
+nvram_entries >/dev/null
+nvram_loaders >/dev/null
+esp_probe /dev/sdz1 >/dev/null
+linux_installs >/dev/null
+linux_installs /dev/sdz2 >/dev/null
+fs_uuid_for_partuuid db04a6e9-6005-473c-b45b-ac2ca8af3a2a >/dev/null
 echo SURVIVED"
     [ "$status" -eq 0 ]
     [[ "$output" == *SURVIVED* ]]

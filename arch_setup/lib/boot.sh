@@ -347,19 +347,25 @@ custom_cfg_upsert() {
 
 ESP_TYPE_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
-# _esp_resolve <dir> <relative/path> -> the real path, each component matched
+# _esp_resolve <dir> <relative/path> -> the path, each component matched
 # case-insensitively, or 1.
 #
-# FAT is case-insensitive but case-*preserving*, and the kernel's vfat driver
-# hands back whatever spelling created the name. grub-install writes
-# BOOTX64.EFI, some firmwares and installers write bootx64.efi, and nothing
-# stops a third from writing BootX64.efi. The first draft tried two spellings
-# out of the 2^12 that are possible, and every one it missed read as "no
-# fallback binary here" -- which is exactly the answer that lets
-# removable_policy offer to overwrite somebody else's only bootloader.
+# On a real ESP this changes nothing, and the comment that used to sit here
+# claiming otherwise was wrong. Measured on the operator's live vfat mount:
+# `[[ -f /boot/EFI/EFI/BoOt/BoOtX64.eFi ]]` is true, because Linux's vfat
+# driver resolves lookups in any case. The plan's two-spelling test for
+# BOOTX64.EFI was therefore never broken in production, and the exact-match
+# branch below wins on the first try for whatever spelling it is handed -- so
+# what comes back is the spelling *asked for*, not the one on disk. That is
+# harmless: GRUB's fat module is case-insensitive too, so either spelling
+# chainloads.
 #
-# The real spelling is returned rather than the one asked for, because it goes
-# into a chainloader line.
+# What this does buy is that the case-insensitivity is ours rather than an
+# undeclared dependency on the vfat driver's lookup behaviour, so the same
+# functions give the same answers against a case-sensitive tree -- an ESP
+# image unpacked into a directory, or the fixtures this file's tests build.
+# Without it those tests would be testing something the production path does
+# not do.
 _esp_resolve() {
     local dir=${1%/} rest=$2 comp entry base match
     while :; do
@@ -465,6 +471,13 @@ esp_fallback_binary() {
 #
 # Informational only. The --removable policy keys on presence, never on this:
 # a binary this cannot identify is still somebody's bootloader.
+# The probe order is most-distinctive-first, which is a change from the
+# grub-first order this started with. "grub" is a substring that turns up
+# inside other loaders -- rEFInd's binary names it because it scans for it --
+# while "systemd-boot" and "refind" appear in nothing but themselves. Testing
+# for grub first therefore reports somebody else's loader as grub. Nothing but
+# the label is affected, since the --removable policy keys on presence, but a
+# mislabelled row is what the operator reads the inventory for.
 esp_fallback_kind() {
     local bin
     bin=$(esp_fallback_binary "${1%/}") || { echo "none"; return 0; }
@@ -495,6 +508,12 @@ esp_fallback_kind() {
 #   further down. Looking only for grubx64.efi returned nothing at all for the
 #   Windows ESP on the target machine, so phase 6 could not have produced the
 #   one chainload entry this whole feature exists for.
+# Exactly one loader is returned per ESP, and if an ESP carries two vendor
+# directories -- which a shared ESP with two neighbours on it does -- the one
+# that wins is whichever the glob reaches first, i.e. shell collation order.
+# That is arbitrary rather than wrong: the caller wants a chainload target for
+# this ESP, and both are one. Phase 6 needing every loader on an ESP would need
+# this to return a list.
 ESP_LOADER_CANDIDATES=(shimx64.efi grubx64.efi systemd-bootx64.efi Boot/bootmgfw.efi bootmgfw.efi)
 
 esp_vendor_efi_path() {
@@ -631,6 +650,19 @@ parse_nvram_loaders() {
     # ")/" would carry that hex into the chainloader line, which boots nothing
     # and only says so at the boot menu. Hex digits cannot spell ".EFI", so the
     # greedy match cannot run past the real end of the path.
+    #
+    # That last step holds only because the reader above calls `efibootmgr -v`
+    # and *not* `-u`. With -u the optional data is printed as text instead of
+    # hex, and text can contain ".EFI" -- at which point the leftmost-longest
+    # match overruns the real path silently. Do not add -u here.
+    #
+    # A loader path containing a space stops [^[:space:]]* early, the truncated
+    # run has no ".EFI", and the entry is dropped. That fails closed, which is
+    # the right direction, but a legitimate neighbour then vanishes from the
+    # inventory with nothing said. It cannot be a warn: lib/ui.sh's warn writes
+    # to stdout, and this function's stdout is parsed by its callers, so a
+    # warning here would arrive as a malformed inventory row. If it ever needs
+    # reporting, the caller of nvram_loaders is the place.
     local path_re='(\\[^[:space:]]*\.[Ee][Ff][Ii])'
     while IFS= read -r line; do
         _nvram_split "$line" || continue
@@ -735,6 +767,14 @@ esp_probe() {
         # Read into locals and unmounted before anything is printed: a mount
         # left behind is picked up by phase 4's genfstab and lands in the new
         # system's fstab, pointing at another operating system's ESP.
+        #
+        # Nothing between the mount and the umount can return non-zero today --
+        # every call is either total or guarded -- so there is no leak now and
+        # no trap. Anything added here that *can* fail must not be left to
+        # errexit, or it takes the abort before the umount. A trap is not the
+        # fix: one set inside a function stays registered in the caller after it
+        # returns (measured in Task 6), which is why custom_cfg_upsert traps
+        # only RETURN and deliberately not INT/TERM.
         inv=$(esp_dir_inventory "$tmp")
         kind=$(esp_fallback_kind "$tmp")
         if esp_has_own_grub "$tmp"; then owngrub=yes; else owngrub=no; fi
@@ -824,6 +864,10 @@ linux_installs() {
                 break
             fi
         done
+        # As in esp_probe: nothing in this branch can currently return non-zero
+        # before the umount, so there is no trap and no leak. A future edit that
+        # adds a failing call here leaks a mount of a neighbour's root into
+        # phase 4's genfstab.
         if [[ "$mounted" == true ]]; then
             if [[ -r "${tmp}/etc/os-release" ]]; then
                 # Read with grep+cut rather than sourcing it: /etc/os-release
