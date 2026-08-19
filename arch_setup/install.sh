@@ -42,6 +42,11 @@ DEFAULT_TIMEZONE="America/Sao_Paulo"
 # fallback image is bigger. The ESP holds kernel + both initramfs + grub.cfg,
 # because it is mounted at /boot.
 DEFAULT_ESP_SIZE="2G"
+# Becomes \EFI\<id> on the ESP and the label the firmware shows in its own boot
+# menu. Kept at the historical id so a whole-disk install produces exactly what
+# it always did; the prompt exists for the shared-ESP case, where two installs
+# cannot both call themselves GRUB.
+DEFAULT_INSTALL_NAME="GRUB"
 TOTAL_PHASES=5
 
 KEYMAP=""; LOCALE=""; TIMEZONE=""
@@ -59,6 +64,19 @@ ROOT_PASSWORD=""; USER_PASSWORD=""; LUKS_PASSPHRASE=""
 # Arch install's only bootloader.
 BOOTLOADER_ID="GRUB"
 GRUB_REMOVABLE=false
+
+# Also set by phase 3. FORMAT_ESP is false only when an existing ESP is
+# adopted: mkfs.fat on a shared ESP destroys every other bootloader on the
+# machine, so both partitioning modes state their own answer rather than
+# relying on this default.
+PART_EFI_REUSE=""
+FORMAT_ESP=true
+# The chosen ESP's FAT volume id, read once phase 3 has formatted or adopted
+# it. Phase 6's chainload entry finds the ESP by this and never by device path:
+# measured on this hardware, the two NVMe disks exchanged kernel names between
+# one boot and the next, so nvme0n1p5 named a different partition each time.
+# shellcheck disable=SC2034  # written here, consumed by phase 6
+ESP_FS_UUID=""
 
 # lib/disk.sh seeds this with ${DRY_RUN:-false} at source time, so it is always
 # defined by the time anything below runs under `set -u`. Repeated here anyway:
@@ -205,6 +223,24 @@ valid_size() {
     size_to_sgdisk "$1" >/dev/null 2>&1
 }
 
+# The EFI prompt's size, which unlike the root's may not be "rest".
+# size_to_sgdisk maps "rest" to sgdisk's 0, meaning "to the end of the disk",
+# so answering "rest" there lays the ESP across the whole disk and leaves the
+# root nothing -- in whole-disk mode, after --zap-all has already run.
+valid_esp_size() {
+    [[ "$1" != "rest" ]] && valid_size "$1"
+}
+
+# `[[ -b ]]` behind a name, rather than inline in the three prompt loops that
+# need it. A block device is the one answer this suite cannot supply: -b is a
+# stat, so an unprivileged test could satisfy it only by naming one of the
+# operator's live disks, and a disposable one needs losetup or mknod, both
+# root-only. Behind a name it can be replaced in a test shell, which is what
+# makes the custom-mode prompt flow testable at all.
+valid_block_dev() {
+    [[ -b "$1" ]]
+}
+
 # ---------------- phase 1: preflight ----------------
 phase_preflight() {
     banner 1 "$TOTAL_PHASES" "Pre-flight"
@@ -296,8 +332,154 @@ phase_locale() {
 # Nothing on any disk is written until the Type-YES gate below. Phase 1 does
 # touch the ISO's own pacman database and mirrorlist, but those live on tmpfs
 # and are gone at reboot.
+
+# An ESP shared with another bootloader has to hold this install's kernel and
+# both initramfs images as well as the neighbour's loader. DEFAULT_ESP_SIZE's
+# comment above explains why that is 2G and not less: one nvidia initramfs on
+# this hardware is 213 MB and the fallback image is bigger. A smaller floor
+# lets a 550M ESP through and the run then dies inside mkinitcpio -P, several
+# minutes after the last prompt, reading like a broken mirror.
+MIN_SHARED_ESP_BYTES=$(( 2 * 1024 * 1024 * 1024 ))
+
+# esp_reuse_ok <size_bytes>. Silent, because it runs inside a listing loop.
+#
+# The size is shape-checked before the arithmetic. parse_esp_list emits a
+# literal "-" for an ESP with no filesystem UUID, and bash resolves a
+# non-numeric token inside (( )) as a variable name rather than failing -- so
+# an unvalidated field would be compared as 0, or as whatever some unrelated
+# variable happens to hold.
+esp_reuse_ok() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    (( $1 >= MIN_SHARED_ESP_BYTES ))
+}
+
+# dev_in_list <dev> <space-separated list> -- exact membership.
+#
+# The reused-ESP prompt must not accept an arbitrary block device. Validating
+# only `-b` let a mistyped partition number select the neighbour's root
+# filesystem, which then got mounted at /boot and had its /boot/grub
+# overwritten by phase 5. Membership of the enumerated ESP list is the check.
+#
+# `read -ra` rather than an unquoted `for candidate in $2`: word-splitting an
+# unquoted expansion also globs it, so a list containing a `*` would be
+# answered from whatever happens to sit in the working directory.
+dev_in_list() {
+    local needle=$1 candidate
+    local -a list=()
+    read -ra list <<< "$2"
+    for candidate in "${list[@]}"; do
+        [[ "$candidate" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+# format_ledger <formatted_array> <preserved_array> <untouched_array>
+#
+# Takes array NAMES, not strings. The first draft was handed the prose "root
+# partition" and word-split it into two lines reading "root" and "partition" --
+# in the one place whose whole job is to be evidence rather than a claim.
+format_ledger() {
+    (( $# == 3 )) || { error "format_ledger: want three array names, got $#"; return 1; }
+    local -n __fmt=$1
+    local -n __pres=$2
+    local -n __untouched=$3
+    local dev
+    printf '\n'
+    warn "WILL BE FORMATTED -- all data on these is destroyed:"
+    if (( ${#__fmt[@]} == 0 )); then printf '    (none)\n'; fi
+    for dev in "${__fmt[@]}"; do printf '    %s\n' "$dev"; done
+    printf '\n'
+    info "WILL BE PRESERVED -- adopted as-is, not formatted:"
+    if (( ${#__pres[@]} == 0 )); then printf '    (none)\n'; fi
+    for dev in "${__pres[@]}"; do printf '    %s\n' "$dev"; done
+    printf '\n'
+    info "NOT TOUCHED -- no write of any kind:"
+    if (( ${#__untouched[@]} == 0 )); then printf '    (none)\n'; fi
+    for dev in "${__untouched[@]}"; do printf '    %s\n' "$dev"; done
+}
+
+# untouched_devices <formatted_array> <preserved_array> -- every partition on
+# the machine that is in neither, one a line.
+#
+# Both arguments must hold exact device paths. This matches by whole word, so a
+# prose entry that happened to name a device would drop that device from the
+# list of partitions being left alone -- silently, on the screen whose job is
+# to prove they are.
+#
+# lsblk's status is checked rather than read through a pipe: this list is the
+# operator's evidence that the disks they are keeping are being kept, and an
+# empty one because lsblk broke is a claim rather than an answer. -e 7,11
+# excludes loop and optical devices by major number.
+untouched_devices() {
+    (( $# == 2 )) || { error "untouched_devices: want two array names, got $#"; return 1; }
+    local -n __u_fmt=$1
+    local -n __u_pres=$2
+    local raw dev kind
+    raw=$(lsblk -pnro PATH,TYPE -e 7,11) || {
+        error "untouched_devices: lsblk failed; refusing to report a machine on which nothing is being left alone"
+        return 1
+    }
+    while read -r dev kind; do
+        [[ "$kind" == "part" ]] || continue
+        dev_in_list "$dev" "${__u_fmt[*]}" && continue
+        dev_in_list "$dev" "${__u_pres[*]}" && continue
+        printf '%s\n' "$dev"
+    done <<< "$raw"
+}
+
+# bootloader_id_taken <id> <esp_mountpoint|""> <esp_probe output>
+#
+# True when \EFI\<id> already belongs to something else. grub-install onto an
+# existing vendor directory overwrites its grubx64.efi without complaint, which
+# on an adopted ESP is another operating system's bootloader. Phase 5's
+# needs_grub_install cannot answer this: it tells our id from a different one,
+# never our id from somebody else's prior claim on the same name.
+#
+# By id, and never by esp_has_own_grub: that predicate is true for a merely
+# non-empty grub/ directory, which is the layout this installer itself
+# produces, so on a second install it would report our own ESP as occupied.
+#
+# The mountpoint is the authoritative check and is used whenever the ESP is
+# really mounted. During a rehearsal nothing is, and the adopted ESP's own
+# probe -- one "vendor <DIR>" line per vendor directory -- is the only evidence
+# there is. An empty probe is a carved ESP that does not exist yet, on which
+# every id is free.
+bootloader_id_taken() {
+    local id=$1 mnt=$2 probe=$3
+    if [[ -n "$mnt" ]]; then
+        bootloader_id_free "$mnt" "$id" && return 1
+        return 0
+    fi
+    # -i because FAT is case-insensitive -- \EFI\Work and \EFI\WORK are one
+    # directory -- which is the rule bootloader_id_free resolves by too.
+    grep -qixF -- "vendor ${id}" <<< "$probe"
+}
+
 phase_disk() {
     banner 3 "$TOTAL_PHASES" "Disk Setup"
+    local mode
+    mode=$(ask_choice "Partitioning mode:" \
+        "Whole disk -- wipe a disk and lay out ESP + root" \
+        "Custom     -- reuse existing partitions and/or carve free space") \
+        || die "aborted"
+    # Neither arm sets a flag: each mode function states its own answer for
+    # PLAN_WIPE_DISKS and FORMAT_ESP, next to the plan_reset whose ordering
+    # they depend on. Setting PLAN_WIPE_DISKS here instead would be cleared by
+    # the plan_reset inside the mode.
+    case "$mode" in
+        Whole*)  phase_disk_whole  ;;
+        Custom*) phase_disk_custom ;;
+        # Reachable in practice, not just in theory: anything ask_choice lets
+        # onto stdout arrives here. Falling through would go straight into
+        # phase_disk_finish -- which formats an ESP and mounts -- with no plan
+        # executed and both mode flags at whatever they were.
+        *)       die "unrecognised partitioning mode: ${mode}" ;;
+    esac
+    phase_disk_finish
+}
+
+# Whole-disk mode: the one path that destroys a partition table.
+phase_disk_whole() {
     info "Available disks:"
     local disks disk esp_size confirm
     # -e 7,11 excludes loop and optical devices by major number, which is what
@@ -314,12 +496,12 @@ phase_disk() {
 
     while true; do
         disk=$(ask "Disk to install to (entire disk will be wiped)")
-        [[ -b "$disk" ]] && break
+        valid_block_dev "$disk" && break
         warn "'${disk}' is not a block device"
     done
     while true; do
         esp_size=$(ask "EFI partition size" "$DEFAULT_ESP_SIZE")
-        valid_size "$esp_size" && break
+        valid_esp_size "$esp_size" && break
         warn "invalid size: '${esp_size}' (want e.g. 2G or 512M)"
     done
 
@@ -330,10 +512,21 @@ phase_disk() {
     # that has to opt in. Dropping this line does not fail loudly: plan_execute
     # skips --zap-all and then runs `sgdisk -n 1:0:...` onto the live table,
     # overwriting partition 1 on a disk the operator was told would be wiped.
+    #
+    # After plan_reset and never before it: plan_reset clears this flag, so the
+    # two lines in the other order silently leave it false.
     PLAN_WIPE_DISKS=true
+    # The ESP this mode creates is ours and empty -- nothing else on the
+    # machine has a bootloader in it. Stated here rather than left to the
+    # file-scope default, so each mode answers for itself.
+    FORMAT_ESP=true
     plan_add "$disk" efi  ef00 "EFI System" "$esp_size"
     plan_add "$disk" root 8300 "Root"       "rest"
 
+    # Before plan_render, not inside plan_execute alone: plan_render does not
+    # validate, so an incoherent plan would otherwise be shown and confirmed as
+    # if it could run.
+    plan_validate || die "refusing to act on a plan that cannot be executed safely"
     info "Partition plan:"
     plan_render
     echo ""
@@ -344,6 +537,280 @@ phase_disk() {
     [[ "$confirm" == "YES" ]] || die "aborted"
 
     plan_execute
+}
+
+# Custom mode. Everything up to the Type-YES gate is inventory and prompts;
+# the one command that writes is the plan_execute on the last line, the same
+# one the whole-disk path uses. It runs with PLAN_WIPE_DISKS false -- cleared
+# by the plan_reset below and never set again in this function -- so the
+# `sgdisk --zap-all` that call can issue is unreachable from here, and no
+# partition table is destroyed on this path.
+phase_disk_custom() {
+    local disk esp_choice root_choice confirm esp_size_ans found part_prefix
+    local esp_dev esp_uuid esp_bytes esp_probe_out esp_disk
+    local esp_raw gap_raw untouched_raw row aligned gap_start gap_end gap_n
+    local -a gaps=() layout=() esp_devs=() all_esps=() esp_rows=() gap_rows=()
+    local -a ledger_fmt=() ledger_pres=() ledger_untouched=() fmt_devs=()
+    local esp_dev_list="" all_esp_list=""
+
+    plan_reset
+
+    info "Current layout:"
+    lsblk -pno NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT -e 7,11
+    echo ""
+    info "Firmware boot entries already registered:"
+    # Shown, never acted on -- which is why this is the one inventory here
+    # allowed to fail. A machine whose firmware lists nothing and a machine
+    # where efibootmgr cannot run are both fine to install onto.
+    nvram_entries | sed 's/^/    /' || true
+    echo ""
+
+    # --- ESP: reuse an enumerated one, or carve a new one ---
+    #
+    # Captured with $( ) and drained before the loop rather than read from a
+    # process substitution, for two reasons. esp_list returns non-zero when
+    # lsblk fails, and `mapfile -t x < <(esp_list)` cannot see that (measured;
+    # chroot_config_array below documents the same result), so an inventory
+    # failure would arrive as "this machine has no ESPs" -- at once an empty
+    # reuse menu and an empty blacklist for the root prompt. And a
+    # `while read ... done < <(cmd)` loop owns stdin for its whole body, so a
+    # prompt added inside it later would silently eat the next answer.
+    esp_raw=$(esp_list) || die "cannot enumerate this machine's EFI System Partitions"
+    if [[ -n "$esp_raw" ]]; then mapfile -t esp_rows <<< "$esp_raw"; fi
+
+    info "EFI System Partitions found:"
+    for row in "${esp_rows[@]}"; do
+        read -r esp_dev esp_uuid esp_bytes <<< "$row"
+        [[ -n "$esp_dev" ]] || continue
+        # Every ESP, unfiltered. This is the blacklist the root prompt checks
+        # against, and it must NOT be the same list as the reuse menu: an ESP
+        # excluded from reuse *because it is another install's /boot* is
+        # precisely the one that must still be refused as a root partition.
+        all_esps+=("$esp_dev")
+        if ! esp_reuse_ok "$esp_bytes"; then
+            printf '    %s  %s  %s bytes  (too small to share -- needs %s)\n' \
+                "$esp_dev" "$esp_uuid" "$esp_bytes" "$MIN_SHARED_ESP_BYTES"
+            continue
+        fi
+        # Read-only by construction, and run under --dry-run too: the same
+        # precedent as the part_probe_os call further down, which has never
+        # been guarded. Skipping it would make the rehearsal offer an ESP the
+        # real run refuses -- a difference in the unsafe direction.
+        esp_probe_out=$(esp_probe "$esp_dev") || {
+            printf '    %s  %s  %s bytes  (could not be probed -- not offered)\n' \
+                "$esp_dev" "$esp_uuid" "$esp_bytes"
+            continue
+        }
+        # An ESP that already carries <esp>/grub is somebody's /boot.
+        # grub-install and grub-mkconfig would replace that install's modules
+        # and its entire menu -- and because its grubx64.efi embeds a prefix
+        # pointing at the same /grub, it would then boot our menu instead of
+        # its own. bootloader_id_free does not catch this: the vendor directory
+        # is per-install, /grub is not.
+        if grep -qx 'owngrub yes' <<< "$esp_probe_out"; then
+            printf "    %s  %s  %s bytes  (already in use as another install's /boot)\n" \
+                "$esp_dev" "$esp_uuid" "$esp_bytes"
+            continue
+        fi
+        # A positive "no" is required, not merely the absence of a "yes": an
+        # ESP esp_probe could not mount emits no owngrub line at all, and
+        # reading that as "not somebody's /boot" adopts an ESP nobody looked at.
+        if ! grep -qx 'owngrub no' <<< "$esp_probe_out"; then
+            printf '    %s  %s  %s bytes  (could not be read -- not offered)\n' \
+                "$esp_dev" "$esp_uuid" "$esp_bytes"
+            continue
+        fi
+        esp_devs+=("$esp_dev")
+        printf '    %s  %s  %s bytes  (can be shared)\n' "$esp_dev" "$esp_uuid" "$esp_bytes"
+    done
+    (( ${#esp_devs[@]} )) || info "    (none available to share)"
+    echo ""
+
+    esp_dev_list="${esp_devs[*]}"
+    all_esp_list="${all_esps[*]}"
+    if (( ${#esp_devs[@]} )) && ask_yes_no "Reuse an existing EFI System Partition?" "y"; then
+        while true; do
+            esp_choice=$(ask "ESP to reuse (must be one listed above)")
+            # Membership first: `-b` alone accepted any device, and a mistyped
+            # partition number selected the neighbour's root.
+            if ! dev_in_list "$esp_choice" "$esp_dev_list"; then
+                warn "'${esp_choice}' is not one of the shareable ESPs listed above"
+                continue
+            fi
+            if part_in_use "$esp_choice"; then
+                warn "'${esp_choice}' is mounted or in use"
+                continue
+            fi
+            break
+        done
+        PART_EFI_REUSE="$esp_choice"
+        FORMAT_ESP=false
+        ledger_pres+=("$esp_choice")
+    else
+        PART_EFI_REUSE=""
+        FORMAT_ESP=true
+    fi
+
+    # --- root ---
+    while true; do
+        disk=$(ask "Disk to install onto")
+        valid_block_dev "$disk" && break
+        warn "'${disk}' is not a block device"
+    done
+
+    # disk_free_gaps cannot tell "no free space" from "could not read the
+    # disk" -- parted's stderr is suppressed inside it and both come back
+    # empty-handed -- but it does pass parted's status on. Reporting "(none)"
+    # for a disk nobody could read would send the operator to the
+    # existing-partition path with no explanation.
+    gap_raw=$(disk_free_gaps "$disk") \
+        || die "cannot read a partition table on ${disk} (custom mode needs one; whole-disk mode is for a blank disk)"
+    if [[ -n "$gap_raw" ]]; then mapfile -t gap_rows <<< "$gap_raw"; fi
+
+    info "Unallocated space on ${disk}:"
+    for row in "${gap_rows[@]}"; do
+        read -r gap_start gap_end _ <<< "$row"
+        [[ -n "$gap_start" ]] || continue
+        # align_gap prints nothing and fails when alignment eats the whole gap,
+        # which is the ordinary case for the sub-MiB slivers GPT leaves between
+        # partitions.
+        aligned=$(align_gap "$gap_start" "$gap_end") || continue
+        read -r gap_start gap_end <<< "$aligned"
+        gaps+=("${gap_start} ${gap_end}")
+        printf '    %d) sectors %s-%s (%s GiB)\n' "${#gaps[@]}" "$gap_start" "$gap_end" \
+            "$(( (gap_end - gap_start + 1) / 2097152 ))"
+    done
+    (( ${#gaps[@]} )) || info "    (none)"
+    echo ""
+
+    if (( ${#gaps[@]} )) && ask_yes_no "Carve the new install out of unallocated space?" "y"; then
+        while true; do
+            gap_n=$(ask "Gap number" "1")
+            # Digit-count bounded and read in base 10, for the reason
+            # ask_choice documents: bash reads a leading-zero numeral as octal,
+            # and an unbounded digit run wraps at 64 bits back into range.
+            if [[ "$gap_n" =~ ^[0-9]{1,3}$ ]] && (( 10#$gap_n >= 1 && 10#$gap_n <= ${#gaps[@]} )); then
+                break
+            fi
+            warn "enter a number between 1 and ${#gaps[@]}"
+        done
+        read -r gap_start gap_end <<< "${gaps[$(( 10#$gap_n - 1 ))]}"
+
+        if [[ -n "$PART_EFI_REUSE" ]]; then
+            # mapfile reports 0 whatever the producer returned -- see
+            # chroot_config_array below for that measurement -- so the guard is
+            # on the array, not on `||`.
+            mapfile -t layout < <(carve_layout "$gap_start" "$gap_end" rest)
+            (( ${#layout[@]} == 1 )) || die "the requested layout does not fit in that gap"
+            # shellcheck disable=SC2086  # layout entries are "start end", split on purpose
+            plan_add "$disk" root 8300 Root rest new ${layout[0]}
+        else
+            while true; do
+                esp_size_ans=$(ask "EFI partition size" "$DEFAULT_ESP_SIZE")
+                valid_esp_size "$esp_size_ans" && break
+                warn "invalid size: '${esp_size_ans}' (want e.g. 2G or 512M)"
+            done
+            mapfile -t layout < <(carve_layout "$gap_start" "$gap_end" "$esp_size_ans" rest)
+            (( ${#layout[@]} == 2 )) || die "the requested layout does not fit in that gap"
+            # shellcheck disable=SC2086
+            plan_add "$disk" efi  ef00 "EFI System" "$esp_size_ans" new ${layout[0]}
+            # shellcheck disable=SC2086
+            plan_add "$disk" root 8300 Root         rest             new ${layout[1]}
+        fi
+        # Prose, not a device path: the partitions do not exist yet and have no
+        # names to print. fmt_devs is deliberately left alone -- nothing that
+        # already exists is being formatted here.
+        ledger_fmt+=("new partitions in sectors ${gap_start}-${gap_end} on ${disk}")
+    else
+        part_prefix="${disk}$(part_suffix "$disk")"
+        while true; do
+            root_choice=$(ask "Existing partition to use for root (it WILL be formatted)")
+            if ! valid_block_dev "$root_choice"; then
+                warn "'${root_choice}' is not a block device"; continue
+            fi
+            # Built the same way plan_add builds its own check, so the operator
+            # gets a re-ask rather than an abort. A bare `${disk}*` prefix test
+            # also matched the whole disk itself, which plan_add then refused.
+            if [[ "$root_choice" != "${part_prefix}"[0-9]* ]]; then
+                warn "'${root_choice}' is not a partition of ${disk}"; continue
+            fi
+            # all_esp_list, not esp_dev_list: the reuse menu's list has already
+            # had the dangerous ESPs filtered out of it.
+            if dev_in_list "$root_choice" "$all_esp_list" || [[ "$root_choice" == "$PART_EFI_REUSE" ]]; then
+                warn "'${root_choice}' is an EFI System Partition -- not a root filesystem"; continue
+            fi
+            if part_in_use "$root_choice"; then
+                warn "'${root_choice}' is mounted, in use as swap, or has an open mapping -- refusing"
+                continue
+            fi
+            found=$(part_probe_os "$root_choice")
+            if ! safe_to_format "$found"; then
+                # Everything that is not provably empty asks, including
+                # "encrypted" and "unmountable:*". The first draft treated
+                # anything it could not identify as free space, which is every
+                # LUKS container on the machine. A partition that was formatted
+                # and never used reports "data" rather than "empty" --
+                # lost+found always exists -- so it is asked about too.
+                warn "'${root_choice}' is not empty: ${found}"
+                ask_yes_no "Format it anyway and destroy whatever is there?" "n" || continue
+            fi
+            break
+        done
+        plan_add "$disk" root 8300 Root rest "$root_choice"
+        ledger_fmt+=("$root_choice")
+        fmt_devs+=("$root_choice")
+    fi
+
+    if [[ -n "$PART_EFI_REUSE" ]]; then
+        # The ESP's own disk, not $disk. Reusing a neighbour's ESP while
+        # carving the root out of another disk's free space is the shape this
+        # mode exists for, and plan_add validates a reused partition against
+        # the disk of the entry it is added to -- so handing it the root's disk
+        # refuses the entry and aborts the run under set -e.
+        esp_disk=$(lsblk -pnro PKNAME "$PART_EFI_REUSE") \
+            || die "cannot tell which disk ${PART_EFI_REUSE} belongs to"
+        [[ -n "$esp_disk" ]] || die "cannot tell which disk ${PART_EFI_REUSE} belongs to"
+        plan_add "$esp_disk" efi ef00 "EFI System" "-" "$PART_EFI_REUSE"
+    fi
+
+    # Refuse an incomplete plan while every disk is still untouched. Without
+    # this, "no ESP reuse and no carve" produced a root-only plan that
+    # LUKS-formatted the root and then died on `mkfs.fat ""`.
+    plan_has_role root || die "no root partition in the plan"
+    plan_has_role efi  || die "no EFI partition in the plan -- reuse an existing ESP or carve a new one"
+
+    # Before plan_render, not only inside plan_execute: plan_render does not
+    # validate, so an operator could otherwise read and type YES to a plan
+    # plan_execute then refuses.
+    plan_validate || die "refusing to act on a plan that cannot be executed safely"
+    info "Partition plan:"
+    plan_render
+    echo ""
+
+    # fmt_devs and ledger_pres, not ledger_fmt: untouched_devices matches by
+    # whole word, and ledger_fmt's carve line is prose that names a disk.
+    untouched_raw=$(untouched_devices fmt_devs ledger_pres) \
+        || die "cannot list the partitions this plan leaves alone"
+    # shellcheck disable=SC2034  # passed to format_ledger by name, not by value
+    if [[ -n "$untouched_raw" ]]; then mapfile -t ledger_untouched <<< "$untouched_raw"; fi
+    format_ledger ledger_fmt ledger_pres ledger_untouched
+    echo ""
+
+    # A bare `read`, not ask_yes_no, for the reason the whole-disk gate is one:
+    # ask_yes_no answers with its default at EOF, and this is the last thing
+    # between a closed stdin and plan_execute.
+    read -rp "$(echo -e "${RED}${BOLD}Type YES to proceed${RESET}: ")" confirm || confirm=""
+    [[ "$confirm" == "YES" ]] || die "aborted"
+
+    plan_execute
+}
+
+# Everything both modes do once the plan has been executed: encryption,
+# filesystems, the mounts, and the two boot decisions that depend on which ESP
+# the operator ended up with.
+phase_disk_finish() {
+    local has_fallback="no" esp_is_new="no" policy probe="" esp_mnt=""
+    local install_name candidate
 
     if ask_yes_no "Encrypt the root partition with LUKS2?" "y"; then
         ask_password LUKS_PASSPHRASE "LUKS passphrase"
@@ -354,7 +821,74 @@ phase_disk() {
         LUKS_ENABLED=false
     fi
 
-    run_cmd mkfs.fat -F32 "$PART_EFI"
+    if [[ "$FORMAT_ESP" == true ]]; then
+        run_cmd mkfs.fat -F32 "$PART_EFI"
+    else
+        # mkfs.fat on an adopted ESP destroys every other bootloader on the
+        # machine, which is the whole reason this flag exists.
+        info "Reusing the existing ESP at ${PART_EFI} without formatting"
+    fi
+
+    # --- the --removable policy ---
+    #
+    # Resolved from what is on the ESP, never assumed: on a machine where the
+    # existing bootloader *is* the fallback binary, --removable overwrites it.
+    # The probe is taken once and reused below rather than mounting the ESP
+    # again for each field.
+    #
+    # An ESP this install formatted is never probed: it is ours and empty by
+    # construction, and under --dry-run the mkfs above did not run, so probing
+    # would report on whatever partition happens to hold that number today.
+    # An ADOPTED ESP is probed in a rehearsal too -- it is a real partition
+    # either way, esp_probe is read-only, and skipping it would make the
+    # rehearsal offer to write a fallback path the real run refuses, in the one
+    # output an operator reads to decide whether the real run is safe.
+    if [[ "$FORMAT_ESP" == true ]]; then
+        esp_is_new="yes"
+    else
+        probe=$(esp_probe "$PART_EFI") || die "cannot probe the ESP at ${PART_EFI}"
+        # Read positively, never as "yes or else no". lib/boot.sh:887 states the
+        # contract: an ESP esp_probe could not read reports "fallback unknown",
+        # and "no" is the one answer removable_policy acts on by offering to
+        # overwrite \EFI\BOOT\BOOTX64.EFI -- of which there is exactly one per
+        # ESP. Collapsing unknown into no hands that offer back for an ESP
+        # nobody managed to look at; passed through, removable_policy refuses it
+        # and the `|| die` below stops the run.
+        # Unanchored, as the `kind` read below is: esp_dir_inventory prints its
+        # "vendor <DIR>" lines before the fallback line, so this is not line 1
+        # on any ESP that has a vendor directory. A probe carrying two fallback
+        # lines would yield "yes\nno", which removable_policy also refuses --
+        # the same direction.
+        has_fallback=$(sed -n 's/^fallback //p' <<< "$probe")
+    fi
+    # removable_policy refuses anything that is not a literal yes or no, and
+    # under `set -euo pipefail` that refusal aborts the run rather than
+    # defaulting to an offer. Both arguments are literals here; the `|| die` is
+    # for the day one of them stops being one.
+    policy=$(removable_policy "$has_fallback" "$esp_is_new") \
+        || die "cannot decide the --removable policy for ${PART_EFI}"
+    case "$policy" in
+        forbid)
+            # Quadrupled backslashes: warn prints through `echo -e`, which
+            # expands \E to an ESC character -- "\\EFI" renders as <ESC>FI and
+            # eats the rest of the line. Measured, on the single most
+            # safety-critical message in this installer.
+            warn "${PART_EFI} already holds \\\\EFI\\\\BOOT\\\\BOOTX64.EFI ($(sed -n 's/^kind //p' <<< "$probe"))."
+            warn "Not installing to the removable fallback path -- that binary belongs to another system."
+            GRUB_REMOVABLE=false ;;
+        offer-default-yes)
+            if ask_yes_no "Also install to the removable fallback path (\\\\EFI\\\\BOOT\\\\BOOTX64.EFI)?" "y"; then
+                GRUB_REMOVABLE=true; else GRUB_REMOVABLE=false; fi ;;
+        offer-default-no)
+            if ask_yes_no "Also install to the removable fallback path (\\\\EFI\\\\BOOT\\\\BOOTX64.EFI)?" "n"; then
+                GRUB_REMOVABLE=true; else GRUB_REMOVABLE=false; fi ;;
+        # GRUB_REMOVABLE keeps its conservative default here, but silence is
+        # not the point: a policy nobody recognises means the inventory and
+        # this case statement have drifted apart, one phase before the chroot
+        # acts on the answer.
+        *)  die "unrecognised --removable policy: ${policy}" ;;
+    esac
+
     btrfs_create_subvols "$PART_ROOT"
     btrfs_mount_all "$PART_ROOT" /mnt
     mount_esp /mnt
@@ -368,6 +902,42 @@ phase_disk() {
         mountpoint -q /mnt/boot || die "/mnt/boot is not a mountpoint -- the ESP did not mount"
         echo ""
         findmnt -R /mnt || true
+        # The ESP is mounted now, so \EFI can be read directly. During a
+        # rehearsal it is not, and the empty string sends bootloader_id_taken
+        # to the adopted ESP's probe instead.
+        esp_mnt="/mnt/boot"
+    fi
+
+    # --- the bootloader id ---
+    #
+    # This id is the install's directory on the ESP and its label in the
+    # firmware's own boot menu, which is the only menu left when NVRAM is all
+    # that survived. It goes through bootloader_id_from because lib/chroot.sh's
+    # preflight refuses anything outside [A-Za-z0-9_-] -- an abort that lands
+    # after pacstrap, with the disk already written.
+    #
+    # bootloader_id_from truncates at 16 characters, so two names that differ
+    # only after the 16th collide into one id and one ESP directory. On a
+    # shared ESP the collision check below is what catches that; on our own
+    # fresh ESP there is nothing yet to collide with.
+    while true; do
+        install_name=$(ask "Name for this install in the boot menu" "$DEFAULT_INSTALL_NAME")
+        candidate=$(bootloader_id_from "$install_name") || continue
+        if bootloader_id_taken "$candidate" "$esp_mnt" "$probe"; then
+            warn "\\\\EFI\\\\${candidate} is already used by another bootloader on this ESP -- pick another name"
+            continue
+        fi
+        BOOTLOADER_ID="$candidate"
+        break
+    done
+    info "This install will be registered as ${BOOTLOADER_ID}"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        ESP_FS_UUID="0000-0000"
+    else
+        # shellcheck disable=SC2034  # written here, consumed by phase 6
+        ESP_FS_UUID=$(blkid -s UUID -o value "$PART_EFI") \
+            || die "cannot read the ESP's filesystem UUID from ${PART_EFI}"
     fi
     success "disk ready"
 }

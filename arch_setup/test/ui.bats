@@ -122,3 +122,69 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"sda"* ]]
 }
+
+# --- ask_choice ------------------------------------------------------------
+#
+# Every case here discards stderr, so `$output` is stdout alone. That is the
+# assertion, not a tidy-up: phase 3 calls this as `mode=$(ask_choice ...)`, so
+# anything the function writes to stdout other than the chosen option ends up
+# in $mode, matches no case arm, and aborts the phase.
+
+@test "ask_choice returns the chosen option verbatim" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; echo 2 | ask_choice 'pick' 'alpha' 'beta' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = "beta" ]
+}
+
+# Exact equality, not a substring: the retry message must not reach stdout
+# either. lib/ui.sh's warn has no >&2 of its own.
+@test "ask_choice re-asks on an out-of-range answer without polluting stdout" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; printf '9\n1\n' | ask_choice 'pick' 'alpha' 'beta' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = "alpha" ]
+}
+
+@test "ask_choice re-asks on a non-numeric answer" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; printf 'beta\n2\n' | ask_choice 'pick' 'alpha' 'beta' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = "beta" ]
+}
+
+# A leading zero is a number an operator can type. Read in bash's default base
+# it is octal, and "08" aborts the arithmetic outright ("value too great for
+# base") instead of selecting anything.
+@test "ask_choice reads a padded number in base 10" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; echo 08 | ask_choice 'pick' a b c d e f g h 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = "h" ]
+}
+
+# Arithmetic on an unbounded digit run wraps at 64 bits, so 18446744073709551617
+# evaluates to 1 and would silently select the first option. The digit count is
+# what makes that unreachable.
+@test "ask_choice does not let a wrapped integer select an option" {
+    run timeout 5 bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; printf '18446744073709551617\n2\n' | ask_choice 'pick' 'alpha' 'beta' 2>/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = "beta" ]
+}
+
+# The reason this is a bare read and not ask_yes_no: it runs in front of the
+# disk prompts, and a closed stdin must not select option 1 -- which on this
+# menu is the whole-disk wipe.
+@test "ask_choice fails closed on EOF" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; ask_choice 'pick' 'alpha' 'beta' < /dev/null"
+    [ "$status" -ne 0 ]
+    # Proves the function ran, rather than exiting 127 for not existing.
+    # stderr is deliberately not discarded here, so the menu is in $output too.
+    [[ "$output" == *"end of input"* ]]
+}
+
+# Called with no options, every reply is out of range, so the loop would spin
+# on stdin forever -- swallowing the answers to every prompt after it -- until
+# EOF. A caller bug, but one that costs the operator their input.
+@test "ask_choice refuses to offer an empty menu" {
+    run timeout 5 bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; ask_choice 'pick'"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"at least one option"* ]]
+}

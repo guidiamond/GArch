@@ -6,10 +6,13 @@
 # named predicates, plus the structural facts that keep the file safe to
 # source.
 #
-# One case does call a phase_* function: "phase_disk never reaches
-# plan_execute on a closed stdin". It runs with DRY_RUN=true and with
-# plan_execute stubbed, so the assertion is about where control gets to, not
-# about anything being written. No other case calls a phase.
+# The phase 3 cases at the bottom of this file are the exception: they drive
+# the real phase_disk. Every one runs with DRY_RUN=true and with each host
+# probe replaced by a function, so no disk is read and none is written -- the
+# devices they name do not exist. run_custom's stubs make every destructive
+# tool announce itself, and each case asserts that announcement never appears,
+# so the assertions are about where control gets to and what the operator was
+# shown, never about anything happening to a disk.
 
 load helpers
 
@@ -241,6 +244,20 @@ in_install() {
     [ -z "$output" ]
 }
 
+# "rest" is a legal partition size and an illegal EFI one: size_to_sgdisk maps
+# it to sgdisk's 0, meaning "to the end of the disk", so answering it at the
+# EFI prompt lays the ESP across the whole disk and leaves the root nothing --
+# in whole-disk mode, after --zap-all has already run.
+@test "valid_esp_size refuses rest but accepts a fixed size" {
+    run in_install 'valid_esp_size 2G';   [ "$status" -eq 0 ]
+    run in_install 'valid_esp_size 512M'; [ "$status" -eq 0 ]
+    run in_install 'valid_esp_size rest'; [ "$status" -ne 0 ]
+    run in_install 'valid_esp_size 2GB';  [ "$status" -ne 0 ]
+    # Silent, for the same reason valid_size is: it runs in a re-ask loop.
+    run in_install 'valid_esp_size rest'
+    [ -z "$output" ]
+}
+
 # --- the contract with lib/chroot.sh ---------------------------------------
 
 # Sets every value phase_locale and phase_chroot would have collected, so
@@ -379,18 +396,62 @@ with_answers() {
 # The second is the one worth fearing, and it is two innocuous-looking edits
 # away -- "give the disk prompt a sensible default" is a plausible commit on
 # its own.
-@test "phase_disk never reaches plan_execute on a closed stdin" {
+#
+# Aimed at phase_disk_whole rather than phase_disk since the mode selector was
+# added: phase_disk's own first act is now ask_choice, which fails closed on
+# EOF, so pointing this at phase_disk would prove only that -- and stop
+# covering the prompts the paragraph above is about. The mode selector's own
+# EOF behaviour is the next case.
+@test "phase_disk_whole never reaches plan_execute on a closed stdin" {
     run timeout 5 env DRY_RUN=true bash -c "
         source '${INSTALL_SH}'
         banner(){ :; }; lsblk(){ printf 'FAKE 1G DISK\n'; }
         plan_reset(){ :; }; plan_add(){ :; }; plan_render(){ :; }
+        plan_validate(){ :; }
         plan_execute(){ echo 'PLAN_EXECUTE_REACHED'; }
-        phase_disk
+        phase_disk_whole
     " </dev/null
     # 124 would mean it hung re-prompting instead of stopping.
     [ "$status" -ne 124 ]
     [ "$status" -ne 0 ]
     [[ "$output" != *"PLAN_EXECUTE_REACHED"* ]]
+}
+
+# The mode selector sits in front of both partitioning paths, so a closed stdin
+# has to stop there rather than fall into either one. ask_choice returning the
+# first option at EOF would run the whole-disk wipe path with nobody having
+# typed anything.
+@test "phase_disk picks no partitioning mode on a closed stdin" {
+    run timeout 5 env DRY_RUN=true bash -c "
+        source '${INSTALL_SH}'
+        banner(){ :; }
+        phase_disk_whole(){ echo 'WHOLE_REACHED'; }
+        phase_disk_custom(){ echo 'CUSTOM_REACHED'; }
+        phase_disk_finish(){ echo 'FINISH_REACHED'; }
+        phase_disk
+    " </dev/null
+    [ "$status" -ne 124 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"_REACHED"* ]]
+    [[ "$output" == *"aborted"* ]]
+}
+
+# A mode string that matches neither arm must stop the phase. Falling through
+# would leave PLAN_WIPE_DISKS and FORMAT_ESP at whatever they were and go
+# straight into phase_disk_finish, which formats the ESP and mounts.
+@test "phase_disk refuses a partitioning mode it does not recognise" {
+    run timeout 5 env DRY_RUN=true bash -c "
+        source '${INSTALL_SH}'
+        banner(){ :; }; ask_choice(){ echo 'Something else'; }
+        phase_disk_whole(){ echo 'WHOLE_REACHED'; }
+        phase_disk_custom(){ echo 'CUSTOM_REACHED'; }
+        phase_disk_finish(){ echo 'FINISH_REACHED'; }
+        phase_disk
+    " </dev/null
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" != *"_REACHED"* ]]
+    [[ "$output" == *"unrecognised partitioning mode"* ]]
 }
 
 # Structural, not behavioural, and deliberately. Reaching plan_execute from
@@ -412,13 +473,616 @@ with_answers() {
 #
 # The ordering matters as much as the presence: set after plan_execute, the
 # flag is true only for whoever runs next.
-@test "phase_disk opts in to wiping before it reaches plan_execute" {
+@test "phase_disk_whole opts in to wiping before it reaches plan_execute" {
     local body set_line exec_line
-    body=$(sed -n '/^phase_disk()/,/^}/p' "$INSTALL_SH")
+    body=$(sed -n '/^phase_disk_whole()/,/^}/p' "$INSTALL_SH")
     [ -n "$body" ]
     set_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*PLAN_WIPE_DISKS=true[[:space:]]*$' | cut -d: -f1) || true
     exec_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*plan_execute[[:space:]]*$' | cut -d: -f1) || true
     [ -n "$set_line" ]
     [ -n "$exec_line" ]
     [ "$set_line" -lt "$exec_line" ]
+}
+
+# --- phase 3 helpers -------------------------------------------------------
+#
+# Each case below `source`s install.sh into the test process rather than using
+# in_install. Two reasons, and both are silent when got wrong: in_install runs
+# its argument in a *subshell*, so format_ledger's nameref arguments -- array
+# NAMES resolved in the caller's scope -- cannot reach arrays declared in the
+# test body; and setup() defines no functions, so a bare `esp_reuse_ok` call
+# exits 127, which `run ...; [ "$status" -ne 0 ]` reports as a pass. The 2 GiB
+# floor case in particular would then pass with the floor set to any value.
+#
+# Sourcing is safe because install.sh guards main() behind
+# [[ "${BASH_SOURCE[0]}" == "${0}" ]]. It does turn on `set -euo pipefail` in
+# the test process, which is contained: bats forks a process per @test.
+
+@test "esp_reuse_ok accepts an esp at or above the 2GiB floor" {
+    source "$INSTALL_SH"
+    run esp_reuse_ok 2147483648
+    [ "$status" -eq 0 ]
+}
+
+@test "esp_reuse_ok rejects the 550M esp on this machine" {
+    # 576716800 bytes. It clears the old 512MiB floor and would then fill up
+    # during mkinitcpio -P: one nvidia initramfs here is 213 MB and there are
+    # two images plus a kernel, which is why DEFAULT_ESP_SIZE is 2G.
+    source "$INSTALL_SH"
+    run esp_reuse_ok 576716800
+    [ "$status" -ne 0 ]
+    # Guards against the 127 false pass: prove the function actually ran.
+    [ -z "$output" ]
+}
+
+# parse_esp_list emits a literal "-" for an ESP with no filesystem UUID, and
+# nothing stops a future caller passing the wrong field. A size that is not a
+# plain integer is not a size, and bash arithmetic on a non-numeric token
+# resolves it as a variable name instead of failing.
+@test "esp_reuse_ok refuses a size that is not a number, silently" {
+    source "$INSTALL_SH"
+    run esp_reuse_ok "-"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run esp_reuse_ok ""
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    run esp_reuse_ok "MIN_SHARED_ESP_BYTES"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "dev_in_list is true only for an exact match" {
+    source "$INSTALL_SH"
+    run dev_in_list /dev/sdz1 "/dev/sdz1 /dev/sdz2"
+    [ "$status" -eq 0 ]
+    run dev_in_list /dev/sdz "/dev/sdz1 /dev/sdz2"
+    [ "$status" -ne 0 ]
+    run dev_in_list /dev/sdz3 "/dev/sdz1 /dev/sdz2"
+    [ "$status" -ne 0 ]
+    run dev_in_list /dev/sdz1 ""
+    [ "$status" -ne 0 ]
+}
+
+# The list is a string, so it has to be split -- but splitting it with an
+# unquoted expansion also GLOBS it, and the answer would then depend on what
+# happens to exist in the working directory.
+#
+# The working directory has to hold a file named as the needle is, or the case
+# proves nothing: `for candidate in $2` in a directory with no such file globs
+# to no match, leaves the '*' as a literal, and answers correctly by accident.
+# Measured -- with the needle spelled /dev/sdz1 and bats' own cwd, the
+# unquoted version passed this case.
+@test "dev_in_list does not glob the list it is given" {
+    source "$INSTALL_SH"
+    mkdir -p "${TMP}/globbable"
+    : > "${TMP}/globbable/sdz1"
+    cd "${TMP}/globbable"
+    run dev_in_list sdz1 "* /dev/sdz2"
+    [ "$status" -ne 0 ]
+    # Without this the case passes against a file defining nothing: a missing
+    # function exits 127, which is also non-zero. A silent predicate that ran
+    # says nothing at all.
+    [ -z "$output" ]
+}
+
+@test "format_ledger prints device paths, not prose" {
+    source "$INSTALL_SH"
+    local -a fmt=(/dev/sdz1 /dev/sdz2)
+    local -a pres=(/dev/sdz5)
+    local -a untouched=(/dev/sdy)
+    run format_ledger fmt pres untouched
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WILL BE FORMATTED"* ]]
+    [[ "$output" == *"/dev/sdz1"* ]]
+    [[ "$output" == *"/dev/sdz2"* ]]
+    [[ "$output" == *"WILL BE PRESERVED"* ]]
+    [[ "$output" == *"/dev/sdz5"* ]]
+    [[ "$output" == *"NOT TOUCHED"* ]]
+    [[ "$output" == *"/dev/sdy"* ]]
+}
+
+@test "format_ledger says none rather than printing an empty section" {
+    source "$INSTALL_SH"
+    local -a fmt=(/dev/sdz1)
+    local -a pres=()
+    local -a untouched=()
+    run format_ledger fmt pres untouched
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(none)"* ]]
+}
+
+@test "untouched_devices lists every partition in neither ledger list" {
+    source "$INSTALL_SH"
+    lsblk() { printf '/dev/sdz disk\n/dev/sdz1 part\n/dev/sdz2 part\n/dev/sdy1 part\n'; }
+    local -a fmt=(/dev/sdz1)
+    local -a pres=(/dev/sdy1)
+    run untouched_devices fmt pres
+    [ "$status" -eq 0 ]
+    [ "$output" = "/dev/sdz2" ]
+}
+
+# An lsblk that broke must not report a machine on which nothing is being left
+# alone: this list is the operator's evidence, and an empty one is a claim.
+@test "untouched_devices fails rather than reporting an empty machine" {
+    source "$INSTALL_SH"
+    lsblk() { return 1; }
+    local -a fmt=()
+    local -a pres=()
+    run untouched_devices fmt pres
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"lsblk failed"* ]]
+}
+
+# needs_grub_install (phase 5) tells OUR id from a different one. It says
+# nothing about our id having been somebody else's first, which on a shared ESP
+# means grub-install overwrites their grubx64.efi. Checked by id, never by
+# esp_has_own_grub -- that predicate is true for the layout this installer
+# itself produces, so on a re-run it would report our own ESP as occupied.
+@test "bootloader_id_taken reads a mounted ESP by id, case-insensitively" {
+    source "$INSTALL_SH"
+    mkdir -p "${TMP}/esp/EFI/Fedora" "${TMP}/esp/EFI/BOOT"
+    run bootloader_id_taken FEDORA "${TMP}/esp" ""
+    [ "$status" -eq 0 ]
+    run bootloader_id_taken ARCH_WORK "${TMP}/esp" ""
+    [ "$status" -ne 0 ]
+}
+
+# With no mountpoint -- a rehearsal, where nothing is mounted -- the adopted
+# ESP's own probe is the only evidence there is. esp_dir_inventory emits one
+# "vendor <DIR>" line per vendor directory.
+@test "bootloader_id_taken falls back to the probe when nothing is mounted" {
+    source "$INSTALL_SH"
+    run bootloader_id_taken FEDORA "" "$(printf 'vendor Fedora\nfallback no\nkind grub\n')"
+    [ "$status" -eq 0 ]
+    run bootloader_id_taken ARCH_WORK "" "$(printf 'vendor Fedora\nfallback no\nkind grub\n')"
+    [ "$status" -ne 0 ]
+    # No probe at all is a carved ESP that does not exist yet: free, not taken.
+    run bootloader_id_taken ARCH_WORK "" ""
+    [ "$status" -ne 0 ]
+}
+
+# --- phase 3 custom mode ---------------------------------------------------
+#
+# The cases below drive the real phase_disk under DRY_RUN=true with every host
+# probe stubbed. Nothing reads or writes a disk: /dev/sdz and /dev/sdy do not
+# exist, the probes are functions, and sgdisk/mkfs/partprobe/mount are replaced
+# by stubs that announce themselves. Every case asserts that announcement never
+# appears, so a stub that stopped covering a call site fails the test rather
+# than reaching the tool.
+#
+# `ask` and `ask_yes_no` are renamed and wrapped rather than replaced, so the
+# real EOF and default behaviour still runs while each prompt is logged. This
+# is the only way to assert that a prompt did NOT happen: `read -rp` prints
+# nothing at all when stdin is not a terminal, and stdin here is a here-string.
+
+custom_stubs() {
+cat <<'STUBS'
+        banner() { :; }
+        lsblk() {
+            case "$*" in
+                *PKNAME*)    printf '/dev/sdy\n' ;;
+                *PATH,TYPE*) printf '/dev/sdz disk\n/dev/sdz1 part\n/dev/sdz2 part\n/dev/sdy1 part\n/dev/sdy2 part\n/dev/sdy3 part\n' ;;
+                *)           printf '/dev/sdz 10G fake\n' ;;
+            esac
+        }
+        nvram_entries() { printf '0001 Windows Boot Manager\n'; }
+        esp_list() { printf '/dev/sdy1 AAAA-BBBB 2147483648\n/dev/sdy2 CCCC-DDDD 576716800\n'; }
+        esp_probe() { printf 'fallback no\nkind none\nowngrub no\n'; }
+        disk_free_gaps() { printf '2048 20973567 20971520\n'; }
+        valid_block_dev() {
+            case "$1" in
+                /dev/sdz|/dev/sdy|/dev/sdz1|/dev/sdz2|/dev/sdy1|/dev/sdy2|/dev/sdy3) return 0 ;;
+            esac
+            return 1
+        }
+        part_in_use() { return 1; }
+        part_probe_os() { printf 'empty\n'; }
+        # `sgdisk -p` is next_part_number reading the table and is the one
+        # sgdisk that is not a write; it is failed silently rather than
+        # announced. next_part_number suppresses stderr and cannot tell an
+        # unreadable disk from an empty one, so it answers 1 -- which is why
+        # every carve assertion below reads "sgdisk -n 1:", on a device that
+        # does not exist. Any OTHER sgdisk here is a write reaching a tool.
+        sgdisk() { [[ "$1" == "-p" ]] && return 1; printf 'DESTRUCTIVE_TOOL_RAN sgdisk %s\n' "$*"; return 1; }
+        partprobe()   { printf 'DESTRUCTIVE_TOOL_RAN partprobe %s\n' "$*"; return 1; }
+        mount()       { printf 'DESTRUCTIVE_TOOL_RAN mount %s\n' "$*"; return 1; }
+        mkfs.fat()    { printf 'DESTRUCTIVE_TOOL_RAN mkfs.fat %s\n' "$*"; return 1; }
+        mkfs.btrfs()  { printf 'DESTRUCTIVE_TOOL_RAN mkfs.btrfs %s\n' "$*"; return 1; }
+        cryptsetup()  { printf 'DESTRUCTIVE_TOOL_RAN cryptsetup %s\n' "$*"; return 1; }
+        eval "$(declare -f ask         | sed '1s/^ask /__real_ask /')"
+        eval "$(declare -f ask_yes_no  | sed '1s/^ask_yes_no /__real_ask_yes_no /')"
+        ask()        { printf 'PROMPT[%s]\n' "$1" >&2; __real_ask "$@"; }
+        ask_yes_no() { printf 'PROMPT[%s]\n' "$1" >&2; __real_ask_yes_no "$@"; }
+STUBS
+}
+
+# run_custom <answers> [extra shell code appended after the stubs]
+run_custom() {
+    local answers=$1 extra=${2:-}
+    run timeout 20 env DRY_RUN=true bash -c "
+        source '${INSTALL_SH}'
+$(custom_stubs)
+${extra}
+        phase_disk
+        printf 'STATE wipe=%s format_esp=%s removable=%s id=%s uuid=%s reuse=%s\n' \"\$PLAN_WIPE_DISKS\" \"\$FORMAT_ESP\" \"\$GRUB_REMOVABLE\" \"\$BOOTLOADER_ID\" \"\$ESP_FS_UUID\" \"\${PART_EFI_REUSE:-none}\"
+    " <<< "$answers"
+}
+
+# The harness's own smoke test. Every "this prompt did not happen" assertion
+# below is worthless if the wrapper silently stopped logging, and every "no
+# tool ran" assertion is worthless if `run` never got as far as a tool.
+@test "the custom-mode harness logs prompts and answers them" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PROMPT[Disk to install onto]"* ]]
+    [[ "$output" == *"PROMPT[Encrypt the root partition with LUKS2?]"* ]]
+}
+
+# The single highest-value assertion in this task. --zap-all is the only
+# command in the installer that destroys a partition table, and custom mode
+# exists precisely so that it never runs.
+@test "custom mode carves into free space and never reaches --zap-all" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"zap"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    # The carved sectors, resolved before anything is written: 2G from the
+    # gap's aligned start, then the rest.
+    [[ "$output" == *"sgdisk -n 1:2048:4196351"* ]]
+    [[ "$output" == *"sgdisk -n 1:4196352:20973567"* ]]
+    [[ "$output" == *"STATE wipe=false format_esp=true removable=false id=ARCH_WORK uuid=0000-0000 reuse=none"* ]]
+}
+
+# PLAN_WIPE_DISKS is seeded from the environment (lib/disk.sh:25), and phase 3
+# is not necessarily the first thing to have touched it. Custom mode's opening
+# plan_reset is what clears it, and nothing else in the mode ever assigns it --
+# so that one line is the whole of why an inherited `true` cannot carry the
+# --zap-all guard open through a path that never asked for it.
+#
+# plan_validate refuses the same combination a few prompts later, but that is a
+# second mechanism and it aborts only after the operator has answered
+# everything. The flag has to be false from the first line.
+@test "custom mode clears an inherited wipe flag before it builds a plan" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')" \
+        "PLAN_WIPE_DISKS=true"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"zap"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    [[ "$output" == *"STATE wipe=false"* ]]
+}
+
+# The control for the case above, and the reason its `!= *"zap"*` is worth
+# anything: the same harness, the same assertions, the other menu entry, and
+# --zap-all appears. Without this, a harness that had stopped reaching
+# plan_execute at all would report "no --zap-all" and look like a pass.
+#
+# It is also the only case that drives whole-disk mode through the shared
+# phase_disk_finish, which is new: the LUKS block, the ESP format and the two
+# boot decisions used to sit inside phase_disk itself.
+@test "whole-disk mode still reaches --zap-all, and the same finish" {
+    # The trailing "unused" is there so the empty answer before it survives:
+    # $( ) strips trailing newlines, so a run of answers ending in a blank line
+    # loses exactly the line under test.
+    run_custom "$(printf '1\n/dev/sdz\n2G\nYES\nn\nn\n\nunused\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+    [[ "$output" == *"sgdisk -n 1:0:+2G"* ]]
+    [[ "$output" == *"sgdisk -n 2:0:0"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    [[ "$output" == *"mkfs.fat -F32 /dev/sdz1"* ]]
+    # The empty answer to the name prompt takes DEFAULT_INSTALL_NAME, which is
+    # the historical id -- a whole-disk install produces what it always did.
+    [[ "$output" == *"STATE wipe=true format_esp=true removable=false id=GRUB uuid=0000-0000 reuse=none"* ]]
+}
+
+# The ledger is evidence, not a claim: every partition on the machine that is
+# in neither plan list has to be named.
+@test "custom mode's ledger names the partitions it is leaving alone" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    local not_touched=${output##*NOT TOUCHED}
+    [[ "$not_touched" == *"/dev/sdz1"* ]]
+    [[ "$not_touched" == *"/dev/sdy1"* ]]
+    [[ "$not_touched" == *"/dev/sdy3"* ]]
+    # The disk row is not a partition and must not be listed as one.
+    [[ "$not_touched" != *"/dev/sdz "* ]]
+}
+
+# A plan with a root and no ESP used to pass the Type-YES gate, LUKS-format the
+# root and die on `mkfs.fat ""`. It has to be refused while the disk is still
+# untouched -- before the gate, and before the passphrase prompt.
+@test "custom mode refuses a plan with no ESP before the Type-YES gate" {
+    run_custom "$(printf '2\nn\n/dev/sdz\nn\n/dev/sdz1\n')"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"no EFI partition in the plan"* ]]
+    [[ "$output" != *"Type YES"* ]]
+    [[ "$output" != *"PROMPT[Encrypt the root partition with LUKS2?]"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    [[ "$output" != *"sgdisk -n"* ]]
+}
+
+# Typing anything other than YES has to stop the run with nothing written.
+@test "custom mode's confirmation gate refuses anything but YES" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nyes\n')"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"aborted"* ]]
+    [[ "$output" != *"sgdisk -n"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# And it has to fail closed at EOF, which is why it is a bare `read` and not
+# ask_yes_no: ask_yes_no answers with its DEFAULT at end of input, so written
+# that way a closed stdin would proceed to plan_execute with nobody having
+# typed anything. The answers here stop one line short of the gate.
+@test "custom mode's confirmation gate fails closed on a closed stdin" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\n')"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"aborted"* ]]
+    [[ "$output" != *"sgdisk -n"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# The ESP and the root do not have to be on the same disk -- reusing a
+# neighbour's ESP while carving the root out of another disk's free space is
+# the shape this whole feature exists for. plan_add validates a reused
+# partition against the disk it is given, so handing it the ROOT's disk refuses
+# the entry and aborts the run.
+@test "custom mode adopts an ESP on a different disk from the root" {
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"zap"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    [[ "$output" == *"STATE wipe=false format_esp=false"* ]]
+    [[ "$output" == *"reuse=/dev/sdy1"* ]]
+    [[ "$output" == *"Reusing the existing ESP at /dev/sdy1 without formatting"* ]]
+    local preserved=${output##*WILL BE PRESERVED}
+    [[ "${preserved%%NOT TOUCHED*}" == *"/dev/sdy1"* ]]
+}
+
+# The reuse prompt must take its answer from the enumerated list. Validating
+# only `-b` let a mistyped partition number select the neighbour's ROOT
+# filesystem, which phase 3 then mounted at /boot and phase 5's
+# `grub-mkconfig -o /boot/grub/grub.cfg` overwrote.
+@test "custom mode refuses an ESP that is not on the shareable list" {
+    run_custom "$(printf '2\ny\n/dev/sdy3\n/dev/sdy2\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'/dev/sdy3' is not one of the shareable ESPs listed above"* ]]
+    # ...including an ESP that was listed but filtered out of the menu.
+    [[ "$output" == *"'/dev/sdy2' is not one of the shareable ESPs listed above"* ]]
+    [[ "$output" == *"reuse=/dev/sdy1"* ]]
+}
+
+# An ESP carrying <esp>/grub is somebody's /boot: grub-install and
+# grub-mkconfig would replace that install's modules and its whole menu, and
+# its grubx64.efi embeds a prefix pointing at the same /grub, so it would then
+# boot our menu instead of its own.
+@test "custom mode does not offer an ESP that is another install's boot" {
+    run_custom "$(printf '2\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')" \
+        "esp_probe() { printf 'fallback no\nkind grub\nowngrub yes\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already in use as another install's /boot"* ]]
+    # Not offered at all: the reuse question is never put, so the very next
+    # answer is the disk. If it were asked, "/dev/sdz" would be read as the
+    # yes/no answer and everything after it would shift.
+    [[ "$output" != *"PROMPT[Reuse an existing EFI System Partition?]"* ]]
+    [[ "$output" == *"STATE wipe=false format_esp=true"* ]]
+}
+
+# An ESP that could not be mounted emits no owngrub line at all. Reading that
+# as "not another install's /boot" adopts an ESP nobody looked at.
+@test "custom mode does not offer an ESP it could not read" {
+    run_custom "$(printf '2\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')" \
+        "esp_probe() { printf 'fallback unknown\nkind unreadable\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not be read"* ]]
+    [[ "$output" != *"PROMPT[Reuse an existing EFI System Partition?]"* ]]
+}
+
+# An enumeration that FAILED and a machine with no ESPs must not arrive at the
+# same place. Read as "no ESPs", a broken esp_list gives the operator an empty
+# reuse menu -- harmless -- and an empty blacklist for the root prompt, which
+# is not: every ESP on the machine, including the neighbour's, becomes an
+# acceptable answer to "existing partition to use for root (it WILL be
+# formatted)".
+@test "custom mode stops when it cannot enumerate the ESPs" {
+    run_custom "$(printf '2\n/dev/sdz\n')" "esp_list() { return 1; }"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"cannot enumerate this machine's EFI System Partitions"* ]]
+    [[ "$output" != *"PROMPT[Disk to install onto]"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# A machine that really has no ESP is the other half of that pair: the reuse
+# question is not put at all, and the run carries on to carve one.
+@test "custom mode carries on when the machine genuinely has no ESP" {
+    run_custom "$(printf '2\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')" \
+        "esp_list() { return 0; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(none available to share)"* ]]
+    [[ "$output" != *"PROMPT[Reuse an existing EFI System Partition?]"* ]]
+    [[ "$output" != *"zap"* ]]
+    [[ "$output" == *"STATE wipe=false format_esp=true"* ]]
+}
+
+# Same distinction on the other inventory. disk_free_gaps suppresses parted's
+# stderr, so "this disk has no free space" and "nobody could read this disk"
+# both come back as no output -- but not as the same status. Reported as
+# "(none)", an unreadable disk sends the operator to the existing-partition
+# path with no explanation of why the gap they came here for is missing.
+@test "custom mode stops when it cannot read the partition table" {
+    run_custom "$(printf '2\nn\n/dev/sdz\n')" "disk_free_gaps() { return 1; }"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"cannot read a partition table on /dev/sdz"* ]]
+    [[ "$output" != *"PROMPT[Carve the new install out of unallocated space?]"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# The root prompt's blacklist is EVERY ESP, not the shareable ones: an ESP
+# excluded from the reuse menu *because it is another install's /boot* is
+# precisely the one that must still be refused as a root filesystem.
+@test "custom mode refuses an ESP as the root partition" {
+    run_custom "$(printf '2\nn\n/dev/sdy\nn\n/dev/sdy1\n/dev/sdy2\n/dev/sdy3\n')"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"'/dev/sdy1' is an EFI System Partition"* ]]
+    [[ "$output" == *"'/dev/sdy2' is an EFI System Partition"* ]]
+    # It moved on to the accepted answer and then refused the incomplete plan.
+    [[ "$output" == *"no EFI partition in the plan"* ]]
+}
+
+# ...or the whole disk itself, which a bare `${disk}*` prefix test matched.
+# plan_add refuses it too, but as an abort rather than a re-ask -- and
+# btrfs_create_subvols would have run mkfs on the disk, destroying every
+# partition on it.
+@test "custom mode refuses a root partition on another disk" {
+    run_custom "$(printf '2\nn\n/dev/sdz\nn\n/dev/sdy3\n/dev/sdz\n/dev/sdz1\n')"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"'/dev/sdy3' is not a partition of /dev/sdz"* ]]
+    [[ "$output" == *"'/dev/sdz' is not a partition of /dev/sdz"* ]]
+    [[ "$output" == *"no EFI partition in the plan"* ]]
+}
+
+# plan_render does not validate, so a plan that plan_execute would refuse can
+# otherwise be shown and confirmed as if it could run. Structural because
+# neither mode can currently BUILD an invalid plan -- which is exactly what
+# makes this a backstop whose ordering nothing else would notice losing.
+@test "both partitioning modes validate the plan before rendering it" {
+    local mode body validate_line render_line
+    for mode in phase_disk_whole phase_disk_custom; do
+        body=$(sed -n "/^${mode}()/,/^}/p" "$INSTALL_SH")
+        [ -n "$body" ]
+        validate_line=$(printf '%s\n' "$body" | grep -n 'plan_validate' | head -1 | cut -d: -f1) || true
+        render_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*plan_render[[:space:]]*$' | head -1 | cut -d: -f1) || true
+        [ -n "$validate_line" ]
+        [ -n "$render_line" ]
+        [ "$validate_line" -lt "$render_line" ]
+    done
+}
+
+# Everything that is not provably empty asks, including "encrypted" and
+# "unmountable:*". An answer of no must re-ask rather than proceed.
+@test "custom mode asks before formatting a partition that is not empty" {
+    run_custom "$(printf '2\nn\n/dev/sdz\nn\n/dev/sdz1\nn\n/dev/sdz2\ny\n')" \
+        "part_probe_os() { printf 'linux:Arch Linux\n'; }"
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"'/dev/sdz1' is not empty: linux:Arch Linux"* ]]
+    [[ "$output" == *"'/dev/sdz2' is not empty: linux:Arch Linux"* ]]
+    [[ "$output" == *"PROMPT[Format it anyway and destroy whatever is there?]"* ]]
+    # Declining put nothing in the plan; accepting the second one did, and the
+    # plan was then refused for having no ESP -- which is what proves the
+    # first answer was honoured rather than the loop having simply moved on.
+    [[ "$output" == *"no EFI partition in the plan"* ]]
+}
+
+# --- the --removable policy ------------------------------------------------
+
+# The one rule nothing downstream can enforce. On the target machine the
+# neighbour's bootloader IS \EFI\BOOT\BOOTX64.EFI, so raising GRUB_REMOVABLE
+# here overwrites the operator's ability to boot their own system.
+@test "a forbid policy never offers the removable fallback path" {
+    # The answer after "n" to the LUKS question would be the removable answer
+    # if that prompt happened; it is the install name instead, and "y" becomes
+    # the bootloader id. That is what proves the question was never put.
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\ny\n')" \
+        "esp_probe() { printf 'fallback yes\nkind grub\nowngrub no\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"PROMPT[Also install to the removable fallback path"* ]]
+    [[ "$output" == *"removable=false"* ]]
+    [[ "$output" == *"id=Y"* ]]
+    # Landmine: lib/ui.sh prints through `echo -e`, which turns \E into an ESC
+    # character. The most safety-critical message in the installer has to
+    # survive it.
+    [[ "$output" == *'\EFI\BOOT\BOOTX64.EFI'* ]]
+    [[ "$output" == *"belongs to another system"* ]]
+}
+
+@test "an offered removable path is written only on an explicit yes" {
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\ny\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PROMPT[Also install to the removable fallback path"* ]]
+    [[ "$output" == *"removable=true"* ]]
+    [[ "$output" == *"id=ARCH_WORK"* ]]
+
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"removable=false"* ]]
+}
+
+# An adopted ESP is probed during a rehearsal too. Skipping it would make the
+# dry run offer to write a fallback path the real run refuses -- a difference
+# in the unsafe direction, in the one output an operator reads to decide
+# whether the real run is safe.
+@test "the removable policy is resolved from a real probe under --dry-run" {
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\ny\n')" \
+        "esp_probe() { printf 'fallback yes\nkind refind\nowngrub no\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(refind)"* ]]
+    [[ "$output" == *"removable=false"* ]]
+}
+
+# lib/boot.sh:887 states the contract this enforces: an ESP esp_probe could not
+# read reports "fallback unknown", never "fallback no", because "no" is the one
+# answer removable_policy acts on by OFFERING to overwrite
+# \EFI\BOOT\BOOTX64.EFI -- and there is exactly one such path per ESP.
+# Answering the question with `grep -q 'fallback yes'` collapses unknown into
+# no and hands the offer back, in the fail-open direction, on an ESP nobody
+# managed to look at.
+#
+# Reached by an ESP that was readable when it was listed and unreadable by the
+# time it was adopted: the listing filter demands a positive "owngrub no", so
+# a probe that fails from the start never gets this far. The stub flips on its
+# first call to model exactly that.
+@test "an ESP that stopped being readable after it was listed aborts the run" {
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\ny\nArch Work\n')" \
+        '_PF=$(mktemp)
+         esp_probe() {
+             if [[ -s "$_PF" ]]; then
+                 printf "fallback unknown\nkind unreadable\n"
+             else
+                 printf "x\n" > "$_PF"
+                 printf "fallback no\nkind none\nowngrub no\n"
+             fi
+         }'
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" != *"PROMPT[Also install to the removable fallback path"* ]]
+    [[ "$output" == *"cannot decide the --removable policy for /dev/sdy1"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# --- the bootloader id -----------------------------------------------------
+
+# lib/chroot.sh's preflight refuses anything outside [A-Za-z0-9_-], and that
+# abort lands after pacstrap. bootloader_id_from is what makes it unreachable.
+@test "the install name reaches the chroot as a legal bootloader id" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nGui/s box!\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"id=GUI_S_BOX_"* ]]
+}
+
+@test "a name with nothing usable in it is re-asked, not accepted" {
+    run_custom "$(printf '2\nn\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\n///\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"leaves nothing usable as an id"* ]]
+    [[ "$output" == *"id=ARCH_WORK"* ]]
+}
+
+# grub-install onto an existing vendor directory overwrites its grubx64.efi
+# without complaint. On an adopted ESP that is another operating system's
+# bootloader, and phase 5's needs_grub_install cannot tell -- it only knows
+# whether OUR id is already installed, not whose it was.
+@test "an install name whose id is already on the adopted ESP is re-asked" {
+    run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\nn\nFedora\nArch Work\n')" \
+        "esp_probe() { printf 'vendor Fedora\nfallback no\nkind none\nowngrub no\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"already used by another bootloader"* ]]
+    [[ "$output" == *"id=ARCH_WORK"* ]]
 }

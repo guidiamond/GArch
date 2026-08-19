@@ -104,6 +104,50 @@ ask_yes_no() {
     done
 }
 
+# ask_choice <prompt> <option>... -> the chosen option, verbatim, on stdout.
+#
+# Returns the full option string rather than an index so the caller's case
+# statement reads as the options do; an index means every call site carries a
+# mapping that drifts the moment an option is inserted.
+#
+# Everything except the answer goes to stderr. install.sh calls this as
+# `mode=$(ask_choice ...)`, so a single mistyped digit whose retry message
+# reached stdout would end up in $mode, match no case arm, and abort phase 3 --
+# and lib/ui.sh's warn has no >&2 of its own (only error does).
+ask_choice() {
+    if (( $# < 2 )); then
+        error "ask_choice: want a prompt and at least one option"
+        return 1
+    fi
+    local prompt=$1; shift
+    local -a options=("$@")
+    local i reply
+    while true; do
+        printf '%b\n' "${BLUE}[?]${RESET} ${prompt}" >&2
+        for i in "${!options[@]}"; do
+            printf '    %d) %s\n' "$(( i + 1 ))" "${options[$i]}" >&2
+        done
+        # A bare read, failing closed on EOF, for the same reason phase_disk's
+        # confirmation gate uses one: this runs in front of the disk prompts,
+        # and a piped-in stdin must not silently select option 1 -- which is
+        # the whole-disk wipe.
+        if ! read -rp "$(printf '%b' "${BLUE}[?]${RESET} choice [1-${#options[@]}]: ")" reply; then
+            error "ask_choice: end of input while reading a choice"
+            return 1
+        fi
+        # Three digits at most, and read in base 10. Bash arithmetic reads a
+        # leading-zero numeral as octal, so "08" aborts the (( )) outright
+        # ("value too great for base") instead of selecting anything; and an
+        # unbounded digit run wraps at 64 bits, so 18446744073709551617
+        # evaluates to 1 and would quietly pick the first option.
+        if [[ "$reply" =~ ^[0-9]{1,3}$ ]] && (( 10#$reply >= 1 && 10#$reply <= ${#options[@]} )); then
+            printf '%s\n' "${options[$(( 10#$reply - 1 ))]}"
+            return 0
+        fi
+        warn "enter a number between 1 and ${#options[@]}" >&2
+    done
+}
+
 # ask_password <output-var-name> [prompt]
 #
 # Locals carry an _ap_ prefix because `printf -v` assigns in this function's
