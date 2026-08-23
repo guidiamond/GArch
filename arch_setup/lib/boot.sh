@@ -1075,3 +1075,299 @@ linux_installs() {
         rmdir "$tmp" 2>/dev/null || true
     done
 }
+
+# --- registering into an already-installed system ---------------------------
+#
+# Everything below writes, or is read by something that writes, into a system
+# other than the one being installed. Two rules hold across all of it.
+#
+# It never runs a foreign grub-mkconfig. That command regenerates the whole of
+# another system's menu from the live ISO's view of the machine, and can fail
+# outright on a GRUB version mismatch -- replacing a working config with one
+# nobody asked for. Appending a marker-delimited block is strictly less
+# destructive than regenerating everything around it, and it is what the two
+# writes in register_into_foreign_grub do.
+#
+# Nothing here calls die. The caller runs after the new system is installed and
+# bootable, so every failure below costs a menu row on a machine that still
+# boots, and the decision about how loud to be belongs to the phase.
+
+# backup_path <file> <tag> -> the first <file>.bak.<tag>.<n> that does not exist.
+#
+# Never overwrites: a second run of the installer must not clobber the backup
+# taken before the first one, which is the copy that predates anything this
+# tool did.
+#
+# -e rather than -f, plus -L for the dangling case: a name already taken by a
+# directory is taken, and `cp -a file dir` puts the copy inside it and reports
+# success -- so the backup this function promised would not exist under the
+# name it handed back.
+backup_path() {
+    local file=$1 tag=$2 n=1
+    while [[ -e "${file}.bak.${tag}.${n}" || -L "${file}.bak.${tag}.${n}" ]]; do
+        n=$(( n + 1 ))
+    done
+    printf '%s.bak.%s.%s\n' "$file" "$tag" "$n"
+}
+
+# register_into_foreign_grub <mounted_root> <marker_id> <menuentry_block>
+#
+# Writes the entry twice, on purpose:
+#   40_custom          -- an input to that system's grub-mkconfig, so the entry
+#                         survives its next kernel update.
+#   boot/grub/grub.cfg -- the generated config it actually boots from, so the
+#                         entry works on the next boot without anyone having
+#                         run grub-mkconfig.
+#
+# Statuses, and the difference between them is the whole reason there are
+# three:
+#   0  both files carry the block. The backup paths are on stdout.
+#   1  nothing was written and any backup this call made has been removed
+#      again. The other system is byte-for-byte as it was, so there is nothing
+#      to undo and an unexplained .bak file in someone else's /etc would be a
+#      puzzle with no answer.
+#   2  40_custom carries the block and grub.cfg does not. A file on a system
+#      that is staying HAS been edited; the backup paths are on stdout and are
+#      the only copy of what was there before.
+#
+# stdout is backup paths and nothing else, so the caller can name the exact
+# file to copy back rather than guessing ".1" -- which is wrong on every
+# re-run. Diagnostics go to stderr through error().
+#
+# 40_custom is written first, and the order is the failure mode: a block that
+# reaches 40_custom but not grub.cfg is invisible until that system next
+# regenerates its menu, while the other order puts a row in the live menu that
+# disappears at the next kernel update -- which reads as the entry having
+# broken rather than as never having arrived.
+#
+# /boot/grub/grub.cfg is the only config shape handled. Fedora, RHEL and SUSE
+# spell it grub2, and this refuses those roots -- consistently with
+# linux_installs, whose has_grub field tests for /boot/grub and reports "no"
+# for them, so they never reach here in the first place.
+register_into_foreign_grub() {
+    local root=$1 id=$2 block=$3 target
+    local custom="${root}/etc/grub.d/40_custom"
+    local cfg="${root}/boot/grub/grub.cfg"
+    local custom_bak="" cfg_bak=""
+
+    [[ -f "$cfg" ]] || {
+        error "register_into_foreign_grub: no $(_echo_e_literal "${root}/boot/grub/grub.cfg") -- nothing on that root generates a GRUB menu"
+        return 1
+    }
+
+    # custom_cfg_upsert refuses both of these itself, but only after this
+    # function has already copied the file -- and `cp -a` of a symlink is not a
+    # backup of anything. Refusing first is what keeps status 1's promise that
+    # a backup exists only when there is something to undo. The `[[ -f ]]` test
+    # above does not cover it: -f dereferences, so a grub.cfg symlinked onto a
+    # real file passes it. The distros that ship their generated config as a
+    # link into the ESP spell the directory grub2, so they are turned away
+    # earlier by linux_installs' has_grub test; what this catches is a root
+    # where the config or 40_custom has been linked elsewhere by hand, which is
+    # an ordinary thing to find on a machine somebody dual-boots.
+    for target in "$custom" "$cfg"; do
+        if [[ -L "$target" ]]; then
+            error "register_into_foreign_grub: $(_echo_e_literal "$target") is a symlink; not editing it or the file it points at"
+            return 1
+        fi
+        if [[ -e "$target" && ! -f "$target" ]]; then
+            error "register_into_foreign_grub: $(_echo_e_literal "$target") exists and is not a regular file"
+            return 1
+        fi
+    done
+
+    mkdir -p "${root}/etc/grub.d" || {
+        error "register_into_foreign_grub: cannot create $(_echo_e_literal "${root}/etc/grub.d")"
+        return 1
+    }
+
+    if [[ -f "$custom" ]]; then
+        custom_bak=$(backup_path "$custom" "$id")
+        cp -a -- "$custom" "$custom_bak" || {
+            error "register_into_foreign_grub: could not back up $(_echo_e_literal "$custom")"
+            return 1
+        }
+    fi
+    cfg_bak=$(backup_path "$cfg" "$id")
+    if ! cp -a -- "$cfg" "$cfg_bak"; then
+        error "register_into_foreign_grub: could not back up $(_echo_e_literal "$cfg")"
+        if [[ -n "$custom_bak" ]]; then rm -f -- "$custom_bak"; fi
+        return 1
+    fi
+
+    # 0755 applies only when 40_custom does not exist yet; custom_cfg_upsert
+    # copies the mode of one that does. mktemp creates 0600 whatever the umask,
+    # and grub-mkconfig skips a 40_custom it cannot execute -- a silent no-op
+    # months later, at that system's next kernel update.
+    if ! custom_cfg_upsert "$custom" "$id" "$block" 0755; then
+        # custom_cfg_upsert is mktemp + mv, so a refusal leaves both targets
+        # exactly as they were and the copies just taken have nothing to
+        # restore. backup_path never picks a name that already existed, so
+        # these two removals cannot reach a backup an earlier run took.
+        if [[ -n "$custom_bak" ]]; then rm -f -- "$custom_bak"; fi
+        rm -f -- "$cfg_bak"
+        return 1
+    fi
+    if ! custom_cfg_upsert "$cfg" "$id" "$block"; then
+        if [[ -n "$custom_bak" ]]; then printf '%s\n' "$custom_bak"; fi
+        printf '%s\n' "$cfg_bak"
+        return 2
+    fi
+
+    if [[ -n "$custom_bak" ]]; then printf '%s\n' "$custom_bak"; fi
+    printf '%s\n' "$cfg_bak"
+    return 0
+}
+
+# neighbour_marker_id <fs_uuid> <efi_path> -> a custom_cfg_upsert marker id.
+#
+# Built from the filesystem UUID and the loader path, never from a device name.
+# Measured on the target machine, the two NVMe disks exchanged kernel names
+# between one boot and the next -- and custom_cfg_upsert matches its markers
+# exactly, so an id spelled NEIGHBOUR_nvme1n1p1 leaves the previous run's block
+# in place and appends a second one. That is a duplicated menu row per reboot,
+# in our own config.
+#
+# custom_cfg_upsert refuses an id outside [A-Za-z0-9_-] and every EFI path
+# carries slashes and a dot, so everything outside that set is mapped to an
+# underscore rather than dropped: dropping would let /EFI/BOOT/BOOTX64.EFI and
+# /EFI/BOOTBOOTX64/EFI land on one id, and one block would then overwrite the
+# other.
+neighbour_marker_id() {
+    local uuid=$1 path=$2 id
+    [[ -n "$uuid" && -n "$path" ]] || {
+        error "neighbour_marker_id: need a filesystem uuid and an EFI path"
+        return 1
+    }
+    id="NEIGHBOUR_${uuid}_${path}"
+    id=${id//[^A-Za-z0-9_-]/_}
+    printf '%s\n' "$id"
+}
+
+# neighbour_loaders <our_esp_dev> <our_esp_fs_uuid> [<our_efi_path>...]
+#   -> "<fs_uuid> <efi_path> <label>", one row per bootloader belonging to some
+#      other operating system.
+#
+# Two routes, because neither one sees everything:
+#
+#   NVRAM     every loader the firmware holds an entry for. Needs neither root
+#             nor a mount, carries the firmware's own label -- a far better
+#             menu row than anything this can synthesise -- and is the only
+#             route that reaches a neighbour sharing OUR ESP, which the scan
+#             below skips wholesale.
+#   ESP scan  every other ESP on the machine, whether or not the firmware still
+#             has an entry for it. A UEFI setup menu can clear NVRAM, and an
+#             installer that then found nothing would leave the neighbour off
+#             the menu it is here to build.
+#
+# They overlap, and on the machine this was written for they overlap on
+# everything: `Boot0005 UEFI OS` is /EFI/BOOT/BOOTX64.EFI on nvme1n1p5, which
+# esp_probe finds too, and `Boot0000 Windows Boot Manager` is the bootmgfw
+# esp_probe finds on nvme1n1p1. Undeduplicated, that machine's menu gets two
+# rows per operating system.
+#
+# The key is (fs uuid, EFI path), case-folded. Folding is not tidiness: FAT is
+# case-insensitive and the two routes genuinely disagree, efibootmgr printing
+# \EFI\MICROSOFT\BOOT\BOOTMGFW.EFI where the directory Windows created is
+# spelled EFI/Microsoft/Boot. NVRAM is read first, so it wins a tie and the row
+# keeps the firmware's label.
+#
+# Our own install is excluded by seeding the seen-set with (<our_esp_fs_uuid>,
+# <our_efi_path>) for each path given, and never by dropping our ESP's UUID: on
+# a shared ESP the neighbour this exists for has exactly the filesystem uuid we
+# do. The ESP scan skips our own ESP by device path on top of that, for two
+# reasons that have nothing to do with which loader is whose: by the time this
+# runs, that partition is mounted read-write at /mnt/boot and a second
+# read-only mount of it reads metadata we are still changing; and under
+# --dry-run it was never formatted, so esp_probe would report it unreadable.
+# A neighbour sharing that ESP is reached through NVRAM instead, which is the
+# route that needs no mount at all.
+#
+# Fails rather than returning fewer rows when either route's tool fails -- the
+# rule this file's inventory banner states, and it matters here because "no
+# other bootloader" is the answer under which the phase adds nothing and says
+# nothing is there. A single row it cannot resolve or cannot represent is
+# dropped with an error on stderr; stdout carries records only, so nothing here
+# may use info/warn/success.
+#
+# Known limitation: an NVRAM entry naming a loader that has since been deleted
+# is emitted like any other, because telling would mean mounting the partition
+# it names. It costs a menu row that fails to boot.
+neighbour_loaders() {
+    (( $# >= 2 )) || {
+        error "neighbour_loaders: need this install's ESP device and filesystem uuid"
+        return 1
+    }
+    local our_dev=$1 our_uuid=$2
+    shift 2
+    local -A seen=()
+    local -a rows=()
+    local raw line num partuuid path label uuid dev size probe key p
+
+    for p in "$@"; do
+        seen["${our_uuid,,}"$'\t'"${p,,}"]=1
+    done
+
+    raw=$(nvram_loaders) || {
+        error "neighbour_loaders: cannot read the firmware's boot entries"
+        return 1
+    }
+    rows=()
+    if [[ -n "$raw" ]]; then mapfile -t rows <<< "$raw"; fi
+    for line in "${rows[@]}"; do
+        read -r num partuuid path label <<< "$line"
+        [[ -n "$partuuid" && -n "$path" ]] || continue
+        if ! uuid=$(fs_uuid_for_partuuid "$partuuid"); then
+            # "no such partition" and "lsblk broke" both come back as 1 and
+            # cannot be told apart here. Dropping the row is right for the
+            # first -- an NVRAM entry for a disk that has left the machine --
+            # and the second cannot go unnoticed, because the ESP scan below
+            # reads the same lsblk and fails this whole function.
+            error "neighbour_loaders: boot entry ${num} names partition ${partuuid}, which has no filesystem uuid here; skipping it"
+            continue
+        fi
+        key="${uuid,,}"$'\t'"${path,,}"
+        [[ -n "${seen[$key]:-}" ]] && continue
+        seen[$key]=1
+        printf '%s %s %s\n' "$uuid" "$path" "$label"
+    done
+
+    raw=$(esp_list) || {
+        error "neighbour_loaders: cannot list this machine's EFI System Partitions"
+        return 1
+    }
+    rows=()
+    if [[ -n "$raw" ]]; then mapfile -t rows <<< "$raw"; fi
+    for line in "${rows[@]}"; do
+        # shellcheck disable=SC2034  # size is read for field symmetry with esp_list
+        read -r dev uuid size <<< "$line"
+        [[ -n "$dev" ]] || continue
+        [[ "$dev" == "$our_dev" ]] && continue
+        # parse_esp_list emits a literal "-" for an ESP that has never been
+        # formatted. It is not a uuid, and an unformatted ESP has nothing on it
+        # to chainload.
+        [[ "$uuid" == "-" ]] && continue
+        probe=$(esp_probe "$dev") || {
+            error "neighbour_loaders: could not probe ${dev}; skipping it"
+            continue
+        }
+        path=$(sed -n 's|^efipath ||p' <<< "$probe")
+        [[ -n "$path" ]] || continue
+        # esp_vendor_efi_path does not validate what it returns, and a vendor
+        # directory called "My Vendor" is legal on FAT. Emitted as-is it puts a
+        # space in the middle of a record whose LAST field is the only one
+        # allowed to hold one, so every consumer reads the path as "/EFI/My" --
+        # which chain_entry accepts and which chainloads nothing.
+        # efi_path_to_slashes applies chain_entry's own rule and says so on
+        # stderr, so the refusal happens here rather than at the boot menu.
+        path=$(efi_path_to_slashes "$path") || continue
+        key="${uuid,,}"$'\t'"${path,,}"
+        [[ -n "${seen[$key]:-}" ]] && continue
+        seen[$key]=1
+        # The label names the filesystem uuid rather than the device: this
+        # string becomes a permanent menu row, and a device name is not the
+        # same partition on the next boot. The NVRAM route above is where the
+        # readable names come from.
+        printf '%s %s Existing bootloader on %s\n' "$uuid" "$path" "$uuid"
+    done
+}

@@ -1086,3 +1086,309 @@ ${extra}
     [[ "$output" == *"already used by another bootloader"* ]]
     [[ "$output" == *"id=ARCH_WORK"* ]]
 }
+
+# --- phase 6: boot integration ---------------------------------------------
+#
+# The one phase that writes into another operating system's bootloader config.
+# Every case below runs against stubs: linux_installs and neighbour_loaders are
+# functions, the devices they name do not exist, and mount/umount/arch-chroot/
+# grub-mkconfig/efibootmgr are replaced by stubs that announce themselves so
+# that "no tool ran" can be asserted rather than assumed.
+#
+# custom_cfg_upsert is wrapped rather than replaced: a path under /mnt is
+# announced and NOT written -- /mnt on the machine this suite runs on is the
+# operator's own -- while any other path goes to the real function, so
+# register_into_foreign_grub can be exercised for real against a fixture root.
+
+boot_stubs() {
+cat <<'STUBS'
+        banner() { :; }
+        HOSTNAME_VAR="work"
+        BOOTLOADER_ID="WORK"
+        ESP_FS_UUID="AAAA-BBBB"
+        PART_EFI="/dev/sdz1"
+        PART_ROOT="/dev/sdz2"
+        PART_ROOT_RAW="/dev/sdz2"
+        GRUB_REMOVABLE=false
+        linux_installs()    { printf '/dev/sdy3 69da13ae-6880-492d-975d-d0227f774650 yes Debian GNU/Linux\n'; }
+        neighbour_loaders() { printf '38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi Windows Boot Manager\n'; }
+        mount()         { printf 'DESTRUCTIVE_TOOL_RAN mount %s\n' "$*"; return 1; }
+        umount()        { printf 'DESTRUCTIVE_TOOL_RAN umount %s\n' "$*"; return 1; }
+        arch-chroot()   { printf 'DESTRUCTIVE_TOOL_RAN arch-chroot %s\n' "$*"; return 1; }
+        grub-mkconfig() { printf 'DESTRUCTIVE_TOOL_RAN grub-mkconfig %s\n' "$*"; return 1; }
+        grub-install()  { printf 'DESTRUCTIVE_TOOL_RAN grub-install %s\n' "$*"; return 1; }
+        efibootmgr()    { printf 'DESTRUCTIVE_TOOL_RAN efibootmgr %s\n' "$*"; return 1; }
+        blkid()         { printf 'DESTRUCTIVE_TOOL_RAN blkid %s\n' "$*"; return 1; }
+        eval "$(declare -f custom_cfg_upsert | sed '1s/^custom_cfg_upsert /__real_upsert /')"
+        custom_cfg_upsert() {
+            case "$1" in
+                /mnt/*) printf 'UPSERT_MNT[%s|%s]\n' "$1" "$2"; return 0 ;;
+            esac
+            __real_upsert "$@"
+        }
+        eval "$(declare -f ask_yes_no | sed '1s/^ask_yes_no /__real_ask_yes_no /')"
+        ask_yes_no() { printf 'PROMPT[%s]\n' "$1" >&2; __real_ask_yes_no "$@"; }
+STUBS
+}
+
+# run_boot <dry_run> <answers> [extra shell code appended after the stubs]
+run_boot() {
+    local dry=$1 answers=$2 extra=${3:-}
+    run timeout 20 env DRY_RUN="$dry" bash -c "
+        source '${INSTALL_SH}'
+$(boot_stubs)
+${extra}
+        phase_boot_integration
+    " <<< "$answers"
+}
+
+# An announcing register, for the cases that only care whether it was reached.
+register_announcer() {
+    printf '%s' '
+        register_into_foreign_grub() {
+            printf "REGISTER[%s|%s]\n" "$1" "$2" >&2
+            printf "%s/etc/grub.d/40_custom.bak.WORK.1\n" "$1"
+            printf "%s/boot/grub/grub.cfg.bak.WORK.1\n" "$1"
+        }'
+}
+
+@test "the phase 6 harness logs prompts and answers them" {
+    run_boot false "$(printf 'y\ny\n')" "$(register_announcer)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"PROMPT[Add an entry for this install to its boot menu?]"* ]]
+    [[ "$output" == *"PROMPT[Add it to this install's boot menu?]"* ]]
+    [[ "$output" == *"boot integration complete"* ]]
+}
+
+# The single highest-value assertion in this task: --dry-run must not edit
+# another operating system's bootloader config.
+@test "phase 6 writes nothing under --dry-run" {
+    run_boot true "$(printf 'y\ny\n')" "$(register_announcer)"
+    [ "$status" -eq 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+    [[ "$output" != *"REGISTER["* ]]
+    [[ "$output" != *"UPSERT_MNT["* ]]
+    # It still gets far enough to say what it would have done, on both halves.
+    [[ "$output" == *"[dry-run] would back up and edit"* ]]
+    [[ "$output" == *"[dry-run] would add arch-installer:NEIGHBOUR_38BD-4D38"* ]]
+}
+
+# The control for the case above, and the reason its three "!=" assertions are
+# worth anything: the same harness, the same answers, DRY_RUN false, and both
+# writers are reached. Without it, a phase that had stopped running at all
+# would report "nothing written" and look like a pass.
+@test "phase 6 without --dry-run reaches both writers" {
+    run_boot false "$(printf 'y\ny\n')" "$(register_announcer)
+        mount() { return 0; }
+        umount() { return 0; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"REGISTER[/"* ]]
+    [[ "$output" == *"UPSERT_MNT[/mnt/etc/grub.d/40_custom|NEIGHBOUR_38BD-4D38__EFI_Microsoft_Boot_bootmgfw_efi]"* ]]
+    [[ "$output" == *"DESTRUCTIVE_TOOL_RAN arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg"* ]]
+}
+
+@test "phase 6 registers nothing into a system whose operator declined" {
+    run_boot false "$(printf 'n\nn\n')" "$(register_announcer)"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REGISTER["* ]]
+    [[ "$output" != *"UPSERT_MNT["* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+# grub-mkconfig regenerates this install's own menu. Running it when nothing
+# was added is a wasted os-prober pass; running it when the upsert refused
+# would report success for an entry that is not there.
+@test "phase 6 runs no grub-mkconfig when the reverse entry was refused" {
+    run_boot false "$(printf 'n\ny\n')" '
+        custom_cfg_upsert() { printf "UPSERT_MNT[%s]\n" "$1"; return 1; }'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"UPSERT_MNT[/mnt/etc/grub.d/40_custom]"* ]]
+    [[ "$output" == *"this install's menu is unchanged"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN arch-chroot"* ]]
+}
+
+# linux_installs emits "unknown" for a candidate it could not read. Mounting
+# one of those read-write to edit a /boot/grub nobody has seen is not the
+# direction to fail in.
+@test "phase 6 does not offer a neighbour whose filesystem could not be read" {
+    run_boot false "$(printf 'y\nn\n')" "$(register_announcer)
+        linux_installs() { printf '/dev/sdy3 69da13ae-6880-492d-975d-d0227f774650 unknown (unreadable)\n'; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"PROMPT[Add an entry for this install to its boot menu?]"* ]]
+    [[ "$output" != *"REGISTER["* ]]
+    # The reverse half still runs: the two are independent.
+    [[ "$output" == *"PROMPT[Add it to this install's boot menu?]"* ]]
+}
+
+# The restore summary is the only thing that tells the operator how to put a
+# neighbour's config back. It has to name the path AS THAT SYSTEM SEES IT: the
+# mountpoint the backup was written under is a mktemp -d that is gone by the
+# time anyone reads the summary, and booting the neighbour to run
+# `cp /tmp/tmp.XyZ/etc/grub.d/40_custom.bak.WORK.1 ...` restores nothing.
+@test "phase 6 reports a restore path relative to the neighbour's own root" {
+    mkdir -p "${TMP}/neigh/etc/grub.d" "${TMP}/neigh/boot/grub"
+    printf '#!/bin/sh\n' > "${TMP}/neigh/etc/grub.d/40_custom"
+    printf 'menuentry "debian" {}\n' > "${TMP}/neigh/boot/grub/grub.cfg"
+    run_boot false "$(printf 'y\nn\n')" "
+        mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
+        umount() { rm -f \"\${!#}\"; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"registered into Debian GNU/Linux on /dev/sdy3"* ]]
+    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
+    [[ "$output" == *"cp /boot/grub/grub.cfg.bak.WORK.1 /boot/grub/grub.cfg"* ]]
+    # ...and the entry really landed in both of the neighbour's files.
+    grep -q 'Arch Linux (work) \[chainload\]' "${TMP}/neigh/etc/grub.d/40_custom"
+    grep -q 'Arch Linux (work) \[chainload\]' "${TMP}/neigh/boot/grub/grub.cfg"
+    grep -q 'debian' "${TMP}/neigh/boot/grub/grub.cfg"
+    grep -q 'chainloader /EFI/WORK/grubx64.efi' "${TMP}/neigh/boot/grub/grub.cfg"
+}
+
+# register_into_foreign_grub returns 2 when 40_custom took the block and
+# grub.cfg refused it. The backup is then the only copy of what 40_custom held
+# before, so it has to be reported rather than described as safe to delete.
+@test "phase 6 reports the backups of a half-updated neighbour" {
+    mkdir -p "${TMP}/neigh/etc/grub.d" "${TMP}/neigh/boot/grub"
+    printf '#!/bin/sh\n' > "${TMP}/neigh/etc/grub.d/40_custom"
+    printf '# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n' \
+        > "${TMP}/neigh/boot/grub/grub.cfg"
+    run_boot false "$(printf 'y\nn\n')" "
+        mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
+        umount() { rm -f \"\${!#}\"; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"only half of /dev/sdy3 was updated"* ]]
+    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
+    [ -f "${TMP}/neigh/etc/grub.d/40_custom.bak.WORK.1" ]
+}
+
+# Nothing in this phase is fatal: it runs after the new system is installed and
+# bootable, so an abort would replace "installed, one neighbour unregistered"
+# with "Installation failed" and no reboot prompt.
+@test "phase 6 carries on when the neighbour inventory fails" {
+    run_boot false "$(printf 'y\n')" "$(register_announcer)
+        linux_installs() { return 1; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not enumerate the other Linux installs"* ]]
+    [[ "$output" != *"REGISTER["* ]]
+    [[ "$output" == *"UPSERT_MNT["* ]]
+    [[ "$output" == *"boot integration complete"* ]]
+}
+
+@test "phase 6 carries on when the bootloader inventory fails" {
+    run_boot false "$(printf 'y\n')" "$(register_announcer)
+        mount() { return 0; }
+        umount() { return 0; }
+        neighbour_loaders() { return 1; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not enumerate the other bootloaders"* ]]
+    [[ "$output" == *"REGISTER["* ]]
+    [[ "$output" != *"UPSERT_MNT["* ]]
+    [[ "$output" == *"boot integration complete"* ]]
+}
+
+# An /etc/os-release NAME containing an apostrophe reaches chain_entry through
+# a neighbour's NVRAM label, and chain_entry refuses it. Under the installer's
+# set -euo pipefail that refusal must not take the run down because of a file
+# on a partition that is only staying.
+@test "phase 6 skips a bootloader whose label cannot go in a menu entry" {
+    run_boot false "$(printf 'n\ny\ny\n')" "$(register_announcer)
+        neighbour_loaders() {
+            printf \"38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi Bob's Linux\n\"
+            printf '283B-4CE7 /EFI/BOOT/BOOTX64.EFI UEFI OS\n'
+        }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"must not contain a single quote"* ]]
+    [[ "$output" != *"UPSERT_MNT[/mnt/etc/grub.d/40_custom|NEIGHBOUR_38BD-4D38"* ]]
+    # The next one is still offered and still written -- the skip is of one
+    # entry, not of the rest of the phase.
+    [[ "$output" == *"UPSERT_MNT[/mnt/etc/grub.d/40_custom|NEIGHBOUR_283B-4CE7__EFI_BOOT_BOOTX64_EFI]"* ]]
+}
+
+# grub-mkconfig runs once, after every entry is written, rather than once per
+# entry: each pass runs os-prober, which mounts every candidate root it finds.
+@test "phase 6 regenerates this install's menu exactly once" {
+    run_boot false "$(printf 'n\ny\ny\n')" "$(register_announcer)
+        neighbour_loaders() {
+            printf '38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi Windows Boot Manager\n'
+            printf '283B-4CE7 /EFI/BOOT/BOOTX64.EFI UEFI OS\n'
+        }"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -c 'arch-chroot /mnt grub-mkconfig')" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -c 'UPSERT_MNT\[')" -eq 2 ]
+}
+
+# --- phase 6, structural ---------------------------------------------------
+
+# The hardest rule in this phase. A foreign grub-mkconfig regenerates that
+# system's whole menu from the live ISO's view of the machine and can fail
+# outright on a GRUB version mismatch, replacing a working config with one
+# nobody asked for -- on a machine whose other operating systems have to keep
+# booting. The only generator run anywhere is the one inside our own chroot.
+@test "install.sh runs grub-mkconfig only inside its own chroot" {
+    local line stripped n=0
+    # Every line naming the generator, minus the comments and the operator
+    # messages that quote the command for someone to re-run by hand. What is
+    # left has to be one line, and that line has to be the arch-chroot form.
+    while IFS= read -r line; do
+        stripped=${line#"${line%%[![:space:]]*}"}
+        case "$stripped" in
+            \#*|warn\ *|info\ *|success\ *|error\ *) continue ;;
+        esac
+        n=$(( n + 1 ))
+        [[ "$stripped" == *"arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg"* ]]
+    done < <(grep -F 'grub-mkconfig' "$INSTALL_SH")
+    [ "$n" -eq 1 ]
+    # And nothing in the library the phase calls into can run one at all.
+    # test/boot.bats pins the same fact with its own control; this is a second
+    # reader, from the file that would have to be the one calling it.
+    [ -z "$(grep -nE 'grub-mkconfig|grub2-mkconfig|grub-install' "${ARCH_SETUP}/lib/boot.sh" \
+            | grep -vE '^[0-9]+:[[:space:]]*#' || true)" ]
+}
+
+# custom_cfg_upsert always appends its block at the END of the file, so writing
+# a second id reorders the first: everything after the rewritten block shifts
+# up by one. A GRUB_DEFAULT set by index then selects a different operating
+# system. Phase 6 writes one block per neighbour into one file, so this is the
+# ordinary case rather than an edge one.
+@test "nothing sets GRUB_DEFAULT" {
+    # On the assignment, not on the name: lib/boot.sh's custom_cfg_upsert
+    # header explains the hazard at length and has to keep saying so.
+    assert_absent 'GRUB_DEFAULT=' "$INSTALL_SH"
+    assert_absent 'GRUB_DEFAULT=' "${ARCH_SETUP}/lib/boot.sh"
+    assert_absent 'GRUB_DEFAULT=' "${ARCH_SETUP}/lib/chroot.sh"
+}
+
+# The banner is what the operator counts progress against, and phase 6 is the
+# one that runs after the phase the old count called last.
+@test "TOTAL_PHASES counts the boot integration phase" {
+    grep -qx 'TOTAL_PHASES=6' "$INSTALL_SH"
+    grep -q 'banner 6 "\$TOTAL_PHASES" "Boot Integration"' "$INSTALL_SH"
+}
+
+# lib/chroot.sh tells the operator, in the branch where os-prober could not be
+# installed, that "the static chainload entries from phase 6 still work". That
+# is a forward reference to this phase, and renaming or renumbering it here
+# without changing that string leaves a message pointing at a phase that does
+# not exist.
+@test "lib/chroot.sh's forward reference names the phase this file numbers 6" {
+    grep -qF 'chainload entries from phase 6' "${ARCH_SETUP}/lib/chroot.sh"
+    grep -qx 'TOTAL_PHASES=6' "$INSTALL_SH"
+}
+
+# /mnt must still be mounted: the reverse entries are written into
+# /mnt/etc/grub.d/40_custom and picked up by a grub-mkconfig inside that
+# chroot. Ordered after phase_chroot because BOOTLOADER_ID's install has to
+# exist before anything chainloads it.
+@test "main runs phase 6 after the chroot and before the unmount" {
+    local body chroot_line boot_line umount_line
+    body=$(sed -n '/^main()/,/^}/p' "$INSTALL_SH")
+    [ -n "$body" ]
+    chroot_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*phase_chroot[[:space:]]*$' | cut -d: -f1) || true
+    boot_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*phase_boot_integration[[:space:]]*$' | cut -d: -f1) || true
+    umount_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*unmount_target[[:space:]]*$' | head -1 | cut -d: -f1) || true
+    [ -n "$chroot_line" ]
+    [ -n "$boot_line" ]
+    [ -n "$umount_line" ]
+    [ "$chroot_line" -lt "$boot_line" ]
+    [ "$boot_line" -lt "$umount_line" ]
+}

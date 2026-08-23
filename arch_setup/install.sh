@@ -47,7 +47,7 @@ DEFAULT_ESP_SIZE="2G"
 # it always did; the prompt exists for the shared-ESP case, where two installs
 # cannot both call themselves GRUB.
 DEFAULT_INSTALL_NAME="GRUB"
-TOTAL_PHASES=5
+TOTAL_PHASES=6
 
 KEYMAP=""; LOCALE=""; TIMEZONE=""
 HOSTNAME_VAR=""; USERNAME_VAR=""
@@ -1104,6 +1104,221 @@ phase_chroot() {
     success "system configured"
 }
 
+# ---------------- phase 6: boot integration ----------------
+#
+# The only phase that writes to a system other than the one just installed.
+# Everything it does there is a marker-delimited block plus a numbered backup,
+# and the summary names the exact file to copy back.
+#
+# It never runs a foreign grub-mkconfig -- see lib/boot.sh's header over
+# register_into_foreign_grub. The one grub-mkconfig below runs inside our own
+# chroot, where regenerating the menu is ours to do.
+#
+# Nothing here is fatal. It runs after phase 5, so the new system is already
+# installed and bootable, and every failure below costs a menu row on a machine
+# that still boots. A die() here would replace "installed, one neighbour
+# unregistered" with "Installation failed" and no reboot prompt, for an install
+# that succeeded.
+
+# boot_register_forward <menuentry_block> <restore_array_name>
+#
+# Adds <menuentry_block> to every other Linux install that has a GRUB of its
+# own, after asking about each. Appends one restore instruction to the named
+# array per file edited.
+#
+# The paths in those instructions are rewritten relative to the neighbour's own
+# root: the mountpoint they were written under is a mktemp -d that is gone by
+# the time the operator reads the summary, and booting that system to run
+# `cp /tmp/tmp.XyZ/etc/grub.d/40_custom.bak.WORK.1 ...` restores nothing.
+boot_register_forward() {
+    local block=$1
+    local -n __fwd_restore=$2
+    local -a found=() made=()
+    local raw line dev uuid has_grub name tmp out rc p rel
+
+    info "Looking for other operating systems with their own GRUB..."
+    # PART_ROOT as well as PART_ROOT_RAW: under LUKS the mounted root is
+    # /dev/mapper/cryptroot, which lsblk lists as btrfs like any other
+    # candidate. Without it this mounts the root it just installed a second
+    # time and offers to register the install into its own menu.
+    #
+    # Captured with $( ) rather than read from a process substitution: mapfile
+    # and a read loop both report success for a producer that failed (measured
+    # -- see chroot_config_array), and linux_installs returning non-zero means
+    # lsblk broke. That must not arrive here as "this machine has no other
+    # Linux installs".
+    if ! raw=$(linux_installs "$PART_ROOT_RAW" "$PART_ROOT" "$PART_EFI"); then
+        warn "could not enumerate the other Linux installs on this machine -- none of them was touched"
+        return 0
+    fi
+    if [[ -n "$raw" ]]; then mapfile -t found <<< "$raw"; fi
+
+    for line in "${found[@]}"; do
+        # shellcheck disable=SC2034  # uuid is read for field symmetry with linux_installs
+        read -r dev uuid has_grub name <<< "$line"
+        # Positively "yes". linux_installs emits "unknown" for a candidate it
+        # could not read, and mounting one of those read-write to edit a
+        # /boot/grub nobody has seen is not the direction to fail in.
+        [[ "$has_grub" == "yes" ]] || continue
+        echo ""
+        # Through _echo_e_literal because info prints via `echo -e`: a NAME=
+        # from a neighbour's /etc/os-release is not ours, and a backslash in it
+        # would eat the rest of the line.
+        info "Found $(_echo_e_literal "$name") on ${dev}, with a GRUB of its own."
+        ask_yes_no "Add an entry for this install to its boot menu?" "y" || continue
+
+        if [[ "$DRY_RUN" == true ]]; then
+            warn "[dry-run] would back up and edit ${dev}:/etc/grub.d/40_custom and /boot/grub/grub.cfg"
+            continue
+        fi
+
+        tmp=$(mktemp -d) || {
+            warn "cannot create a mount point for ${dev} -- skipping it"
+            continue
+        }
+        # Read-write, unlike every mount in lib/boot.sh's inventory: this one is
+        # here to write. subvol=@ is the fallback for an Arch-style btrfs
+        # layout, exactly as linux_installs probes it.
+        if mount "$dev" "$tmp" 2>/dev/null || mount -o subvol=@ "$dev" "$tmp" 2>/dev/null; then
+            rc=0
+            out=$(register_into_foreign_grub "$tmp" "$BOOTLOADER_ID" "$block") || rc=$?
+            made=()
+            if [[ -n "$out" ]]; then mapfile -t made <<< "$out"; fi
+            case "$rc" in
+                0)  success "registered into $(_echo_e_literal "$name") on ${dev}" ;;
+                2)  warn "only half of ${dev} was updated: /etc/grub.d/40_custom carries the entry and /boot/grub/grub.cfg does not."
+                    warn "That system picks it up at its next 'grub-mkconfig -o /boot/grub/grub.cfg'; until then the row is not in its menu." ;;
+                *)  warn "could not register into $(_echo_e_literal "$name") on ${dev} -- both of its files are unchanged" ;;
+            esac
+            for p in "${made[@]}"; do
+                rel=${p#"$tmp"}
+                # `%`, not `%%`: the shortest match strips only the suffix this
+                # backup added, so a root whose own path contains ".bak." keeps
+                # it.
+                __fwd_restore+=("on ${dev}:  cp ${rel} ${rel%.bak.*}")
+            done
+            umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
+        else
+            warn "could not mount ${dev} read-write -- skipping it"
+        fi
+        rmdir "$tmp" 2>/dev/null || true
+    done
+}
+
+# boot_register_reverse
+#
+# Adds every other bootloader on the machine to THIS install's menu, after
+# asking about each, and then regenerates our own config once.
+#
+# Built here rather than threaded out of phase 3: everything it needs is in
+# neighbour_loaders' inventory, and the vendor path has to come from the
+# neighbour's own ESP -- hardcoding \EFI\BOOT\BOOTX64.EFI was right only for
+# the one machine this was written on.
+boot_register_reverse() {
+    local -a neighbours=() ours=()
+    local raw line other_uuid other_path other_label marker reverse wrote=false
+
+    info "Looking for other bootloaders to add to this install's menu..."
+    # Our own loader is excluded by (ESP filesystem uuid, path) and never by
+    # ESP alone: on a shared ESP the neighbour this exists for has exactly the
+    # filesystem uuid we do. GRUB_REMOVABLE joins that exclusion because
+    # --removable writes \EFI\BOOT\BOOTX64.EFI on our ESP, and removable_policy
+    # only ever raises it for an ESP that had no fallback binary of its own.
+    ours=("/EFI/${BOOTLOADER_ID}/grubx64.efi")
+    if [[ "$GRUB_REMOVABLE" == true ]]; then
+        ours+=("/EFI/BOOT/BOOTX64.EFI")
+    fi
+    if ! raw=$(neighbour_loaders "$PART_EFI" "$ESP_FS_UUID" "${ours[@]}"); then
+        warn "could not enumerate the other bootloaders on this machine -- none was added to this menu"
+        warn "os-prober still runs from this install's own grub-mkconfig, so anything it can see is still found."
+        return 0
+    fi
+    if [[ -n "$raw" ]]; then mapfile -t neighbours <<< "$raw"; fi
+    if (( ${#neighbours[@]} == 0 )); then
+        info "No other bootloader found."
+        return 0
+    fi
+
+    for line in "${neighbours[@]}"; do
+        read -r other_uuid other_path other_label <<< "$line"
+        [[ -n "$other_uuid" && -n "$other_path" ]] || continue
+        echo ""
+        info "Found a bootloader on ${other_uuid}: ${other_path} ($(_echo_e_literal "$other_label"))"
+        ask_yes_no "Add it to this install's boot menu?" "y" || continue
+        # chain_entry refuses an apostrophe, a newline or a carriage return in
+        # the title, and this title is a firmware label we did not write. One
+        # refused entry skips one entry: under set -euo pipefail an unguarded
+        # assignment here would take the whole run down over a string in
+        # somebody else's NVRAM.
+        reverse=$(chain_entry "${other_label} [chainload]" "$other_uuid" "$other_path") || {
+            warn "cannot put that bootloader's name in a menu entry -- skipping it"
+            continue
+        }
+        marker=$(neighbour_marker_id "$other_uuid" "$other_path") || continue
+        if [[ "$DRY_RUN" == true ]]; then
+            warn "[dry-run] would add arch-installer:${marker} to /mnt/etc/grub.d/40_custom"
+            continue
+        fi
+        # Not an && chain: a failing && list does not trip set -e, so a refusal
+        # here would leave nothing said, in the phase whose whole job is making
+        # the other systems reachable.
+        if ! custom_cfg_upsert /mnt/etc/grub.d/40_custom "$marker" "$reverse" 0755; then
+            warn "could not write the menu entry for ${other_path} -- this install's menu is unchanged"
+            continue
+        fi
+        wrote=true
+        success "added ${other_path} to this install's /etc/grub.d/40_custom"
+    done
+
+    [[ "$wrote" == true ]] || return 0
+    # Our own system, so regenerating its config is safe -- unlike the foreign
+    # ones boot_register_forward deliberately leaves alone. Once, after every
+    # entry is written, rather than once per entry: each pass runs os-prober,
+    # which mounts every candidate root on the machine.
+    #
+    # `< /dev/null` because os-prober can prompt, and anything it read would
+    # come out of this function's stdin -- which is the operator's terminal,
+    # mid-phase.
+    if arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg < /dev/null; then
+        success "this install's menu now lists the other bootloaders"
+    else
+        warn "grub-mkconfig failed: the entries are in /etc/grub.d/40_custom but not in the generated menu."
+        warn "Boot this install and re-run 'grub-mkconfig -o /boot/grub/grub.cfg' to pick them up."
+    fi
+}
+
+phase_boot_integration() {
+    banner 6 "$TOTAL_PHASES" "Boot Integration"
+    local -a restore=()
+    local forward="" line
+
+    # Unreachable from a run that got this far -- the hostname is one RFC 1123
+    # label, the id is [A-Z0-9_] out of bootloader_id_from, and the uuid came
+    # from blkid or is the dry run's 0000-0000 -- but the reverse half below
+    # does not depend on it, so a refusal costs that half and not the phase.
+    forward=$(chain_entry "Arch Linux (${HOSTNAME_VAR}) [chainload]" \
+        "$ESP_FS_UUID" "/EFI/${BOOTLOADER_ID}/grubx64.efi") || forward=""
+    if [[ -n "$forward" ]]; then
+        boot_register_forward "$forward" restore
+    else
+        warn "cannot build this install's own chainload entry -- no other system's menu will be touched"
+    fi
+
+    boot_register_reverse
+
+    if (( ${#restore[@]} )); then
+        echo ""
+        info "To undo the edits made to other systems, boot each one and run:"
+        for line in "${restore[@]}"; do
+            # printf, not info: these lines carry paths from a filesystem that
+            # is not ours, and info prints through `echo -e`.
+            printf '    %s\n' "$line"
+        done
+        info "Each edit sits between '# BEGIN arch-installer:${BOOTLOADER_ID}' and its END line, so it can be deleted by hand too."
+    fi
+    success "boot integration complete"
+}
+
 main() {
     local arg
     for arg in "$@"; do
@@ -1134,6 +1349,10 @@ main() {
     phase_disk
     phase_base
     phase_chroot
+    # Before unmount_target, not after: the reverse entries are written into
+    # /mnt/etc/grub.d/40_custom and picked up by a grub-mkconfig run inside
+    # that chroot, both of which need /mnt still mounted.
+    phase_boot_integration
 
     # Torn down before the trap is disarmed, not after: `trap - EXIT` first
     # would leave the unmount and the LUKS close with nothing behind them.

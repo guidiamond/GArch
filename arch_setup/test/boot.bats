@@ -1690,3 +1690,493 @@ MOUNT
     [ "$status" -eq 0 ]
     [ -z "$output" ]
 }
+
+# --- registering into an already-installed system --------------------------
+
+@test "backup_path picks an unused suffix" {
+    local f="${BATS_TEST_TMPDIR}/grub.cfg"
+    echo x > "$f"
+    [ "$(backup_path "$f" WORK)" = "${f}.bak.WORK.1" ]
+    touch "${f}.bak.WORK.1"
+    [ "$(backup_path "$f" WORK)" = "${f}.bak.WORK.2" ]
+}
+
+# -e, not -f. A name already taken by a directory is taken: `cp -a x dir/`
+# lands the copy inside it and reports success, so the backup this function
+# promises would not exist under the name it handed back.
+@test "backup_path treats a name taken by a directory as taken" {
+    local f="${BATS_TEST_TMPDIR}/grub.cfg"
+    echo x > "$f"
+    mkdir "${f}.bak.WORK.1"
+    [ "$(backup_path "$f" WORK)" = "${f}.bak.WORK.2" ]
+}
+
+@test "register_into_foreign_grub writes both files and backs them up" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    printf '#!/bin/sh\nexec tail -n +3 $0\n' > "${root}/etc/grub.d/40_custom"
+    chmod 755 "${root}/etc/grub.d/40_custom"
+    printf 'menuentry "existing" {}\n' > "${root}/boot/grub/grub.cfg"
+
+    run register_into_foreign_grub "$root" WORK "$(chain_entry 'Arch (work)' 1A2B-3C4D /EFI/WORK/grubx64.efi)"
+    [ "$status" -eq 0 ]
+    grep -q 'Arch (work)' "${root}/etc/grub.d/40_custom"
+    grep -q 'Arch (work)' "${root}/boot/grub/grub.cfg"
+    grep -q 'existing'    "${root}/boot/grub/grub.cfg"
+    [ -f "${root}/etc/grub.d/40_custom.bak.WORK.1" ]
+    [ -f "${root}/boot/grub/grub.cfg.bak.WORK.1" ]
+}
+
+@test "register_into_foreign_grub reports the backups it made" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    : > "${root}/boot/grub/grub.cfg"
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"40_custom.bak.WORK.1"* ]]
+    [[ "$output" == *"grub.cfg.bak.WORK.1"* ]]
+}
+
+@test "register_into_foreign_grub keeps 40_custom executable" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    printf '#!/bin/sh\n' > "${root}/etc/grub.d/40_custom"
+    chmod 755 "${root}/etc/grub.d/40_custom"
+    : > "${root}/boot/grub/grub.cfg"
+    register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$(stat -c %a "${root}/etc/grub.d/40_custom")" = "755" ]
+}
+
+# grub-mkconfig ignores a 40_custom it cannot execute, which is a silent no-op
+# at that system's next kernel update rather than an error anyone sees.
+@test "register_into_foreign_grub creates a missing 40_custom executable" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/boot/grub"
+    : > "${root}/boot/grub/grub.cfg"
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 0 ]
+    [ "$(stat -c %a "${root}/etc/grub.d/40_custom")" = "755" ]
+    # Nothing existed to back up, so nothing is reported for it.
+    [[ "$output" != *"40_custom.bak"* ]]
+    [[ "$output" == *"grub.cfg.bak.WORK.1"* ]]
+}
+
+@test "register_into_foreign_grub run twice does not duplicate the entry" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    : > "${root}/boot/grub/grub.cfg"
+    register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$(grep -c 'BEGIN arch-installer:WORK' "${root}/boot/grub/grub.cfg")" -eq 1 ]
+    [ "$(grep -c 'BEGIN arch-installer:WORK' "${root}/etc/grub.d/40_custom")" -eq 1 ]
+}
+
+@test "register_into_foreign_grub keeps the second backup on a re-run" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    : > "${root}/boot/grub/grub.cfg"
+    register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    register_into_foreign_grub "$root" WORK "menuentry 'y' {}"
+    [ -f "${root}/boot/grub/grub.cfg.bak.WORK.1" ]
+    [ -f "${root}/boot/grub/grub.cfg.bak.WORK.2" ]
+    # The first backup is the copy that predates anything this tool did, and
+    # it is the one that must survive: an operator undoing a second run wants
+    # the file as it was before the FIRST.
+    [ ! -s "${root}/boot/grub/grub.cfg.bak.WORK.1" ]
+    grep -q "menuentry 'x'" "${root}/boot/grub/grub.cfg.bak.WORK.2"
+}
+
+@test "register_into_foreign_grub refuses a root with no grub.cfg" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d"
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 1 ]
+    # Not just non-zero: a file defining nothing exits 127, which "-ne 0"
+    # reports as a pass.
+    [[ "$output" == *"boot/grub/grub.cfg"* ]]
+    [ ! -e "${root}/etc/grub.d/40_custom" ]
+}
+
+# A /boot/grub/grub.cfg linked somewhere else is an ordinary thing to find on a
+# machine somebody dual-boots, and the `[[ -f ]]` guard above does not catch it
+# because -f dereferences. custom_cfg_upsert refuses a symlink too -- but only
+# after this function has already copied it, and `cp -a` of a symlink is not a
+# backup of anything. The assertion that matters is the absent .bak.
+@test "register_into_foreign_grub refuses a symlinked config without copying it" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub" "${root}/real"
+    : > "${root}/etc/grub.d/40_custom"
+    printf 'menuentry "existing" {}\n' > "${root}/real/grub.cfg"
+    ln -s "${root}/real/grub.cfg" "${root}/boot/grub/grub.cfg"
+
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"symlink"* ]]
+    # Nothing was written, so nothing was backed up either.
+    [ -z "$(find "$root" -name '*.bak.WORK.*' -print -quit)" ]
+    [ ! -s "${root}/etc/grub.d/40_custom" ]
+    grep -q 'existing' "${root}/real/grub.cfg"
+    [ "$(grep -c 'arch-installer' "${root}/real/grub.cfg" || true)" -eq 0 ]
+}
+
+# custom_cfg_upsert refuses a file that already holds two blocks for one id,
+# permanently, until a human edits it. Both targets come back untouched, so a
+# .bak next to them is a puzzle with no answer -- there is nothing to undo.
+@test "register_into_foreign_grub leaves no backup when it writes nothing" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    printf '# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n' \
+        > "${root}/etc/grub.d/40_custom"
+    printf 'menuentry "existing" {}\n' > "${root}/boot/grub/grub.cfg"
+
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"already holds 2 blocks"* ]]
+    [ -z "$(find "$root" -name '*.bak.WORK.*' -print -quit)" ]
+    [ "$(grep -c 'menuentry' "${root}/boot/grub/grub.cfg")" -eq 1 ]
+}
+
+# The other half of that pair. 40_custom took the block and grub.cfg refused
+# it, so one file on a system that is staying HAS been edited -- the backup is
+# the only copy of what was there before and has to be both kept and reported.
+@test "register_into_foreign_grub keeps and reports the backups on a partial write" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    printf '#!/bin/sh\n' > "${root}/etc/grub.d/40_custom"
+    printf '# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n' \
+        > "${root}/boot/grub/grub.cfg"
+
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"40_custom.bak.WORK.1"* ]]
+    [[ "$output" == *"grub.cfg.bak.WORK.1"* ]]
+    [ -f "${root}/etc/grub.d/40_custom.bak.WORK.1" ]
+    [ -f "${root}/boot/grub/grub.cfg.bak.WORK.1" ]
+    grep -q "menuentry 'x'" "${root}/etc/grub.d/40_custom"
+    # The backup is the pre-edit copy, which is what makes it worth reporting.
+    [ "$(grep -c 'menuentry' "${root}/etc/grub.d/40_custom.bak.WORK.1" || true)" -eq 0 ]
+}
+
+# The single hardest rule in this phase. Running the neighbour's grub-mkconfig
+# regenerates its whole menu from the live ISO's view of the machine, and can
+# fail outright on a GRUB version mismatch -- replacing a working config with
+# one nobody asked for, on a machine whose other OS has to keep booting.
+@test "register_into_foreign_grub never runs a foreign grub-mkconfig" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    : > "${root}/boot/grub/grub.cfg"
+    grub-mkconfig()  { echo 'FOREIGN_GENERATOR_RAN grub-mkconfig'; }
+    grub2-mkconfig() { echo 'FOREIGN_GENERATOR_RAN grub2-mkconfig'; }
+    grub-install()   { echo 'FOREIGN_GENERATOR_RAN grub-install'; }
+    chroot()         { echo 'FOREIGN_GENERATOR_RAN chroot'; }
+    arch-chroot()    { echo 'FOREIGN_GENERATOR_RAN arch-chroot'; }
+    run register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"FOREIGN_GENERATOR_RAN"* ]]
+    # The control: without it a function that had stopped doing anything at
+    # all would satisfy the assertion above.
+    grep -q "menuentry 'x'" "${root}/boot/grub/grub.cfg"
+}
+
+@test "lib/boot.sh contains no generator that would rewrite a foreign menu" {
+    local f="${BATS_TEST_DIRNAME}/../lib/boot.sh" hits
+    # Comment lines are excluded on purpose: this file argues about
+    # grub-install and grub-mkconfig at length and has to keep doing so. The
+    # count below is the control -- it proves the pattern and the path are
+    # right, so an empty result from the filtered grep means "no call" rather
+    # than "grep matched nothing anywhere".
+    [ "$(grep -cE 'grub-mkconfig|grub2-mkconfig|grub-install|arch-chroot' "$f")" -gt 0 ]
+    hits=$(grep -nE 'grub-mkconfig|grub2-mkconfig|grub-install|arch-chroot' "$f" \
+           | grep -vE '^[0-9]+:[[:space:]]*#') || true
+    [ -z "$hits" ]
+}
+
+# --- neighbour_marker_id ---------------------------------------------------
+
+@test "neighbour_marker_id maps an EFI path into custom_cfg_upsert's charset" {
+    # custom_cfg_upsert refuses an id outside [A-Za-z0-9_-], and every EFI
+    # path carries slashes and a dot.
+    [ "$(neighbour_marker_id 38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi)" \
+      = "NEIGHBOUR_38BD-4D38__EFI_Microsoft_Boot_bootmgfw_efi" ]
+    run custom_cfg_upsert "${BATS_TEST_TMPDIR}/cfg" \
+        "$(neighbour_marker_id 38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi)" "menuentry 'x' {}"
+    [ "$status" -eq 0 ]
+}
+
+# Never from a device name: the two NVMe disks on this machine exchanged
+# kernel names between one boot and the next, and custom_cfg_upsert matches
+# its markers exactly -- so an id spelled NEIGHBOUR_nvme1n1p1 leaves the old
+# block in place and appends a second one. A duplicated menu row per reboot.
+@test "neighbour_marker_id is the same across two runs of the same loader" {
+    local a b
+    a=$(neighbour_marker_id 283B-4CE7 /EFI/BOOT/BOOTX64.EFI)
+    b=$(neighbour_marker_id 283B-4CE7 /EFI/BOOT/BOOTX64.EFI)
+    [ "$a" = "$b" ]
+    # Two loaders on one ESP must not collide onto one id: the second upsert
+    # would then delete the first one's block.
+    [ "$a" != "$(neighbour_marker_id 283B-4CE7 /EFI/arch/grubx64.efi)" ]
+}
+
+@test "neighbour_marker_id refuses an empty uuid or path" {
+    run neighbour_marker_id "" /EFI/BOOT/BOOTX64.EFI
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"need a filesystem uuid and an EFI path"* ]]
+    run neighbour_marker_id 283B-4CE7 ""
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"need a filesystem uuid and an EFI path"* ]]
+}
+
+# --- neighbour_loaders -----------------------------------------------------
+#
+# The fixtures below are this machine's real inventory, read out of the live
+# `efibootmgr -v` and `lsblk` (see the header of test/boot.bats' target file
+# for the measured layout). The dp:/data: continuation lines are left out --
+# they are indented, so _nvram_split drops them, and the existing parser cases
+# already pin that -- but the option data efibootmgr appends to the device
+# path with no separator is kept verbatim, because it is what the path regex
+# has to survive.
+
+real_nvram() {
+    cat <<'NVRAM'
+BootCurrent: 0005
+Timeout: 0 seconds
+BootOrder: 0005,0000,0001,0002,0003
+Boot0000* Windows Boot Manager	HD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI57494e444f5753000100000088000000780000004200430044004f0042004a004500430054003d007b00390064006500610038003600320063002d0035006300640064002d0034006500370030002d0061006300630031002d006600330032006200330034003400640034003700390035007d00000061000100000010000000040000007fff0400
+Boot0001* UEFI:CD/DVD Drive	BBS(129,,0x0)
+Boot0002* UEFI:Removable Device	BBS(130,,0x0)
+Boot0003* UEFI:Network Device	BBS(131,,0x0)
+Boot0005* UEFI OS	HD(5,GPT,620c1fcb-07fd-ca4f-a2a0-09c21869c7d6,0x186a0000,0x113000)/\EFI\BOOT\BOOTX64.EFI0000424f
+NVRAM
+}
+
+real_lsblk_stub() {
+    lsblk() {
+        case "$*" in
+            *PARTTYPE*)
+                printf '/dev/nvme1n1  500107862016 \n'
+                printf '/dev/nvme1n1p1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 104857600 38BD-4D38\n'
+                printf '/dev/nvme1n1p5 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 576716800 283B-4CE7\n'
+                printf '/dev/nvme1n1p7 0fc63daf-8483-4772-8e79-3d69d8477de4 281225986048 1b13ff14-95ae-46f1-b975-a4233c5ed17f\n'
+                ;;
+            *PARTUUID*)
+                printf '/dev/nvme1n1p1 db04a6e9-6005-473c-b45b-ac2ca8af3a2a 38BD-4D38\n'
+                printf '/dev/nvme1n1p5 620c1fcb-07fd-ca4f-a2a0-09c21869c7d6 283B-4CE7\n'
+                printf '/dev/nvme1n1p7 1a6bfe58-3d64-4b2f-9d2a-6c0b8f1f0b11 1b13ff14-95ae-46f1-b975-a4233c5ed17f\n'
+                ;;
+        esac
+    }
+}
+
+# The measured on-disk spellings. nvme1n1p5 was read directly (it is mounted
+# at /boot/EFI on this machine and holds EFI/BOOT/BOOTX64.EFI and nothing
+# else); the Windows ESP carries the mixed-case directory its installer
+# creates, which is NOT how efibootmgr prints the same path.
+real_esp_probe_stub() {
+    esp_probe() {
+        case "$1" in
+            /dev/nvme1n1p1) printf 'vendor Microsoft\nfallback no\nkind none\nowngrub no\nefipath /EFI/Microsoft/Boot/bootmgfw.efi\n' ;;
+            /dev/nvme1n1p5) printf 'fallback yes\nkind grub\nowngrub no\nefipath /EFI/BOOT/BOOTX64.EFI\n' ;;
+            *)              printf 'fallback unknown\nkind unreadable\n' ;;
+        esac
+    }
+}
+
+# The case this exists for. On this machine BOTH routes name BOTH loaders:
+# `Boot0005 UEFI OS` is /EFI/BOOT/BOOTX64.EFI on nvme1n1p5, which esp_probe
+# also finds, and `Boot0000 Windows Boot Manager` is the bootmgfw esp_probe
+# finds on nvme1n1p1. Undeduplicated, this machine's menu gets two rows per
+# operating system.
+@test "neighbour_loaders emits one row per loader on this machine's real inventory" {
+    real_lsblk_stub
+    real_esp_probe_stub
+    efibootmgr() { real_nvram; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [ "${lines[0]}" = "38BD-4D38 /EFI/MICROSOFT/BOOT/BOOTMGFW.EFI Windows Boot Manager" ]
+    [ "${lines[1]}" = "283B-4CE7 /EFI/BOOT/BOOTX64.EFI UEFI OS" ]
+}
+
+# FAT is case-insensitive, and the two routes disagree about case: efibootmgr
+# prints \EFI\MICROSOFT\BOOT\BOOTMGFW.EFI while the directory Windows created
+# is spelled EFI/Microsoft/Boot. An exact-match dedupe passes the Arch ESP
+# (both routes spell it the same) and lets the Windows row through twice.
+@test "neighbour_loaders dedupes across a difference of case" {
+    real_lsblk_stub
+    real_esp_probe_stub
+    efibootmgr() { real_nvram; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -ci bootmgfw)" -eq 1 ]
+    [ "$(printf '%s\n' "$output" | grep -ci bootx64)" -eq 1 ]
+}
+
+# The control for the two cases above: the same fixtures with the NVRAM route
+# emptied still produce both rows, from the ESP scan alone. Without it, a
+# dedupe that had started dropping everything would read as a pass.
+@test "neighbour_loaders finds both loaders from the ESP scan alone" {
+    real_lsblk_stub
+    real_esp_probe_stub
+    efibootmgr() { printf 'BootCurrent: 0005\n'; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "$output" == *"38BD-4D38 /EFI/Microsoft/Boot/bootmgfw.efi"* ]]
+    [[ "$output" == *"283B-4CE7 /EFI/BOOT/BOOTX64.EFI"* ]]
+}
+
+# ...and from NVRAM alone, which is the route that needs neither root nor a
+# mount and is the only one that reaches a loader sharing OUR ESP.
+@test "neighbour_loaders finds both loaders from NVRAM alone" {
+    real_lsblk_stub
+    esp_probe() { printf 'fallback unknown\nkind unreadable\n'; }
+    efibootmgr() { real_nvram; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 2 ]
+    [[ "$output" == *"Windows Boot Manager"* ]]
+    [[ "$output" == *"UEFI OS"* ]]
+}
+
+# Our own loader must not be offered back to us. Excluded by (fs uuid, path)
+# and never by uuid alone: on a shared ESP the neighbour we are here for has
+# exactly the same filesystem uuid we do.
+@test "neighbour_loaders excludes our own loader but keeps a neighbour on the same ESP" {
+    real_lsblk_stub
+    real_esp_probe_stub
+    efibootmgr() { real_nvram; }
+    # We adopted nvme1n1p5, whose fs uuid is 283B-4CE7, and installed as WORK.
+    # The neighbour's \EFI\BOOT\BOOTX64.EFI is on that same ESP.
+    run neighbour_loaders /dev/nvme1n1p5 283B-4CE7 /EFI/WORK/grubx64.efi
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"283B-4CE7 /EFI/BOOT/BOOTX64.EFI"* ]]
+    [[ "$output" != *"/EFI/WORK/grubx64.efi"* ]]
+
+    # ...and with the fallback path claimed by --removable, that same row is
+    # ours and disappears.
+    run neighbour_loaders /dev/nvme1n1p5 283B-4CE7 /EFI/WORK/grubx64.efi /EFI/BOOT/BOOTX64.EFI
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"BOOTX64.EFI"* ]]
+    [[ "$output" == *"38BD-4D38"* ]]
+}
+
+# By the time phase 6 runs, our own ESP is mounted read-write at /mnt/boot, and
+# under --dry-run it was never formatted at all -- so the scan skips it by
+# device path rather than probing it. A neighbour sharing it comes back through
+# NVRAM, which needs no mount.
+@test "neighbour_loaders does not probe the ESP this install is using" {
+    real_lsblk_stub
+    esp_probe() {
+        echo "ESP_PROBE_RAN $1" >&2
+        printf 'fallback no\nkind grub\nowngrub no\nefipath /EFI/somebody/grubx64.efi\n'
+    }
+    efibootmgr() { printf 'BootCurrent: 0005\n'; }
+    run neighbour_loaders /dev/nvme1n1p5 283B-4CE7
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ESP_PROBE_RAN /dev/nvme1n1p5"* ]]
+    [[ "$output" != *"283B-4CE7 /EFI/somebody/grubx64.efi"* ]]
+    # The control: the other ESP on the same fixture IS probed and does produce
+    # a row, so the two assertions above are about the skip and not about a
+    # scan that stopped running.
+    [[ "$output" == *"ESP_PROBE_RAN /dev/nvme1n1p1"* ]]
+    [[ "$output" == *"38BD-4D38 /EFI/somebody/grubx64.efi"* ]]
+}
+
+# The exclusion is case-folded for the same reason the dedupe is.
+@test "neighbour_loaders excludes our own loader regardless of case" {
+    real_lsblk_stub
+    esp_probe() { printf 'fallback unknown\nkind unreadable\n'; }
+    efibootmgr() { real_nvram; }
+    run neighbour_loaders /dev/nvme0n1p9 38bd-4d38 /efi/microsoft/boot/bootmgfw.efi
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Windows Boot Manager"* ]]
+    [[ "$output" == *"UEFI OS"* ]]
+}
+
+# An lsblk that broke must not report a machine with no other bootloaders:
+# that is the answer under which phase 6 adds nothing and says nothing is
+# there.
+@test "neighbour_loaders fails instead of reporting no neighbours when lsblk fails" {
+    lsblk() { return 1; }
+    esp_probe() { printf 'fallback unknown\n'; }
+    efibootmgr() { printf 'BootCurrent: 0005\n'; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"EFI System Partitions"* ]]
+}
+
+@test "neighbour_loaders fails instead of reporting no neighbours when efibootmgr fails" {
+    real_lsblk_stub
+    real_esp_probe_stub
+    efibootmgr() { echo 'no efi' >&2; return 1; }
+    run neighbour_loaders /dev/nvme0n1p9 1111-2222
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"firmware"* ]]
+}
+
+# A vendor directory called "My Vendor" is legal on FAT, and esp_vendor_efi_path
+# does not validate what it returns. Emitted as-is it puts a space in the
+# middle of a record whose LAST field is the only one allowed to hold one, so
+# every consumer reads "/EFI/My" as the path -- which chain_entry accepts and
+# which chainloads nothing.
+@test "neighbour_loaders refuses an ESP path it cannot represent in a record" {
+    lsblk() {
+        case "$*" in
+            *PARTTYPE*) printf '/dev/sdz1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 1073741824 AAAA-BBBB\n' ;;
+            *PARTUUID*) printf '/dev/sdz1 aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee AAAA-BBBB\n' ;;
+        esac
+    }
+    efibootmgr() { printf 'BootCurrent: 0000\n'; }
+    esp_probe() { printf 'fallback no\nkind none\nowngrub no\nefipath /EFI/My Vendor/grubx64.efi\n'; }
+    run neighbour_loaders /dev/sdy1 1111-2222
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"AAAA-BBBB /EFI/My"* ]]
+    [[ "$output" == *"not an absolute EFI path"* ]]
+
+    # The control: the same ESP with a representable path does produce a row,
+    # so the refusal above is the path being rejected and not the scan having
+    # stopped reaching esp_probe.
+    esp_probe() { printf 'fallback no\nkind none\nowngrub no\nefipath /EFI/MyVendor/grubx64.efi\n'; }
+    run neighbour_loaders /dev/sdy1 1111-2222
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"AAAA-BBBB /EFI/MyVendor/grubx64.efi"* ]]
+}
+
+# parse_esp_list emits a literal "-" for an ESP that has never been formatted.
+# It is not a uuid, and there is nothing on it to chainload.
+@test "neighbour_loaders skips an ESP with no filesystem uuid" {
+    _uuid=""
+    lsblk() {
+        case "$*" in
+            *PARTTYPE*) printf '/dev/sdz1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 1073741824 %s\n' "$_uuid" ;;
+            *PARTUUID*) printf '/dev/sdz1 aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee %s\n' "$_uuid" ;;
+        esac
+    }
+    esp_probe() { echo 'ESP_PROBE_RAN' >&2; printf 'fallback no\nefipath /EFI/BOOT/BOOTX64.EFI\n'; }
+    efibootmgr() { printf 'BootCurrent: 0000\n'; }
+    run neighbour_loaders /dev/sdy1 1111-2222
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+
+    # The control: the same ESP with a uuid is probed and does produce a row.
+    # Without it, a scan that had stopped enumerating anything at all would
+    # satisfy the empty-output assertion above.
+    _uuid="AAAA-BBBB"
+    run neighbour_loaders /dev/sdy1 1111-2222
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ESP_PROBE_RAN"* ]]
+    [[ "$output" == *"AAAA-BBBB /EFI/BOOT/BOOTX64.EFI"* ]]
+}
+
+@test "neighbour_loaders refuses to run without our own ESP and uuid" {
+    # On the message, not merely on a non-zero status: a missing function
+    # exits 127, which "-ne 0" reports as a pass, and "neighbour_loaders" is
+    # a substring of bash's own "command not found" line.
+    run neighbour_loaders /dev/sdz1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"need this install's ESP device and filesystem uuid"* ]]
+}
