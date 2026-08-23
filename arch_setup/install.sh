@@ -923,8 +923,12 @@ phase_disk_finish() {
     # --- the bootloader id ---
     #
     # This id is the install's directory on the ESP and its label in the
-    # firmware's own boot menu, which is the only menu left when NVRAM is all
-    # that survived. It goes through bootloader_id_from because lib/chroot.sh's
+    # firmware's own boot menu -- but only when GRUB_REMOVABLE is false.
+    # grub-install --removable forces the EFI distributor to "BOOT" and skips
+    # the NVRAM registration, so under it the id names neither a directory nor
+    # a firmware entry: the ESP gets \EFI\BOOT\BOOTX64.EFI and nothing else.
+    # It is still the marker id phase 6 writes into the other systems' configs.
+    # It goes through bootloader_id_from because lib/chroot.sh's
     # preflight refuses anything outside [A-Za-z0-9_-] -- an abort that lands
     # after pacstrap, with the disk already written.
     #
@@ -1132,6 +1136,23 @@ phase_chroot() {
 # unregistered" with "Installation failed" and no reboot prompt, for an install
 # that succeeded.
 
+# own_loader_path -> the ESP-relative path of the loader phase 5 installed.
+#
+# Not a constant, because grub-install --removable overrides --bootloader-id:
+# upstream sets the EFI distributor to "BOOT" and writes \EFI\BOOT\BOOTX64.EFI
+# only -- no vendor directory, and no NVRAM entry either, since it also skips
+# grub_install_register_efi. Chainloading /EFI/<id>/grubx64.efi after such an
+# install writes a dead row into every other system's live menu, and with
+# nothing in NVRAM to fall back to, this install ends up reachable from no menu
+# on the machine.
+own_loader_path() {
+    if [[ "$GRUB_REMOVABLE" == true ]]; then
+        printf '/EFI/BOOT/BOOTX64.EFI\n'
+    else
+        printf '/EFI/%s/grubx64.efi\n' "$BOOTLOADER_ID"
+    fi
+}
+
 # boot_register_forward <menuentry_block> <restore_array_name>
 #
 # Adds <menuentry_block> to every other Linux install that has a GRUB of its
@@ -1189,9 +1210,17 @@ boot_register_forward() {
             continue
         }
         # Read-write, unlike every mount in lib/boot.sh's inventory: this one is
-        # here to write. subvol=@ is the fallback for an Arch-style btrfs
-        # layout, exactly as linux_installs probes it.
-        if mount "$dev" "$tmp" 2>/dev/null || mount -o subvol=@ "$dev" "$tmp" 2>/dev/null; then
+        # here to write. subvol=@ is tried FIRST, in the order linux_installs
+        # uses and for its reason: that is where an Arch-style btrfs layout
+        # keeps the root, nothing here ever runs `btrfs subvolume set-default`,
+        # and so a bare mount succeeds onto subvolid 5 -- the top level, which
+        # has no /boot/grub. Getting the order wrong does not fail loudly; it
+        # mounts the wrong thing, and every btrfs neighbour linux_installs just
+        # certified has_grub yes comes back "could not register". linux_installs
+        # does not pass the filesystem type down, so an ext4 neighbour takes the
+        # subvol=@ attempt too: ext4 rejects the unknown option with EINVAL and
+        # the bare mount behind it is the one that runs.
+        if mount -o subvol=@ "$dev" "$tmp" 2>/dev/null || mount "$dev" "$tmp" 2>/dev/null; then
             rc=0
             out=$(register_into_foreign_grub "$tmp" "$BOOTLOADER_ID" "$block") || rc=$?
             made=()
@@ -1233,13 +1262,11 @@ boot_register_reverse() {
     info "Looking for other bootloaders to add to this install's menu..."
     # Our own loader is excluded by (ESP filesystem uuid, path) and never by
     # ESP alone: on a shared ESP the neighbour this exists for has exactly the
-    # filesystem uuid we do. GRUB_REMOVABLE joins that exclusion because
-    # --removable writes \EFI\BOOT\BOOTX64.EFI on our ESP, and removable_policy
-    # only ever raises it for an ESP that had no fallback binary of its own.
-    ours=("/EFI/${BOOTLOADER_ID}/grubx64.efi")
-    if [[ "$GRUB_REMOVABLE" == true ]]; then
-        ours+=("/EFI/BOOT/BOOTX64.EFI")
-    fi
+    # filesystem uuid we do. The path comes from own_loader_path, the same
+    # source the forward chainload entry uses -- a seed still naming the vendor
+    # directory after a --removable install would match nothing on the ESP, and
+    # our own loader would come back as a "neighbour" in our own menu.
+    ours=("$(own_loader_path)")
     if ! raw=$(neighbour_loaders "$PART_EFI" "$ESP_FS_UUID" "${ours[@]}"); then
         warn "could not enumerate the other bootloaders on this machine -- none was added to this menu"
         warn "os-prober still runs from this install's own grub-mkconfig, so anything it can see is still found."
@@ -1309,7 +1336,7 @@ phase_boot_integration() {
     # from blkid or is the dry run's 0000-0000 -- but the reverse half below
     # does not depend on it, so a refusal costs that half and not the phase.
     forward=$(chain_entry "Arch Linux (${HOSTNAME_VAR}) [chainload]" \
-        "$ESP_FS_UUID" "/EFI/${BOOTLOADER_ID}/grubx64.efi") || forward=""
+        "$ESP_FS_UUID" "$(own_loader_path)") || forward=""
     if [[ -n "$forward" ]]; then
         boot_register_forward "$forward" restore
     else

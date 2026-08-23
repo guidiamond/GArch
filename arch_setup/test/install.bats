@@ -1317,6 +1317,75 @@ register_announcer() {
     [ "$(printf '%s\n' "$output" | grep -c 'UPSERT_MNT\[')" -eq 2 ]
 }
 
+# grub-install --removable overrides --bootloader-id: upstream forces the EFI
+# distributor to "BOOT" and writes \EFI\BOOT\BOOTX64.EFI only, with no vendor
+# directory and no NVRAM entry. A chainload entry naming /EFI/<id>/grubx64.efi
+# would then be written into every neighbour's live menu pointing at a path no
+# ESP on the machine carries -- and with nothing in NVRAM either, the new
+# install would be reachable from no menu at all.
+#
+# The control for this one is "phase 6 reports a restore path relative to the
+# neighbour's own root", which runs the same fixture with the stubs' default
+# GRUB_REMOVABLE=false and asserts the vendor path.
+@test "phase 6 chainloads the removable path when GRUB_REMOVABLE is true" {
+    mkdir -p "${TMP}/neigh/etc/grub.d" "${TMP}/neigh/boot/grub"
+    printf '#!/bin/sh\n' > "${TMP}/neigh/etc/grub.d/40_custom"
+    printf 'menuentry "debian" {}\n' > "${TMP}/neigh/boot/grub/grub.cfg"
+    run_boot false "$(printf 'y\nn\n')" "
+        GRUB_REMOVABLE=true
+        mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
+        umount() { rm -f \"\${!#}\"; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"registered into Debian GNU/Linux on /dev/sdy3"* ]]
+    grep -q 'chainloader /EFI/BOOT/BOOTX64.EFI' "${TMP}/neigh/boot/grub/grub.cfg"
+    ! grep -q 'chainloader /EFI/WORK/grubx64.efi' "${TMP}/neigh/boot/grub/grub.cfg"
+}
+
+# The same path, on the other half. neighbour_loaders is told which loaders are
+# ours so that the reverse menu does not gain a row for this install; if that
+# seed keeps naming a vendor directory --removable never created, the dedupe
+# stops matching and our own loader comes back as a "neighbour" in our own menu.
+@test "phase 6 seeds its own-loader exclusion from the same path it chainloads" {
+    run_boot false "$(printf 'n\n')" "
+        GRUB_REMOVABLE=true
+        neighbour_loaders() { printf 'OURS[%s]\n' \"\$*\" >&2; return 1; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OURS[/dev/sdz1 AAAA-BBBB /EFI/BOOT/BOOTX64.EFI]"* ]]
+}
+
+@test "phase 6 seeds its own-loader exclusion with the vendor path by default" {
+    run_boot false "$(printf 'n\n')" "
+        neighbour_loaders() { printf 'OURS[%s]\n' \"\$*\" >&2; return 1; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OURS[/dev/sdz1 AAAA-BBBB /EFI/WORK/grubx64.efi]"* ]]
+}
+
+# A bare `mount` of an Arch-style btrfs root succeeds and lands on subvolid 5,
+# the top level -- nothing in this tree ever runs `btrfs subvolume set-default`
+# -- and /boot/grub is not there. linux_installs tries subvol=@ first for that
+# reason and certified this neighbour has_grub yes from the @ subvolume, so
+# mounting it the other way round here makes the forward half a guaranteed
+# no-op for the commonest btrfs layout: register_into_foreign_grub finds no
+# grub.cfg and the phase reports "could not register" for a system that has one.
+@test "phase 6 mounts a btrfs neighbour at subvol=@ rather than the top level" {
+    mkdir -p "${TMP}/top" "${TMP}/sub/etc/grub.d" "${TMP}/sub/boot/grub"
+    printf '#!/bin/sh\n' > "${TMP}/sub/etc/grub.d/40_custom"
+    printf 'menuentry "debian" {}\n' > "${TMP}/sub/boot/grub/grub.cfg"
+    run_boot false "$(printf 'y\nn\n')" "
+        mount() {
+            local t=\${!#} src='${TMP}/top'
+            case \"\$*\" in *subvol=@*) src='${TMP}/sub' ;; esac
+            rmdir \"\$t\" 2>/dev/null || true
+            ln -sfn \"\$src\" \"\$t\"
+        }
+        umount() { rm -f \"\${!#}\"; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"registered into Debian GNU/Linux on /dev/sdy3"* ]]
+    grep -q 'Arch Linux (work) \[chainload\]' "${TMP}/sub/boot/grub/grub.cfg"
+    # The top level was never written to, not merely not reported.
+    [ -z "$(ls -A "${TMP}/top")" ]
+}
+
 # --- phase 6, structural ---------------------------------------------------
 
 # The hardest rule in this phase. A foreign grub-mkconfig regenerates that

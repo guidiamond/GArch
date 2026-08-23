@@ -581,6 +581,19 @@ cmd_verify() {
 # the fixture is the *starting* state, and generating it by hand keeps the test
 # from depending on the code under test to produce its own input.
 #
+# The ESP is 2 GiB exactly -- sectors 2048..4196351, measured back through
+# guestfish as part_size 2147483648 -- because that is MIN_SHARED_ESP_BYTES and
+# esp_reuse_ok compares with >=. It is the whole point of the fixture: below the
+# floor the ESP is filtered out of the reuse menu, custom mode carves a fresh
+# one in the gap, and /dev/sda1 is never a candidate for anything -- so nothing
+# in the run could write to it and assertion 4 below could not fail. At 2 GiB
+# the ESP is offered for reuse; answer yes and removable_policy is put in front
+# of its \EFI\BOOT\BOOTX64.EFI, where it returns forbid -- and assertion 4 is
+# then checking a file the run had every opportunity to overwrite. It is
+# also the only place the reuse path, the forbid branch and bootloader_id_free
+# against a mounted ESP are ever exercised: neither ESP on the development
+# machine clears the floor.
+#
 # Verified against guestfish 1.60.1 (the version on this host, without a VM):
 # double-quoted `write` strings do interpret \n as a real newline, and the
 # unquoted `$0` in the 40_custom script is written out literally -- guestfish
@@ -592,8 +605,8 @@ seed_coexist_disk() {
     guestfish -a "$img" <<'FISH'
 run
 part-init /dev/sda gpt
-part-add /dev/sda p 2048 1050623
-part-add /dev/sda p 1050624 20000000
+part-add /dev/sda p 2048 4196351
+part-add /dev/sda p 4196352 20000000
 mkfs vfat /dev/sda1
 mkfs ext4 /dev/sda2
 part-set-gpt-type /dev/sda 1 C12A7328-F81F-11D2-BA4B-00A0C93EC93B
@@ -646,7 +659,10 @@ FISH
         || { echo "FAIL: 40_custom lost its executable bit"; return 1; }
     # 4. The removable fallback binary is byte-identical. Single most important
     #    assertion in this file: if it fails, the installer destroyed the other
-    #    operating system's bootloader.
+    #    operating system's bootloader. Falsifiable only because the fixture's
+    #    ESP clears MIN_SHARED_ESP_BYTES and can therefore be reused, and so
+    #    mounted read-write, by the run -- see seed_coexist_disk. Reuse it when
+    #    the run offers it, or this check goes back to proving nothing.
     out=$(guestfish --ro -a "$img" <<'FISH'
 run
 mount /dev/sda1 /
@@ -658,15 +674,17 @@ FISH
     # 5. The pre-existing partitions are still where they were. part-list
     #    reports part_start/part_end in *bytes*, not the sector numbers
     #    seed_coexist_disk used to create them (verified against guestfish
-    #    1.60.1: sector 1050624 * 512 == byte offset 537919488) -- checking
-    #    for the sector number here would never match and every run would
-    #    report a corrupted layout that never happened.
+    #    1.60.1: sda2 starts at sector 4196352, and part-list reports
+    #    4196352 * 512 == 2148532224) -- checking for the sector number here
+    #    would never match and every run would report a corrupted layout that
+    #    never happened. This number is derived from seed_coexist_disk's second
+    #    part-add: moving that partition means recomputing it.
     out=$(guestfish --ro -a "$img" <<'FISH'
 run
 part-list /dev/sda
 FISH
 )
-    [[ "$out" == *"537919488"* ]] \
+    [[ "$out" == *"2148532224"* ]] \
         || { echo "FAIL: the existing partition layout changed"; return 1; }
     echo "PASS: coexistence assertions"
 }
