@@ -5,7 +5,11 @@
 #   ./test/vm.sh create   make the qcow2 disk and a writable OVMF vars file
 #   ./test/vm.sh boot     boot the ISO (run install.sh inside)
 #   ./test/vm.sh disk     boot the installed disk
+#   ./test/vm.sh verify   check a scenario's fixture-specific invariants
 #   ./test/vm.sh reset    delete the disk image and start over
+#
+#   ./test/vm.sh create --scenario coexist   seed a disk with an existing OS
+#   ./test/vm.sh verify --scenario coexist   assert it survived the install
 #
 # The one script here that runs on the *host* rather than on the target, so it
 # deliberately sources nothing from lib/. It gets used precisely when lib/ is
@@ -366,6 +370,21 @@ reclaimable_mib() {
 }
 
 cmd_create() {
+    local scenario=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            # `$# -ge 2` guarded before `shift 2`: a bare trailing `--scenario`
+            # would otherwise hit bash's own "shift count out of range" under
+            # set -e instead of a message naming what was actually wrong.
+            --scenario) [[ $# -ge 2 ]] || die "create: --scenario requires an argument"
+                        scenario=$2; shift 2 ;;
+            *)          die "create: unknown argument '$1'" ;;
+        esac
+    done
+    if [[ -n "$scenario" && "$scenario" != "coexist" ]]; then
+        die "create: unknown scenario '${scenario}' (only 'coexist' is defined)"
+    fi
+
     # `create` never overwrites. A re-run would otherwise throw away a
     # half-finished install without a word, and the OVMF vars with it -- which
     # is where UEFI keeps the boot entry `disk` needs. `reset` is the
@@ -378,6 +397,27 @@ cmd_create() {
     fi
     if [[ -e "$VARS" ]]; then
         die "${VARS} already exists -- './test/vm.sh reset' to start over"
+    fi
+
+    if [[ -n "$scenario" ]]; then
+        # seed_coexist_disk hardcodes its own size (see the fixture) rather
+        # than honouring DISK_SIZE, so this path checks space against that
+        # fixed figure instead of going through create_preflight, whose hints
+        # ("retry with a smaller DISK_SIZE") would not apply to a fixture
+        # whose size the caller cannot change.
+        need qemu-img
+        [[ -f "$OVMF_CODE" ]] \
+            || die "no ${OVMF_CODE} -- install edk2-ovmf (sudo pacman -S edk2-ovmf)"
+        [[ -f "$OVMF_VARS_SRC" ]] \
+            || die "no ${OVMF_VARS_SRC} -- install edk2-ovmf (sudo pacman -S edk2-ovmf)"
+        require_space "$(( 40 * 1024 ))" 0 "the '${scenario}' scenario's 40G fixture disk" \
+            "The fixture's size is fixed by seed_coexist_disk, not DISK_SIZE -- free space instead."
+
+        mkdir -p "$VM_DIR"
+        seed_coexist_disk "$DISK"
+        cp "$OVMF_VARS_SRC" "$VARS"
+        echo "seeded ${DISK} from the '${scenario}' scenario and created ${VARS}"
+        return 0
     fi
 
     create_preflight 0
@@ -509,9 +549,131 @@ cmd_reset() {
     cmd_create
 }
 
+cmd_verify() {
+    local scenario=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --scenario) [[ $# -ge 2 ]] || die "verify: --scenario requires an argument"
+                        scenario=$2; shift 2 ;;
+            *)          die "verify: unknown argument '$1'" ;;
+        esac
+    done
+    [[ -f "$DISK" ]] \
+        || die "no disk image -- run './test/vm.sh create --scenario ${scenario:-coexist}' first"
+    case "$scenario" in
+        coexist) assert_coexist "$DISK" ;;
+        "")      die "verify: --scenario is required (only 'coexist' is defined)" ;;
+        *)       die "verify: unknown scenario '${scenario}' (only 'coexist' is defined)" ;;
+    esac
+}
+
+# --- scenario fixtures ------------------------------------------------------
+
+# UNRUN. Like the rest of this file, this scenario has never been executed --
+# it needs qemu, OVMF, guestfish and an Arch ISO. It is checked in as the
+# specification of what a real run must assert, not as a passing test.
+#
+# A disk that looks like the machine this feature exists for: an NTFS
+# partition, an unencrypted Arch with its own GRUB at the removable fallback
+# path, and a gap at the end big enough for a second install.
+#
+# Built with guestfish rather than by booting the installer twice: the point of
+# the fixture is the *starting* state, and generating it by hand keeps the test
+# from depending on the code under test to produce its own input.
+#
+# Verified against guestfish 1.60.1 (the version on this host, without a VM):
+# double-quoted `write` strings do interpret \n as a real newline, and the
+# unquoted `$0` in the 40_custom script is written out literally -- guestfish
+# does not treat it as one of its own scripting variables. Both were checked
+# by seeding a throwaway image and reading the bytes back with `download`.
+seed_coexist_disk() {
+    local img=$1
+    qemu-img create -f qcow2 "$img" 40G
+    guestfish -a "$img" <<'FISH'
+run
+part-init /dev/sda gpt
+part-add /dev/sda p 2048 1050623
+part-add /dev/sda p 1050624 20000000
+mkfs vfat /dev/sda1
+mkfs ext4 /dev/sda2
+part-set-gpt-type /dev/sda 1 C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+mount /dev/sda2 /
+mkdir-p /etc
+write /etc/os-release "NAME=\"Arch Linux\"\nID=arch\n"
+mkdir-p /boot/grub
+write /boot/grub/grub.cfg "menuentry 'Existing Arch' {\n  echo existing\n}\n"
+mkdir-p /etc/grub.d
+write /etc/grub.d/40_custom "#!/bin/sh\nexec tail -n +3 $0\n"
+chmod 0755 /etc/grub.d/40_custom
+umount /
+mount /dev/sda1 /
+mkdir-p /EFI/BOOT
+write /EFI/BOOT/BOOTX64.EFI "GRUB fixture binary"
+umount /
+FISH
+}
+
+# The five checks that make this "the only test that proves the two menus
+# actually work" -- everything else in the suite is unit tests against
+# canned fixtures, not a second real OS's files surviving contact with the
+# installer. Run after a real `create --scenario coexist` + `boot` (install
+# onto the fixture's free-space gap) against the resulting $DISK.
+assert_coexist() {
+    local img=$1 out
+    out=$(guestfish --ro -a "$img" <<'FISH'
+run
+mount /dev/sda2 /
+cat /boot/grub/grub.cfg
+FISH
+)
+    # 1. The pre-existing system's menu gained exactly one chainload entry.
+    [[ "$out" == *"BEGIN arch-installer:"* ]] \
+        || { echo "FAIL: no chainload entry in the existing grub.cfg"; return 1; }
+    [ "$(grep -c 'BEGIN arch-installer:' <<< "$out")" -eq 1 ] \
+        || { echo "FAIL: duplicate chainload entries"; return 1; }
+    # 2. Its own entry survived.
+    [[ "$out" == *"Existing Arch"* ]] \
+        || { echo "FAIL: the existing menu entry was lost"; return 1; }
+    # 3. Its 40_custom is still executable, or the entry silently disappears at
+    #    that system's next kernel update.
+    out=$(guestfish --ro -a "$img" <<'FISH'
+run
+mount /dev/sda2 /
+stat /etc/grub.d/40_custom
+FISH
+)
+    [[ "$out" == *"0755"* || "$out" == *"33261"* ]] \
+        || { echo "FAIL: 40_custom lost its executable bit"; return 1; }
+    # 4. The removable fallback binary is byte-identical. Single most important
+    #    assertion in this file: if it fails, the installer destroyed the other
+    #    operating system's bootloader.
+    out=$(guestfish --ro -a "$img" <<'FISH'
+run
+mount /dev/sda1 /
+cat /EFI/BOOT/BOOTX64.EFI
+FISH
+)
+    [[ "$out" == "GRUB fixture binary" ]] \
+        || { echo "FAIL: \\EFI\\BOOT\\BOOTX64.EFI was overwritten"; return 1; }
+    # 5. The pre-existing partitions are still where they were. part-list
+    #    reports part_start/part_end in *bytes*, not the sector numbers
+    #    seed_coexist_disk used to create them (verified against guestfish
+    #    1.60.1: sector 1050624 * 512 == byte offset 537919488) -- checking
+    #    for the sector number here would never match and every run would
+    #    report a corrupted layout that never happened.
+    out=$(guestfish --ro -a "$img" <<'FISH'
+run
+part-list /dev/sda
+FISH
+)
+    [[ "$out" == *"537919488"* ]] \
+        || { echo "FAIL: the existing partition layout changed"; return 1; }
+    echo "PASS: coexistence assertions"
+}
+
 usage() {
     cat <<'USAGE'
-Usage: test/vm.sh {fetch|create|boot|disk|reset}
+Usage: test/vm.sh {fetch|create|boot|disk|verify|reset} [--scenario NAME]
 
 A QEMU + OVMF harness for running install.sh end to end against a fake disk.
 
@@ -519,7 +681,23 @@ A QEMU + OVMF harness for running install.sh end to end against a fake disk.
   create   make the qcow2 image and a writable copy of the OVMF vars
   boot     boot the ISO with the disk attached -- run install.sh in here
   disk     boot the installed disk, to check stage 1 produced a bootable system
+  verify   check a scenario's fixture-specific invariants against the disk image
   reset    delete the disk image and the OVMF vars, then create them again
+
+Scenarios (create --scenario NAME, verify --scenario NAME):
+
+  coexist  seed a disk that already carries an NTFS partition and an
+           unencrypted Arch install with its own GRUB at the removable
+           fallback path, with a gap at the end for the second install --
+           the machine this feature exists for. `create --scenario coexist`
+           replaces the blank image `create` would otherwise make; `boot` and
+           `disk` after it work exactly as they do for a plain image. `verify
+           --scenario coexist` then checks, on the resulting image, that the
+           existing OS's boot files survived the second install untouched and
+           gained exactly one chainload entry. See seed_coexist_disk and
+           assert_coexist below for what is asserted, and why it has never
+           been run: it needs qemu, OVMF, guestfish and an Arch ISO, none of
+           which this repository can supply on its own.
 
 Environment:
   VM_DIR             where everything lives (default ~/.cache/arch-installer-vm)
@@ -553,13 +731,16 @@ USAGE
 }
 
 main() {
-    case "${1:-}" in
-        fetch)      cmd_fetch  ;;
-        create)     cmd_create ;;
-        boot)       cmd_boot   ;;
-        disk)       cmd_disk   ;;
-        reset)      cmd_reset  ;;
-        -h|--help)  usage      ;;
+    local cmd=${1:-}
+    [[ $# -gt 0 ]] && shift
+    case "$cmd" in
+        fetch)      cmd_fetch       ;;
+        create)     cmd_create "$@" ;;
+        boot)       cmd_boot        ;;
+        disk)       cmd_disk        ;;
+        verify)     cmd_verify "$@" ;;
+        reset)      cmd_reset       ;;
+        -h|--help)  usage           ;;
         *)          usage >&2; exit 1 ;;
     esac
 }
