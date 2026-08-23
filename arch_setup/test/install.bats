@@ -1461,3 +1461,78 @@ register_announcer() {
     [ "$chroot_line" -lt "$boot_line" ]
     [ "$boot_line" -lt "$umount_line" ]
 }
+
+# --- phase 5: the firmware boot entry ---------------------------------------
+#
+# grub-install --removable writes \EFI\BOOT\BOOTX64.EFI and stops there:
+# upstream forces the EFI distributor to "BOOT" and guards the NVRAM
+# registration with `if (!removable && update_nvram)`. On a machine whose
+# firmware already has an entry for another operating system the fallback path
+# is never reached, so without an entry of its own the install is reachable
+# from no menu on the machine -- including, when phase 6 finds no neighbour to
+# register into, none at all.
+
+@test "phase 5 registers a firmware entry when GRUB_REMOVABLE is true" {
+    run in_install "
+        GRUB_REMOVABLE=true; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        nvram_register_removable() { echo \"REGISTER[\$*]\"; }
+        chroot_register_nvram"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"REGISTER[/dev/sdz1 ARCH_WORK]"* ]]
+}
+
+# grub-install registers the entry itself when --removable is not passed, so
+# doing it here too would leave the machine with two rows for one install.
+@test "phase 5 registers nothing when GRUB_REMOVABLE is false" {
+    run in_install "
+        GRUB_REMOVABLE=false; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        nvram_register_removable() { echo \"REGISTER[\$*]\"; }
+        chroot_register_nvram
+        echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"REGISTER["* ]]
+    # The control: the test above is the same harness with the flag flipped,
+    # and REACHED proves this one ran the helper rather than dying before it.
+    [[ "$output" == *"REACHED"* ]]
+}
+
+# Warning-grade, not fatal. By the time this runs the system is installed and
+# phase 6 is still to come, and `set -euo pipefail` would otherwise turn a
+# failed efibootmgr into "Installation failed" for an install that succeeded.
+@test "a failed registration warns rather than aborting phase 5" {
+    run in_install "
+        GRUB_REMOVABLE=true; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        nvram_register_removable() { return 1; }
+        chroot_register_nvram
+        echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no firmware boot entry of its own"* ]]
+    [[ "$output" == *"REACHED"* ]]
+}
+
+# Both paths, because the dry-run one returns early: a rehearsal that skipped
+# this would not show whether the install it describes ends up with a firmware
+# entry at all.
+@test "phase 5 reaches the registration on the dry-run path as well as the real one" {
+    local body
+    body=$(sed -n '/^phase_chroot()/,/^}/p' "$INSTALL_SH")
+    [ -n "$body" ]
+    [ "$(printf '%s\n' "$body" | grep -c '^[[:space:]]*chroot_register_nvram[[:space:]]*$')" -eq 2 ]
+    # The first of the two sits inside the `if [[ "$DRY_RUN" == true ]]` block,
+    # ahead of its `return 0`.
+    [ "$(printf '%s\n' "$body" | grep -n '^[[:space:]]*chroot_register_nvram[[:space:]]*$' | head -1 | cut -d: -f1)" \
+      -lt "$(printf '%s\n' "$body" | grep -n '^[[:space:]]*return 0[[:space:]]*$' | head -1 | cut -d: -f1)" ]
+}
+
+# It has to run after the chroot: grub-install is what creates the binary the
+# entry points at, and an entry for a loader that is not there yet is a boot
+# failure the operator only sees at the firmware menu.
+@test "phase 5 registers the firmware entry after the chroot, not before" {
+    local body chroot_line reg_line
+    body=$(sed -n '/^phase_chroot()/,/^}/p' "$INSTALL_SH")
+    chroot_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*arch-chroot /mnt /root/chroot_setup.sh[[:space:]]*$' | cut -d: -f1)
+    reg_line=$(printf '%s\n' "$body" | grep -n '^[[:space:]]*chroot_register_nvram[[:space:]]*$' | tail -1 | cut -d: -f1)
+    [ -n "$chroot_line" ]
+    [ -n "$reg_line" ]
+    [ "$chroot_line" -lt "$reg_line" ]
+}

@@ -1,8 +1,10 @@
 #!/bin/bash
 # Boot environment: what to write so that everything already on the machine
-# stays reachable. Nothing here reads a disk or destroys anything -- the only
-# write is to the one file custom_cfg_upsert is pointed at.
-# Requires lib/ui.sh to be sourced first.
+# stays reachable. The writes are custom_cfg_upsert's, into the one file it is
+# pointed at, and nvram_register_removable's single efibootmgr --create;
+# everything else reads.
+# Requires lib/ui.sh to be sourced first, and lib/disk.sh for run_cmd, which
+# nvram_register_removable -- and nothing else here -- depends on.
 # shellcheck shell=bash
 
 # _echo_e_literal <string> -- the string with every backslash doubled.
@@ -1074,6 +1076,129 @@ linux_installs() {
         umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
         rmdir "$tmp" 2>/dev/null || true
     done
+}
+
+# --- registering this install with the firmware -----------------------------
+
+# nvram_register_removable <esp_partition> <label>
+#
+# Give this install a firmware boot entry pointing at \EFI\BOOT\BOOTX64.EFI on
+# <esp_partition>, unless the firmware already has one for that exact
+# (partition, path) pair.
+#
+# grub-install --removable does not create one. Upstream's util/grub-install.c
+# forces the EFI distributor to "BOOT" when --removable is given, and then
+# guards the registration with `if (!removable && update_nvram)` -- so a
+# removable install writes the fallback binary and leaves the firmware's boot
+# list untouched. That is only survivable on a machine whose firmware has
+# nothing else to boot: where another operating system is already registered,
+# the fallback path is never reached and this install is in no boot menu at
+# all. On the machine this installer was written for, Windows is registered.
+#
+# Destructive, so `efibootmgr --create` goes through run_cmd (lib/disk.sh) like
+# every other write in this installer -- this function is the one thing in this
+# file that depends on that module. The read half is the same read-only
+# `efibootmgr -v` the inventory above uses.
+#
+# efibootmgr's --disk/--part are necessarily device-based, which is why this
+# resolves them from lsblk at the moment of the write rather than storing them:
+# device names are not stable across boots, and the entry the firmware keeps
+# records the partition GUID, not the name.
+#
+# Returns non-zero when it registered nothing, which is warning-grade for the
+# caller: phase 5 has already installed a working system by the time this runs,
+# and phase 6's chainload entries are a second route in.
+nvram_register_removable() {
+    local dev=$1 label=$2
+    local raw path pkname partn partuuid
+    local disk="" num="" guid=""
+    local enum epartuuid epath elabel
+    local partuuid_re='^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$'
+
+    [[ -n "$dev" ]] || { error "nvram_register_removable: no ESP partition given"; return 1; }
+    # The same character set lib/chroot.sh's preflight enforces on
+    # BOOTLOADER_ID, and for the same reason: every id reaching either place
+    # comes from bootloader_id_from, which emits only [A-Z0-9_], so anything
+    # else arrived by a route that skipped it.
+    #
+    # The leading character is excluded from the "-" half deliberately.
+    # efibootmgr's own getopt takes the word after --label as the label
+    # whatever it starts with, so this is not an injection -- but run_cmd
+    # prints this command under --dry-run and the warning in install.sh's
+    # chroot_register_nvram prints it for the operator to run by hand, and a
+    # label spelled "--delete-bootnum" is a paste away from being read as one.
+    [[ "$label" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] || {
+        error "nvram_register_removable: '$(_echo_e_literal "$label")' is not a bootloader id ([A-Za-z0-9_-], not starting with '-'); refusing to pass it to efibootmgr as a label"
+        return 1
+    }
+
+    # PKNAME and PARTN rather than stripping digits off the name: /dev/sda2 and
+    # /dev/nvme0n1p5 separate the number from the disk differently, and a
+    # wrongly split name sends efibootmgr at some other partition. Checked for
+    # failure like every other lsblk reader in this file -- "lsblk broke" must
+    # not arrive as "that partition does not exist".
+    raw=$(lsblk -pnro PATH,PKNAME,PARTN,PARTUUID) || {
+        error "nvram_register_removable: lsblk failed; cannot locate $(_echo_e_literal "$dev")"
+        return 1
+    }
+    while read -r path pkname partn partuuid; do
+        [[ "$path" == "$dev" ]] || continue
+        disk=$pkname; num=$partn; guid=$partuuid
+        break
+    done <<< "$raw"
+    # All three validated rather than merely non-empty, which is the rule the
+    # lsblk readers above share: lsblk leaves middle columns empty -- a
+    # whole-disk row has no parent, no number and no GUID -- and default-IFS
+    # `read` shifts every later column left when one of them is, so a variable
+    # holding something is not evidence it holds the right thing. The GPT
+    # partition GUID is also what the duplicate check below matches on, and the
+    # MBR form lsblk reports (12345678-01) is not one -- the same boundary
+    # fs_uuid_for_partuuid draws.
+    if [[ -z "$disk" ]] || [[ ! "$num" =~ ^[0-9]+$ ]] || [[ ! "$guid" =~ $partuuid_re ]]; then
+        error "nvram_register_removable: lsblk does not list $(_echo_e_literal "$dev") as a GPT partition with a parent disk; refusing to guess where to register the loader"
+        return 1
+    fi
+
+    # Read before writing, so a re-run adds nothing. "efibootmgr is not
+    # installed" and "the firmware lists no entries" are different facts and
+    # only the second says there is nothing to duplicate, so a failed read
+    # refuses rather than registering.
+    raw=$(nvram_loaders) || {
+        error "nvram_register_removable: cannot read the firmware's boot entries; refusing to add one that may duplicate an entry already there"
+        return 1
+    }
+    while read -r enum epartuuid epath elabel; do
+        [[ "${epartuuid,,}" == "${guid,,}" ]] || continue
+        # Compared case-insensitively because FAT is: \efi\boot\bootx64.efi and
+        # \EFI\BOOT\BOOTX64.EFI are one file, and a firmware that wrote the
+        # entry in the other case would otherwise get a second one every run.
+        [[ "${epath^^}" == "/EFI/BOOT/BOOTX64.EFI" ]] || continue
+        # An entry naming this partition and this path already boots this
+        # install's binary, whatever label it carries: there is exactly one
+        # fallback binary per ESP, and removable_policy only lets --removable
+        # through when nothing already owned that path, so the binary behind
+        # such an entry is ours. The label is therefore reported rather than
+        # corrected -- adding a second entry to get a nicer name is exactly
+        # what "do not duplicate on a re-run" rules out.
+        info "The firmware already boots $(_echo_e_literal "$dev") through \\\\EFI\\\\BOOT\\\\BOOTX64.EFI as entry ${enum} ($(_echo_e_literal "$elabel")) -- not adding a second entry."
+        return 0
+    done <<< "$raw"
+
+    info "Registering this install with the firmware as ${label}..."
+    # --create, not --create-only: it also puts the new entry at the front of
+    # BootOrder, which is what makes the install the machine boots by default.
+    # An install the operator has to reach through the firmware's one-time boot
+    # menu is the outcome this whole function exists to avoid.
+    #
+    # Not --quiet, deliberately: efibootmgr prints the resulting boot list, and
+    # that list is the only confirmation the operator gets that the entry now
+    # exists -- this function writes nothing to a disk they could go and check.
+    run_cmd efibootmgr --create \
+        --disk "$disk" --part "$num" \
+        --loader '\EFI\BOOT\BOOTX64.EFI' --label "$label" || {
+        error "nvram_register_removable: efibootmgr could not create a boot entry for $(_echo_e_literal "$dev")"
+        return 1
+    }
 }
 
 # --- registering into an already-installed system ---------------------------

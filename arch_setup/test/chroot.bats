@@ -337,8 +337,9 @@ extract_bootloader() {
 # exactly the bug Task 8 removed from the function itself.
 #
 # <luks> <removable> <vendor dir to pre-seed on the fake ESP, or "">
+#   [pre-seed \EFI\BOOT\BOOTX64.EFI too: "fallback", or ""]
 run_bootloader() {
-    local luks=$1 removable=$2 preseed=$3
+    local luks=$1 removable=$2 preseed=$3 fallback=${4:-}
     local artifact="$TMP/root/setup.sh" slice="$TMP/bootloader.sh"
     local fixture="$TMP/default_grub" esp="$TMP/esp"
     chroot_write_script "$artifact"
@@ -350,6 +351,13 @@ run_bootloader() {
     if [ -n "$preseed" ]; then
         mkdir -p "${esp}/EFI/${preseed}"
         touch "${esp}/EFI/${preseed}/grubx64.efi"
+    fi
+    # Separate from $preseed rather than "$preseed = BOOT": the fallback is a
+    # named binary in EFI/BOOT, not a grubx64.efi, and the two are pre-seeded
+    # together by the case that proves they are told apart.
+    if [ -n "$fallback" ]; then
+        mkdir -p "${esp}/EFI/BOOT"
+        touch "${esp}/EFI/BOOT/BOOTX64.EFI"
     fi
     sed -i -e "s|/etc/default/grub|${fixture}|g" -e "s|/boot|${esp}|g" "$slice"
     # Nothing may still address a real system path once the rewrite is done.
@@ -455,6 +463,47 @@ run_bootloader() {
     run run_bootloader false false GRUB
     [ "$status" -eq 0 ]
     [[ "$output" == *"--bootloader-id=ARCH_WORK"* ]]
+}
+
+# The removable half of the same question. --removable writes
+# \EFI\BOOT\BOOTX64.EFI and no vendor directory at all, so a vendor directory
+# on the ESP says nothing about whether this install has a bootloader -- and
+# reading it as "already installed" skips grub-install, leaving the fallback
+# path, which is the only path a removable install boots from, untouched.
+@test "bootloader section installs anyway under --removable when only a vendor dir is present" {
+    run run_bootloader false true ARCH_WORK ""
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"GRUB-INSTALL "*"--removable"* ]]
+}
+
+@test "bootloader section skips grub-install under --removable once the fallback binary is there" {
+    run run_bootloader false true "" fallback
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"GRUB-INSTALL"* ]]
+    [[ "$output" == *"GRUB-MKCONFIG"* ]]
+}
+
+# The skip message names the vendor id, which under --removable is not what is
+# on the ESP: the operator reading "GRUB ARCH_WORK already installed" goes
+# looking for an EFI/ARCH_WORK that does not exist.
+@test "bootloader section names the fallback path when it skips a removable install" {
+    run run_bootloader false true "" fallback
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'\EFI\BOOT\BOOTX64.EFI'* ]]
+}
+
+@test "bootloader section still skips a non-removable install by its vendor id" {
+    # The control for the pair above: same harness, removable off, and the
+    # vendor directory is once again the thing that decides.
+    run run_bootloader false false ARCH_WORK fallback
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"GRUB-INSTALL"* ]]
+}
+
+@test "bootloader section passes GRUB_REMOVABLE to needs_grub_install" {
+    chroot_write_script "$TMP/root/setup.sh"
+    grep -qF 'needs_grub_install /boot "${BOOTLOADER_ID}" "${GRUB_REMOVABLE}"' \
+        "$TMP/root/setup.sh"
 }
 
 @test "bootloader section appends the os-prober switch when grub has none" {

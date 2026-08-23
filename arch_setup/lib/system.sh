@@ -355,8 +355,9 @@ detect_gpu() {
     esac
 }
 
-# True (0) when GRUB still needs installing under <bootloader_id>. Takes the
-# ESP mountpoint and the id, defaulting to /boot and GRUB.
+# True (0) when GRUB still needs installing. Takes the ESP mountpoint, the
+# bootloader id and whether the install is a --removable one, defaulting to
+# /boot, GRUB and false.
 #
 # The id is a parameter because a second install on a shared ESP uses its own
 # vendor directory. Hardcoding GRUB meant the check was satisfied by *any*
@@ -368,8 +369,34 @@ detect_gpu() {
 # being mistaken for ours; it does nothing about our id already being taken by
 # somebody else, which is what bootloader_id_free is for -- phase 3 must call
 # that before phase 5 relies on this.
+#
+# The removable flag is the third parameter because --removable overrides
+# --bootloader-id: upstream's util/grub-install.c sets the EFI distributor to
+# "BOOT" when it is given, so the install writes \EFI\BOOT\BOOTX64.EFI and
+# creates no vendor directory at all. Asking after EFI/<id>/grubx64.efi in
+# that mode answers a question about a file the mode never writes -- it says
+# "needs install" on every run, or worse matches an EFI/<id> that belongs to
+# somebody else and skips the grub-install this install depends on.
+#
+# The two paths are deliberately not both checked in either mode. Outside
+# removable mode the fallback binary is commonly another operating system's
+# only bootloader, and reading it as ours skips grub-install for an install
+# that then has none; inside removable mode the vendor directory cannot be
+# ours. Only the literal "true" is removable, matching how lib/chroot.sh's
+# preflight and its bootloader block read GRUB_REMOVABLE.
+#
+# In removable mode this is a weaker test than the vendor-directory one: the
+# fallback path is a single well-known name and nothing on the ESP says who
+# wrote it. It is safe here only because GRUB_REMOVABLE is true solely on the
+# then-branch of an ask_yes_no over an `offer-*` verdict, and removable_policy
+# returns `forbid` whenever a fallback binary already exists -- so a fallback
+# binary seen from this function was written by this install.
 needs_grub_install() {
-    local esp=${1:-/boot} id=${2:-GRUB}
+    local esp=${1:-/boot} id=${2:-GRUB} removable=${3:-false}
+    if [[ "$removable" == "true" ]]; then
+        [[ -f "${esp}/EFI/BOOT/BOOTX64.EFI" ]] && return 1
+        return 0
+    fi
     [[ -f "${esp}/EFI/${id}/grubx64.efi" ]] && return 1
     return 0
 }

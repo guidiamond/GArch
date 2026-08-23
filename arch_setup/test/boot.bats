@@ -2180,3 +2180,228 @@ real_esp_probe_stub() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"need this install's ESP device and filesystem uuid"* ]]
 }
+
+# --- nvram_register_removable ------------------------------------------------
+
+# Stub lsblk and efibootmgr for the registration tests.
+#
+# One stub covers both efibootmgr roles, because nvram_register_removable
+# reads NVRAM (`efibootmgr -v`) before deciding whether to write it: a stub
+# that answered only the read would make "no entry was created" pass for the
+# wrong reason. Everything that is not the read is recorded in
+# NVRAM_WRITE_LOG, one invocation per line, and nothing is executed -- no test
+# in this suite may reach this machine's real NVRAM.
+#
+# <efibootmgr -v fixture text>
+nvram_stub() {
+    NVRAM_STUB_BIN="${BATS_TEST_TMPDIR}/bin"
+    NVRAM_WRITE_LOG="${BATS_TEST_TMPDIR}/efibootmgr-writes.log"
+    mkdir -p "$NVRAM_STUB_BIN"
+    : > "$NVRAM_WRITE_LOG"
+    # Via a file rather than interpolated into the stub: the fixtures are full
+    # of backslashes and newlines, and both survive a `cat` unchanged.
+    printf '%s' "$1" > "${BATS_TEST_TMPDIR}/nvram.txt"
+    cat > "${NVRAM_STUB_BIN}/efibootmgr" <<EFIBOOTMGR
+#!/bin/bash
+if [[ "\$1" == "-v" ]]; then
+    cat '${BATS_TEST_TMPDIR}/nvram.txt'
+    exit 0
+fi
+printf '%s\n' "\$*" >> '${NVRAM_WRITE_LOG}'
+EFIBOOTMGR
+    # PATH,PKNAME,PARTN,PARTUUID, in lsblk's own shape: whole-disk rows carry
+    # no parent, no number and no partition GUID, and the two disks number
+    # their partitions differently in their names.
+    cat > "${NVRAM_STUB_BIN}/lsblk" <<'LSBLK'
+#!/bin/bash
+printf '%s\n' \
+    '/dev/nvme0n1' \
+    '/dev/nvme0n1p1 /dev/nvme0n1 1 db04a6e9-6005-473c-b45b-ac2ca8af3a2a' \
+    '/dev/nvme0n1p5 /dev/nvme0n1 5 620c1fcb-07fd-ca4f-a2a0-09c21869c7d6' \
+    '/dev/sda' \
+    '/dev/sda2 /dev/sda 2 7b8e0d2c-1111-2222-3333-444455556666'
+LSBLK
+    chmod +x "${NVRAM_STUB_BIN}/efibootmgr" "${NVRAM_STUB_BIN}/lsblk"
+}
+
+# NVRAM holding one Windows entry and nothing for either of our partitions.
+nvram_fixture_windows() {
+    printf 'BootCurrent: 0000\nTimeout: 0 seconds\nBootOrder: 0000\n'
+    printf 'Boot0000* Windows Boot Manager\tHD(1,GPT,db04a6e9-6005-473c-b45b-ac2ca8af3a2a,0x800,0x32000)/\\EFI\\MICROSOFT\\BOOT\\BOOTMGFW.EFI57494e\n'
+}
+
+# Call nvram_register_removable with the stubs on PATH and lib/disk.sh's real
+# run_cmd, real because the whole point of the --dry-run case is that the
+# wrapper is what withholds the write. DRY_RUN is whatever the caller set.
+run_register() {
+    source "${BATS_TEST_DIRNAME}/../lib/disk.sh"
+    local PATH="${NVRAM_STUB_BIN}:${PATH}"
+    run nvram_register_removable "$@"
+}
+
+@test "nvram_register_removable creates a firmware entry for the fallback path" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$NVRAM_WRITE_LOG")" -eq 1 ]
+    grep -qF -- '--create' "$NVRAM_WRITE_LOG"
+    grep -qF -- '--disk /dev/nvme0n1 --part 5' "$NVRAM_WRITE_LOG"
+    grep -qF -- '--loader \EFI\BOOT\BOOTX64.EFI' "$NVRAM_WRITE_LOG"
+    grep -qF -- '--label ARCH_WORK' "$NVRAM_WRITE_LOG"
+}
+
+# The disk and the partition number are what efibootmgr wants, and they cannot
+# come from stripping digits off the device name: /dev/sda2 and /dev/nvme0n1p5
+# separate their number from their disk differently, and getting it wrong
+# writes a boot entry pointing at some other partition.
+@test "nvram_register_removable derives the disk and partition number per device" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=false
+    run_register /dev/sda2 ARCH_WORK
+    [ "$status" -eq 0 ]
+    grep -qF -- '--disk /dev/sda --part 2' "$NVRAM_WRITE_LOG"
+    [[ "$(cat "$NVRAM_WRITE_LOG")" != *"/dev/sda2"* ]]
+}
+
+@test "nvram_register_removable adds no second entry for a partition the firmware already boots" {
+    nvram_stub "$(nvram_fixture_windows
+        printf 'Boot0005* UEFI OS\tHD(5,GPT,620c1fcb-07fd-ca4f-a2a0-09c21869c7d6,0x186a0000,0x113000)/\\EFI\\BOOT\\BOOTX64.EFI0000424f\n')"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    # Naming the entry, so the operator can find the row in the firmware menu
+    # under whatever label it already carries.
+    [[ "$output" == *"0005"* ]]
+    [[ "$output" == *"UEFI OS"* ]]
+}
+
+# The dedupe key is (partition, path), not the path alone: the fallback path
+# exists once per ESP, and another disk's is not ours.
+@test "nvram_register_removable still registers when another partition holds the fallback entry" {
+    nvram_stub "$(nvram_fixture_windows
+        printf 'Boot0005* UEFI OS\tHD(2,GPT,7b8e0d2c-1111-2222-3333-444455556666,0x800,0x32000)/\\EFI\\BOOT\\BOOTX64.EFI\n')"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    grep -qF -- '--disk /dev/nvme0n1 --part 5' "$NVRAM_WRITE_LOG"
+}
+
+# ... and not the partition alone: an entry for our ESP naming some other
+# loader on it leaves the fallback path unregistered.
+@test "nvram_register_removable still registers when our partition holds a different loader" {
+    nvram_stub "$(nvram_fixture_windows
+        printf 'Boot0006* Other\tHD(5,GPT,620c1fcb-07fd-ca4f-a2a0-09c21869c7d6,0x800,0x32000)/\\EFI\\OTHER\\grubx64.efi\n')"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    grep -qF -- '--disk /dev/nvme0n1 --part 5' "$NVRAM_WRITE_LOG"
+}
+
+@test "nvram_register_removable writes no NVRAM under --dry-run" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=true
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"efibootmgr"* ]]
+
+    # The control. "No write happened" is satisfied by a harness that never
+    # reached the writer at all -- a renamed function, a stub that stopped
+    # recording -- so the same call with DRY_RUN off has to produce one.
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$NVRAM_WRITE_LOG")" -eq 1 ]
+}
+
+# "efibootmgr is not installed" and "the firmware lists no entries" are not the
+# same fact, and only the second says nothing is there to duplicate. Registering
+# on the strength of a read that failed is how a machine ends up with a new
+# boot entry on every re-run.
+@test "nvram_register_removable writes nothing when it cannot read NVRAM first" {
+    nvram_stub "$(nvram_fixture_windows)"
+    cat > "${NVRAM_STUB_BIN}/efibootmgr" <<EFIBOOTMGR
+#!/bin/bash
+if [[ "\$1" == "-v" ]]; then
+    echo "EFI variables are not supported on this system." >&2
+    exit 1
+fi
+printf '%s\n' "\$*" >> '${NVRAM_WRITE_LOG}'
+EFIBOOTMGR
+    chmod +x "${NVRAM_STUB_BIN}/efibootmgr"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 ARCH_WORK
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"nvram_register_removable"* ]]
+    [[ "$output" == *"boot entries"* ]]
+}
+
+@test "nvram_register_removable refuses a device lsblk does not list" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p9 ARCH_WORK
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    # On a distinctive substring, not merely on a non-zero status: a function
+    # that had been renamed exits 127, and bash's own "command not found" line
+    # both satisfies "-ne 0" and contains the function's name.
+    [[ "$output" == *"does not list"* ]]
+    [[ "$output" == *"/dev/nvme0n1p9"* ]]
+}
+
+# A whole-disk row has no partition number and no partition GUID. Handing
+# efibootmgr a disk with no --part, or matching an empty GUID against the
+# NVRAM inventory, are both worse than refusing.
+@test "nvram_register_removable refuses a whole disk" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=false
+    run_register /dev/nvme0n1 ARCH_WORK
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"does not list"* ]]
+    [[ "$output" == *"/dev/nvme0n1"* ]]
+}
+
+# Every id in this installer comes from bootloader_id_from, which emits only
+# [A-Z0-9_]. A label from anywhere else arrived by a route that skipped it, and
+# one that reads as an option ends up in the command run_cmd prints for the
+# operator to copy.
+@test "nvram_register_removable refuses a label outside the bootloader id character set" {
+    nvram_stub "$(nvram_fixture_windows)"
+    DRY_RUN=false
+    run_register /dev/nvme0n1p5 "--delete-bootnum"
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"is not a bootloader id"* ]]
+    run_register /dev/nvme0n1p5 "my install"
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"is not a bootloader id"* ]]
+}
+
+# This is the only function in lib/boot.sh that install.sh calls from a phase
+# running under `set -euo pipefail`, and both of its successful paths end in a
+# construct that has bitten this file before: a `while read` loop that returns
+# from inside itself, and a run_cmd whose failure is caught with `||`.
+@test "nvram_register_removable survives install.sh's set -euo pipefail" {
+    nvram_stub "$(nvram_fixture_windows
+        printf 'Boot0005* UEFI OS\tHD(5,GPT,620c1fcb-07fd-ca4f-a2a0-09c21869c7d6,0x186a0000,0x113000)/\\EFI\\BOOT\\BOOTX64.EFI0000424f\n')"
+    # Bare calls, on inputs where each must succeed: /dev/sda2 has no entry and
+    # takes the write path, /dev/nvme0n1p5 has one and takes the early return.
+    # The refusal paths legitimately return non-zero, and install.sh's
+    # chroot_register_nvram is where that is caught.
+    run env "PATH=${NVRAM_STUB_BIN}:${PATH}" bash -c "set -euo pipefail
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/disk.sh'
+source '${BATS_TEST_DIRNAME}/../lib/boot.sh'
+DRY_RUN=false nvram_register_removable /dev/sda2 ARCH_WORK
+nvram_register_removable /dev/nvme0n1p5 ARCH_WORK
+DRY_RUN=true nvram_register_removable /dev/sda2 ARCH_WORK
+echo SURVIVED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *SURVIVED* ]]
+}

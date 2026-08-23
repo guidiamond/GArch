@@ -365,7 +365,11 @@ else
     warn "The static chainload entries from phase 6 still work."
 fi
 
-if needs_grub_install /boot "${BOOTLOADER_ID}"; then
+# The removable flag is passed because --removable overrides --bootloader-id:
+# the two modes write different files, so they need different questions asked
+# of the ESP. Without it this asks after EFI/${BOOTLOADER_ID}/grubx64.efi,
+# which a removable install never creates.
+if needs_grub_install /boot "${BOOTLOADER_ID}" "${GRUB_REMOVABLE}"; then
     info "Installing GRUB as ${BOOTLOADER_ID}..."
     if [[ "${GRUB_REMOVABLE}" == "true" ]]; then
         # --removable also writes \EFI\BOOT\BOOTX64.EFI, the path the firmware
@@ -375,12 +379,24 @@ if needs_grub_install /boot "${BOOTLOADER_ID}"; then
         # caller, and lib/boot.sh's removable_policy is what decides it: never
         # true on `forbid`, and on either `offer-` verdict only after the
         # operator says yes. install.sh's own default is false.
+        #
+        # It also skips the NVRAM registration -- upstream guards that with
+        # `if (!removable && update_nvram)` -- so this install gets no firmware
+        # boot entry from grub-install. install.sh's phase 5 creates one after
+        # this script returns, through lib/boot.sh's nvram_register_removable;
+        # efibootmgr is not run here because this script has no run_cmd and so
+        # no way to stay honest under --dry-run.
         grub-install --target=x86_64-efi --efi-directory=/boot \
             --bootloader-id="${BOOTLOADER_ID}" --removable
     else
         grub-install --target=x86_64-efi --efi-directory=/boot \
             --bootloader-id="${BOOTLOADER_ID}"
     fi
+elif [[ "${GRUB_REMOVABLE}" == "true" ]]; then
+    # Named separately from the branch below because under --removable there is
+    # no EFI/${BOOTLOADER_ID} on the ESP to go and look at: the id names the
+    # firmware entry phase 5 creates, and nothing else.
+    success "\\\\EFI\\\\BOOT\\\\BOOTX64.EFI is already on the ESP, skipping grub-install"
 else
     success "GRUB ${BOOTLOADER_ID} already installed on the ESP, skipping grub-install"
 fi

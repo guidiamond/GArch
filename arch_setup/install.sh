@@ -1067,6 +1067,26 @@ chroot_dry_run() {
     success "[dry-run] chroot config and script generate cleanly"
 }
 
+# Give this install a firmware boot entry when grub-install would not have.
+#
+# Only under --removable: without it grub-install registers the entry itself,
+# and doing it here too would leave the firmware with two rows for one install.
+# See nvram_register_removable in lib/boot.sh for why --removable skips it.
+#
+# Never fatal. This runs after the chroot has returned, so the system is
+# installed and phase 6 is still to come; under `set -euo pipefail` a bare call
+# would turn a failed efibootmgr into "Installation failed" for an install that
+# succeeded. The warning says what the operator has lost, because an install
+# reachable only from a neighbour's menu is one a neighbour's upgrade can take
+# away.
+chroot_register_nvram() {
+    [[ "$GRUB_REMOVABLE" == true ]] || return 0
+    nvram_register_removable "$PART_EFI" "$BOOTLOADER_ID" || {
+        warn "${BOOTLOADER_ID} has no firmware boot entry of its own -- it is reachable only from another system's boot menu."
+        warn "To add one by hand: efibootmgr --create --disk <disk> --part <n> --loader '\\\\EFI\\\\BOOT\\\\BOOTX64.EFI' --label ${BOOTLOADER_ID}"
+    }
+}
+
 phase_chroot() {
     banner 5 "$TOTAL_PHASES" "System Configuration"
     local -a args
@@ -1097,6 +1117,10 @@ phase_chroot() {
 
     if [[ "$DRY_RUN" == true ]]; then
         chroot_dry_run
+        # On the dry-run path too, and through the same helper: run_cmd is what
+        # withholds the write, and a rehearsal that skipped this could not show
+        # whether the install it describes ends up with a firmware entry.
+        chroot_register_nvram
         return 0
     fi
 
@@ -1111,6 +1135,11 @@ phase_chroot() {
     chroot_write_config /mnt/root/chroot_config.sh "${args[@]}"
     chroot_write_script /mnt/root/chroot_setup.sh
     arch-chroot /mnt /root/chroot_setup.sh
+
+    # After the chroot, because grub-install is what creates the binary the
+    # entry points at: a firmware entry for a loader that is not there yet is a
+    # boot failure the operator meets at the firmware menu.
+    chroot_register_nvram
 
     # After the chroot, never before: see stage_dotfiles in lib/dotfiles.sh for
     # what `useradd -m` does (nothing) to a home directory that already exists.
