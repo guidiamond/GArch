@@ -6,7 +6,8 @@ layout, lightdm.
 
 ## Stage 1 -- from the Arch live ISO
 
-Root only. UEFI only. Wipes the disk you point it at.
+Root only. UEFI only. Whole-disk mode wipes the disk you point it at; custom
+mode does not (see below).
 
 ```sh
 pacman -Sy --noconfirm git
@@ -25,11 +26,11 @@ actually carries this installer -- `install.sh`, `lib/`, `packages/`. Until this
 work is merged, add `-b arch-installer` to the clone, and push the branch first:
 a fresh machine can only fetch what the remote has.
 
-Five phases: preflight (UEFI, network, NTP, keyring, mirrors), locale, disk,
-pacstrap, chroot. Produces a minimal bootable system -- LUKS2 (prompted,
-default yes) -> Btrfs (`@`, `@home`, `@snapshots`, `@var_log`, mounted
-`noatime,compress=zstd`), a FAT32 ESP at `/boot` (2G by default -- it holds
-both initramfs images), GRUB, zram at half of RAM,
+Six phases: preflight (UEFI, network, NTP, keyring, mirrors), locale, disk,
+pacstrap, chroot, boot integration. Produces a minimal bootable system --
+LUKS2 (prompted, default yes) -> Btrfs (`@`, `@home`, `@snapshots`,
+`@var_log`, mounted `noatime,compress=zstd`), a FAT32 ESP at `/boot` (2G by
+default -- it holds both initramfs images), GRUB, zram at half of RAM,
 NetworkManager enabled, microcode picked from the CPU. Nothing graphical.
 
 Nothing on disk is written before the Type-YES gate in phase 3.
@@ -42,6 +43,54 @@ Nothing on disk is written before the Type-YES gate in phase 3.
 A dry run is not purely a rehearsal in one place: it generates the chroot
 config and script for real, into a temp dir, because that step is the one most
 likely to abort a real run late -- after the disk is gone.
+
+## Custom partitioning and boot integration
+
+Phase 3 asks for a partitioning mode:
+
+- **Whole disk** -- wipe a disk and lay out ESP + root. The original
+  behaviour.
+- **Custom** -- reuse existing partitions and/or carve unallocated space,
+  to install alongside an existing OS. Wipes nothing: only the partitions
+  you explicitly select (to format or to reuse as-is) are ever touched. The
+  Type-YES gate is preceded by a three-column ledger -- WILL BE FORMATTED,
+  WILL BE PRESERVED, and NOT TOUCHED, the last one built by scanning every
+  partition on the machine and listing whatever is in neither of the first
+  two -- so that claim is evidence, not a promise.
+
+Custom mode will not adopt an existing ESP to share it unless the ESP is at
+least 2G. Below that floor the ESP is not offered for reuse. The floor exists
+because a shared ESP is mounted at `/boot` and has to hold this install's
+kernel and both of its initramfs images alongside whatever the other system
+already put there; on hardware where an nvidia initramfs alone runs past
+200M, anything smaller dies inside `mkinitcpio` minutes after the last
+prompt, in a way that reads like a broken mirror rather than an undersized
+partition.
+
+`--removable`: the installer will not write `\EFI\BOOT\BOOTX64.EFI` on an ESP
+that already has one, because that single path is the firmware's own
+fallback slot -- there can be only one occupant, and on a machine with no
+NVRAM entry left it is what actually boots. If the target ESP already has a
+fallback binary the write is refused outright; otherwise it is offered, and
+only defaults to yes when the ESP is the one this install itself just
+created.
+
+A partition custom mode cannot positively identify as empty is treated as
+occupied, never as free space -- an unmountable or unrecognised filesystem,
+same as one it lacks a safe read-only mount option for, is left alone rather
+than guessed at.
+
+An encrypted neighbour is invisible to `os-prober`, which cannot open a LUKS
+container to look for a kernel inside it. Phase 6 covers that gap with a
+static chainload entry instead: reachable from the boot menu regardless of
+whether `os-prober` can see the install behind it.
+
+Phase 6's edits to another system's GRUB are reversible. Each edit backs up
+`/etc/grub.d/40_custom` and `grub.cfg` first, as `<file>.bak.<ID>.<n>`
+(`<n>` counts up past any backup that already exists, so nothing is ever
+overwritten), and the installer prints the exact `cp` command to restore each
+one at the end of the run -- run it from the edited system, since the paths
+are rewritten relative to that system's own root.
 
 ## Stage 2 -- on the booted machine
 
@@ -158,6 +207,6 @@ overrides the refusal, `VM_DIR` moves everything to another filesystem.
 
 ## Not supported
 
-BIOS/MBR, dual-boot and os-prober, Wayland, encrypted `/boot` (it is the ESP),
-TPM2 unlock, hibernate (the only swap is zram, and no resume hook is set),
-snapshot automation -- `@snapshots` is created and nothing uses it.
+BIOS/MBR, Wayland, encrypted `/boot` (it is the ESP), TPM2 unlock, hibernate
+(the only swap is zram, and no resume hook is set), snapshot automation --
+`@snapshots` is created and nothing uses it.

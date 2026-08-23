@@ -92,6 +92,18 @@ Stage 1 of the Arch install: partitions a disk, creates a LUKS2 container,
 lays out Btrfs subvolumes and pacstraps a minimal bootable system. Run as
 root from the Arch live ISO. Stage 2 is ~/.dotfiles/arch_setup/provision.sh.
 
+Phase 3 offers two partitioning modes:
+
+  Whole disk  wipe a disk and lay out ESP + root. The original behaviour.
+  Custom      reuse existing partitions and/or carve unallocated space.
+              Wipes nothing; only the partitions you select are formatted.
+              Use this to install alongside an existing OS.
+
+When another GRUB is already on the machine, phase 6 offers to add a
+chainload entry to its menu, and to add one for it to this install's menu.
+Every edit to another system is a marker-delimited block with a numbered
+backup. It never regenerates that system's own boot menu.
+
   --dry-run   run the full prompt flow and print destructive commands
               instead of executing them (DRY_RUN=true in the environment
               does the same)
