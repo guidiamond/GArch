@@ -461,6 +461,7 @@ setup() {
               efi_path_to_slashes parse_nvram_entries parse_nvram_loaders \
               nvram_entries nvram_loaders esp_fallback_binary \
               esp_probe linux_installs fs_uuid_for_partuuid _esp_resolve \
+              esp_loader_paths esp_mountpoint \
               _nvram_split _nvram_read; do
         declare -F "$fn" >/dev/null || { echo "not defined: $fn"; return 1; }
     done
@@ -638,6 +639,118 @@ setup() {
     run chain_entry "Windows" "38BD-4D38" "$(esp_vendor_efi_path "$esp")"
     [ "$status" -eq 0 ]
     [[ "$output" == *"chainloader /EFI/Microsoft/Boot/bootmgfw.efi"* ]]
+}
+
+# --- esp_loader_paths ------------------------------------------------------
+#
+# The plural sibling. esp_vendor_efi_path answers "what does this ESP boot",
+# which is one path and is what esp_probe's `efipath` field and its `read -r
+# key value` consumers can hold; phase 6's reverse half asks "what ELSE is on
+# this ESP", which on a shared ESP is the whole point.
+
+@test "esp_loader_paths lists every vendor loader and the fallback" {
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/GRUB_WORK" "${esp}/EFI/Microsoft/Boot" "${esp}/EFI/BOOT"
+    touch "${esp}/EFI/GRUB_WORK/grubx64.efi" \
+          "${esp}/EFI/Microsoft/Boot/bootmgfw.efi" \
+          "${esp}/EFI/BOOT/BOOTX64.EFI"
+    run esp_loader_paths "$esp"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 3 ]
+    # Candidate order, then the fallback last: grubx64.efi outranks
+    # bootmgfw.efi in the candidate list, and \EFI\BOOT is never a vendor.
+    [ "${lines[0]}" = "/EFI/GRUB_WORK/grubx64.efi" ]
+    [ "${lines[1]}" = "/EFI/Microsoft/Boot/bootmgfw.efi" ]
+    [ "${lines[2]}" = "/EFI/BOOT/BOOTX64.EFI" ]
+}
+
+@test "esp_loader_paths emits one row per vendor directory, not one per binary" {
+    # A distro ships shimx64.efi and the grubx64.efi it loads side by side.
+    # They are one operating system, and two rows would put two menu entries
+    # for it in front of the operator. The shim is the one to chainload, for
+    # the Secure Boot reason the candidate order exists for.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/fedora"
+    touch "${esp}/EFI/fedora/shimx64.efi" "${esp}/EFI/fedora/grubx64.efi"
+    run esp_loader_paths "$esp"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = "/EFI/fedora/shimx64.efi" ]
+}
+
+@test "esp_loader_paths emits the fallback exactly once" {
+    # \EFI\BOOT is skipped by the vendor walk and added afterwards. Emitting it
+    # from both would give the operator the same neighbour twice -- and the
+    # (uuid, path) dedupe downstream would hide the fault rather than the
+    # duplicate showing up.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/BOOT"
+    touch "${esp}/EFI/BOOT/BOOTX64.EFI" "${esp}/EFI/BOOT/grubx64.efi"
+    run esp_loader_paths "$esp"
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [ "${lines[0]}" = "/EFI/BOOT/BOOTX64.EFI" ]
+}
+
+@test "esp_loader_paths emits nothing when there is no loader" {
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/empty_vendor"
+    run esp_loader_paths "$esp"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # The control: the same tree with one loader in it does produce a row, so
+    # the emptiness above is the ESP's and not a walk that stopped working.
+    touch "${esp}/EFI/empty_vendor/grubx64.efi"
+    run esp_loader_paths "$esp"
+    [ "$status" -eq 0 ]
+    [ "$output" = "/EFI/empty_vendor/grubx64.efi" ]
+}
+
+@test "esp_vendor_efi_path is esp_loader_paths' first line" {
+    # The singular contract has not moved: a vendor directory whenever there is
+    # one, in candidate order, and the fallback only when there is not.
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/arch" "${esp}/EFI/fedora" "${esp}/EFI/BOOT"
+    touch "${esp}/EFI/arch/grubx64.efi" "${esp}/EFI/fedora/shimx64.efi" \
+          "${esp}/EFI/BOOT/BOOTX64.EFI"
+    [ "$(esp_vendor_efi_path "$esp")" = "/EFI/fedora/shimx64.efi" ]
+    [ "$(esp_loader_paths "$esp" | head -1)" = "/EFI/fedora/shimx64.efi" ]
+}
+
+# --- esp_mountpoint --------------------------------------------------------
+
+@test "esp_mountpoint reports where a device is mounted" {
+    lsblk() { printf '%s\n' "$BATS_TEST_TMPDIR"; }
+    run esp_mountpoint /dev/sdz1
+    [ "$status" -eq 0 ]
+    [ "$output" = "$BATS_TEST_TMPDIR" ]
+}
+
+@test "esp_mountpoint is silent about a device that is not mounted" {
+    # Not an error: under --dry-run nothing was ever mounted, and that is the
+    # ordinary case rather than a fault to report.
+    lsblk() { printf '\n'; }
+    run esp_mountpoint /dev/sdz1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "esp_mountpoint ignores a column value that is not a path" {
+    # lsblk prints "[SWAP]" in this column for a swap partition, and the result
+    # is walked as a directory.
+    lsblk() { printf '[SWAP]\n'; }
+    run esp_mountpoint /dev/sdz1
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+@test "esp_mountpoint says so when lsblk fails rather than reporting not mounted" {
+    # "not mounted" and "cannot tell" must not be the same silent answer: the
+    # first costs nothing and the second loses every loader on our own ESP.
+    lsblk() { return 1; }
+    run esp_mountpoint /dev/sdz1
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"cannot tell where /dev/sdz1 is mounted"* ]]
 }
 
 @test "esp_has_own_grub is true when the esp carries a grub boot directory" {
@@ -1249,6 +1362,7 @@ for d in '${esp}' '${empty}'; do
 done
 # Predicates, on inputs where each must succeed, so the call can stay bare.
 esp_vendor_efi_path '${esp}' >/dev/null
+esp_loader_paths '${esp}' >/dev/null
 esp_fallback_binary '${esp}' >/dev/null
 esp_has_own_grub '${esp}'
 bootloader_id_free '${esp}' ARCH_WORK
@@ -1293,6 +1407,11 @@ MOUNT
     [[ "$output" == *"kind systemd-boot"* ]]
     [[ "$output" == *"owngrub yes"* ]]
     [[ "$output" == *"efipath /EFI/Microsoft/Boot/bootmgfw.efi"* ]]
+    # One efipath line per loader, not one per ESP: this fixture carries the
+    # removable fallback alongside the vendor directory, and phase 6's reverse
+    # half needs both to reach a neighbour sharing an ESP with us.
+    [[ "$output" == *"efipath /EFI/BOOT/BOOTX64.EFI"* ]]
+    [ "$(grep -c '^efipath ' <<< "$output")" -eq 2 ]
 }
 
 # --- review round 2 -----------------------------------------------------------
@@ -2159,16 +2278,48 @@ real_esp_probe_stub() {
     [[ "$output" == *"38BD-4D38"* ]]
 }
 
-# By the time phase 6 runs, our own ESP is mounted read-write at /mnt/boot, and
-# under --dry-run it was never formatted at all -- so the scan skips it by
-# device path rather than probing it. A neighbour sharing it comes back through
-# NVRAM, which needs no mount.
-@test "neighbour_loaders does not probe the ESP this install is using" {
+# CONTEXT note 20: the two routes can name the same loader, and the key is
+# (fs uuid, EFI path) case-folded. Now that the scan reads our own ESP too, the
+# overlap is on the shared ESP itself -- the case this whole fix is about --
+# and the row must still appear exactly once, with NVRAM's readable label.
+@test "neighbour_loaders dedupes a shared-ESP loader both routes can see" {
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/GRUB_WORK" "${esp}/EFI/BOOT"
+    : > "${esp}/EFI/GRUB_WORK/grubx64.efi"
+    : > "${esp}/EFI/BOOT/BOOTX64.EFI"
+    lsblk() {
+        case "$*" in
+            *PARTTYPE*)   printf '/dev/vda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 2147483648 6ED4-8280\n' ;;
+            *PARTUUID*)   printf '/dev/vda1 aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee 6ED4-8280\n' ;;
+            *MOUNTPOINT*) printf '%s\n' "$esp" ;;
+        esac
+    }
+    # The firmware's spelling of the same file differs in case from the one on
+    # disk, exactly as it does for Windows on the target machine.
+    efibootmgr() {
+        printf 'BootCurrent: 0001\n'
+        printf 'Boot0001* Existing Arch\tHD(1,GPT,aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee,0x800,0x32000)/\\EFI\\boot\\bootx64.efi0000424f\n'
+    }
+    run neighbour_loaders /dev/vda1 6ED4-8280 /EFI/GRUB_WORK/grubx64.efi
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    # NVRAM is read first, so it wins the tie and the row keeps the firmware's
+    # label rather than the synthesised "Existing bootloader on ..." one.
+    [ "${lines[0]}" = "6ED4-8280 /EFI/boot/bootx64.efi Existing Arch" ]
+}
+
+# By the time phase 6 runs, our own ESP is mounted read-write under /mnt, so a
+# second read-only mount of it would read metadata still in flux. It is walked
+# where it is already mounted instead -- never handed to esp_probe.
+@test "neighbour_loaders does not mount the ESP this install is using" {
     real_lsblk_stub
     esp_probe() {
         echo "ESP_PROBE_RAN $1" >&2
         printf 'fallback no\nkind grub\nowngrub no\nefipath /EFI/somebody/grubx64.efi\n'
     }
+    # Not mounted anywhere -- the --dry-run case, and the one where there is
+    # nothing to walk.
+    esp_mountpoint() { return 1; }
     efibootmgr() { printf 'BootCurrent: 0005\n'; }
     run neighbour_loaders /dev/nvme1n1p5 283B-4CE7
     [ "$status" -eq 0 ]
@@ -2179,6 +2330,40 @@ real_esp_probe_stub() {
     # scan that stopped running.
     [[ "$output" == *"ESP_PROBE_RAN /dev/nvme1n1p1"* ]]
     [[ "$output" == *"38BD-4D38 /EFI/somebody/grubx64.efi"* ]]
+}
+
+# The defect the first end-to-end VM install found, reproduced exactly: a 2 GiB
+# ESP adopted from an existing Arch whose GRUB lives at the removable fallback
+# path, with our own \EFI\GRUB_WORK\grubx64.efi written beside it by phase 5.
+# NVRAM holds nothing for the neighbour -- the firmware boots
+# \EFI\BOOT\BOOTX64.EFI by default and no installer writes an entry for it --
+# so the ESP scan is the only route to it. Measured before the fix: no rows at
+# all, and an install whose menu listed only itself.
+@test "neighbour_loaders offers the neighbour sharing this install's own ESP" {
+    local esp="${BATS_TEST_TMPDIR}/esp"
+    mkdir -p "${esp}/EFI/GRUB_WORK" "${esp}/EFI/BOOT"
+    : > "${esp}/EFI/GRUB_WORK/grubx64.efi"
+    : > "${esp}/EFI/BOOT/BOOTX64.EFI"
+    lsblk() {
+        case "$*" in
+            *PARTTYPE*)   printf '/dev/vda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b 2147483648 6ED4-8280\n'
+                          printf '/dev/vda2 0fc63daf-8483-4772-8e79-3d69d8477de4 8000000000 1b13ff14-95ae-46f1-b975-a4233c5ed17f\n' ;;
+            *PARTUUID*)   printf '/dev/vda1 aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee 6ED4-8280\n' ;;
+            *MOUNTPOINT*) printf '%s\n' "$esp" ;;
+        esac
+    }
+    efibootmgr() { printf 'BootCurrent: 0000\nBootOrder: 0000\n'; }
+    esp_probe() { echo "ESP_PROBE_RAN $1" >&2; printf 'fallback unknown\nkind unreadable\n'; }
+    run neighbour_loaders /dev/vda1 6ED4-8280 /EFI/GRUB_WORK/grubx64.efi
+    [ "$status" -eq 0 ]
+    [ "${#lines[@]}" -eq 1 ]
+    [[ "$output" == *"6ED4-8280 /EFI/BOOT/BOOTX64.EFI"* ]]
+    # Our own loader is on that same ESP and must not be offered back to us.
+    # The single-row assertion above is the control: the walk did reach the
+    # tree that holds both.
+    [[ "$output" != *"GRUB_WORK"* ]]
+    # ...and it was walked at its mountpoint, never mounted a second time.
+    [[ "$output" != *"ESP_PROBE_RAN"* ]]
 }
 
 # The exclusion is case-folded for the same reason the dedupe is.

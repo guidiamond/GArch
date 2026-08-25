@@ -552,13 +552,14 @@ esp_fallback_kind() {
     echo "unknown"
 }
 
-# esp_vendor_efi_path <mountpoint> -> the EFI path to chainload for this ESP.
+# esp_loader_paths <mountpoint> -> every bootloader on this ESP, one
+# ESP-relative path per line, most-preferred first; 1 and no output if there is
+# none.
 #
-# A vendor directory is preferred over \EFI\BOOT: the fallback path is whatever
-# was installed last and can be replaced by a Windows update, while
-# \EFI\<VENDOR>\grubx64.efi belongs to one install. The first draft hardcoded
-# the fallback path, which was right only for the one machine this was written
-# on -- any normally-installed neighbour lives in a vendor directory.
+# One row per vendor directory, plus \EFI\BOOT if a fallback binary is there.
+# Not every candidate in every directory: a distro ships shimx64.efi and the
+# grubx64.efi it loads side by side in one directory, and emitting both would
+# put two menu rows in front of the operator for one operating system.
 #
 # The candidate list is ordered, and the order is load-bearing:
 #
@@ -573,39 +574,77 @@ esp_fallback_kind() {
 #   further down. Looking only for grubx64.efi returned nothing at all for the
 #   Windows ESP on the target machine, so phase 6 could not have produced the
 #   one chainload entry this whole feature exists for.
-# Exactly one loader is returned per ESP. The search is candidate-major -- the
-# outer loop is over loader names and the inner one over vendor directories --
-# so a shim in ANY vendor directory beats a bare grub in any other. Vendor-major
-# ranked the candidates only within one directory and then picked the directory
-# by glob collation, which made the Secure Boot reasoning above false in exactly
-# the case it is written for: with EFI/arch/grubx64.efi and
-# EFI/fedora/shimx64.efi present, "arch" sorts first and the unbootable-under-SB
-# one won.
 #
-# Which vendor wins among equally-ranked candidates is still collation order,
-# and that genuinely is arbitrary rather than wrong -- both are a chainload
-# target for this ESP, and neither is more correct than the other. Phase 6
-# needing every loader on an ESP would need this to return a list.
-esp_vendor_efi_path() {
-    local mnt=${1%/} efi dir name cand found
+# The search is candidate-major -- the outer loop is over loader names and the
+# inner one over vendor directories -- so a shim in ANY vendor directory sorts
+# ahead of a bare grub in any other. That ordering is what esp_vendor_efi_path
+# reads the first line of. Vendor-major ranked the candidates only within one
+# directory and then picked the directory by glob collation, which made the
+# Secure Boot reasoning above false in exactly the case it is written for: with
+# EFI/arch/grubx64.efi and EFI/fedora/shimx64.efi present, "arch" sorts first
+# and the unbootable-under-SB one won.
+#
+# \EFI\BOOT is excluded from the vendor walk and then emitted last, on its own
+# terms. It is the firmware's fallback path rather than somebody's vendor
+# directory -- esp_dir_inventory draws the same line -- but it is still a
+# loader, and on a shared ESP it is the one an adopted neighbour is most likely
+# to be booting from: the neighbour whose menu row phase 6 exists to add.
+# Ranking it last keeps esp_vendor_efi_path's answer what it has always been,
+# a vendor directory whenever there is one.
+esp_loader_paths() {
+    local mnt=${1%/} efi dir name cand found any=false
     # Local rather than a file-scope global: it is one function's detail, and an
     # unprefixed mutable global is one assignment away from being changed by
     # something that has no business knowing about it.
     local -a candidates=(shimx64.efi grubx64.efi systemd-bootx64.efi Boot/bootmgfw.efi bootmgfw.efi)
+    # Which vendor directories already have a row. The glob below yields each
+    # directory exactly once, so the directory name is a unique key on its own;
+    # what this is for is the OUTER loop, which walks the same directories again
+    # for every candidate and would otherwise emit shim and grub separately.
+    local -A represented=()
     if efi=$(_esp_resolve "$mnt" EFI d); then
         for cand in "${candidates[@]}"; do
             for dir in "$efi"/*/; do
                 [[ -d "$dir" ]] || continue
                 name=${dir%/}; name=${name##*/}
                 [[ "${name^^}" == "BOOT" ]] && continue
+                [[ -n "${represented[$name]:-}" ]] && continue
                 found=$(_esp_resolve "${dir%/}" "$cand" f) || continue
+                represented[$name]=1
                 printf '%s\n' "${found#"$mnt"}"
-                return 0
+                any=true
             done
         done
     fi
-    found=$(esp_fallback_binary "$mnt") || return 1
-    printf '%s\n' "${found#"$mnt"}"
+    if found=$(esp_fallback_binary "$mnt"); then
+        printf '%s\n' "${found#"$mnt"}"
+        any=true
+    fi
+    [[ "$any" == true ]]
+}
+
+# esp_vendor_efi_path <mountpoint> -> the one EFI path to chainload for this
+# ESP: esp_loader_paths' first line, or 1 when it found nothing.
+#
+# A vendor directory is preferred over \EFI\BOOT: the fallback path is whatever
+# was installed last and can be replaced by a Windows update, while
+# \EFI\<VENDOR>\grubx64.efi belongs to one install. The first draft hardcoded
+# the fallback path, which was right only for the one machine this was written
+# on -- any normally-installed neighbour lives in a vendor directory.
+#
+# Which vendor wins among equally-ranked candidates is collation order, and
+# that genuinely is arbitrary rather than wrong -- both are a chainload target
+# for this ESP, and neither is more correct than the other. Callers that need
+# every loader rather than one, phase 6's reverse half above all, call
+# esp_loader_paths directly; this one stays singular because esp_probe's
+# `efipath` field feeds `read -r key value` consumers that cannot hold a list.
+esp_vendor_efi_path() {
+    local mnt=${1%/} raw
+    # Not `| head -1`: head closes the pipe on the first line and the write
+    # that follows takes SIGPIPE, so the exit status stops being
+    # esp_loader_paths'. Read it whole and cut here.
+    raw=$(esp_loader_paths "$mnt") || return 1
+    printf '%s\n' "${raw%%$'\n'*}"
 }
 
 # esp_has_own_grub <mountpoint> -- true if this ESP already hosts a GRUB
@@ -869,8 +908,52 @@ fs_uuid_for_partuuid() {
     return 1
 }
 
+# esp_mountpoint <dev> -> where <dev> is mounted right now, or 1 if it is not
+# mounted anywhere this can read.
+#
+# Exists so that this install's OWN ESP can be walked without mounting it a
+# second time: by the time phase 6 runs it is already mounted read-write under
+# /mnt, and esp_probe's read-only mount of a filesystem we are still writing to
+# would read metadata in flux.
+#
+# A device that is not mounted is not an error and says nothing on stderr --
+# under --dry-run nothing was ever mounted, and that is the ordinary case. An
+# lsblk that failed IS reported, because "not mounted" and "cannot tell" would
+# otherwise be the same silent answer.
+#
+# lsblk rather than the `findmnt --source` linux_installs uses, and only for
+# that reason: findmnt exits 1 both when nothing is mounted and when it broke,
+# so the distinction above cannot be drawn from it. Every other device fact in
+# this file already comes from lsblk.
+#
+# The -d test is not decoration: lsblk prints "[SWAP]" in this column for a
+# swap partition, which is not a path, and this result is walked as one.
+esp_mountpoint() {
+    local dev=$1 raw line
+    raw=$(lsblk -pnro MOUNTPOINT -- "$dev") || {
+        error "esp_mountpoint: lsblk failed; cannot tell where ${dev} is mounted"
+        return 1
+    }
+    while IFS= read -r line; do
+        [[ -n "$line" && -d "$line" ]] || continue
+        printf '%s\n' "$line"
+        return 0
+    done <<< "$raw"
+    return 1
+}
+
 # esp_probe <dev> -- mount an ESP read-only and emit its inventory, plus
-# "kind <x>", "owngrub yes|no" and "efipath <p>".
+# "kind <x>", "owngrub yes|no" and one "efipath <p>" line per bootloader found
+# on it.
+#
+# One line per loader, not one per ESP: a shared ESP carries our own
+# \EFI\<ID>\grubx64.efi next to the neighbour's, and phase 6's reverse half
+# excludes ours by exact path. With a single row it was ours that came back,
+# the exclusion discarded it, and the neighbour sharing the ESP was never
+# offered -- measured on the first end-to-end VM install. Consumers reading a
+# single value out of this record must therefore select the line they want;
+# esp_bootloader_reason tests only that some efipath line is present, which is
+# still exactly what it means to ask.
 #
 # The filesystem type is read from the signature before anything is mounted,
 # exactly as part_probe_os does. An ESP is selected by GPT type GUID, and
@@ -890,7 +973,7 @@ fs_uuid_for_partuuid() {
 # failed to look at must not put the operator one keystroke from overwriting a
 # bootloader.
 esp_probe() {
-    local dev=$1 tmp fstype inv kind owngrub path
+    local dev=$1 tmp fstype inv kind owngrub paths path
     fstype=$(lsblk -dno FSTYPE "$dev" 2>/dev/null) || fstype=""
     fstype=${fstype//[[:space:]]/}
     case "$fstype" in
@@ -916,13 +999,19 @@ esp_probe() {
         inv=$(esp_dir_inventory "$tmp")
         kind=$(esp_fallback_kind "$tmp")
         if esp_has_own_grub "$tmp"; then owngrub=yes; else owngrub=no; fi
-        path=$(esp_vendor_efi_path "$tmp") || path=""
+        # Collected while the ESP is still mounted; printed after the umount,
+        # like every other field here.
+        paths=$(esp_loader_paths "$tmp") || paths=""
         umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
         rmdir "$tmp" 2>/dev/null || true
         printf '%s\n' "$inv"
         printf 'kind %s\n' "$kind"
         printf 'owngrub %s\n' "$owngrub"
-        [[ -n "$path" ]] && printf 'efipath %s\n' "$path"
+        if [[ -n "$paths" ]]; then
+            while IFS= read -r path; do
+                printf 'efipath %s\n' "$path"
+            done <<< "$paths"
+        fi
         return 0
     fi
     rmdir "$tmp" 2>/dev/null || true
@@ -1460,14 +1549,18 @@ neighbour_marker_id() {
 # Two routes, because neither one sees everything:
 #
 #   NVRAM     every loader the firmware holds an entry for. Needs neither root
-#             nor a mount, carries the firmware's own label -- a far better
-#             menu row than anything this can synthesise -- and is the only
-#             route that reaches a neighbour sharing OUR ESP, which the scan
-#             below skips wholesale.
-#   ESP scan  every other ESP on the machine, whether or not the firmware still
-#             has an entry for it. A UEFI setup menu can clear NVRAM, and an
-#             installer that then found nothing would leave the neighbour off
-#             the menu it is here to build.
+#             nor a mount, and carries the firmware's own label -- a far better
+#             menu row than anything this can synthesise.
+#   ESP scan  every ESP on the machine, whether or not the firmware still has
+#             an entry for it. A UEFI setup menu can clear NVRAM, and a
+#             neighbour installed at \EFI\BOOT\BOOTX64.EFI may never have had
+#             an entry at all: the firmware boots that path without one, and
+#             `grub-install --removable` deliberately writes no NVRAM (see
+#             lib/chroot.sh). Some firmwares synthesise a "UEFI OS" row for it
+#             anyway -- the operator's own machine has one -- and the VM the
+#             shared-ESP defect was found on did not. With the scan skipping
+#             our own ESP, that neighbour reached neither route and the new
+#             install's menu listed nothing but itself.
 #
 # They overlap, and on the machine this was written for they overlap on
 # everything: `Boot0005 UEFI OS` is /EFI/BOOT/BOOTX64.EFI on nvme1n1p5, which
@@ -1482,15 +1575,15 @@ neighbour_marker_id() {
 # keeps the firmware's label.
 #
 # Our own install is excluded by seeding the seen-set with (<our_esp_fs_uuid>,
-# <our_efi_path>) for each path given, and never by dropping our ESP's UUID: on
-# a shared ESP the neighbour this exists for has exactly the filesystem uuid we
-# do. The ESP scan skips our own ESP by device path on top of that, for two
-# reasons that have nothing to do with which loader is whose: by the time this
-# runs, that partition is mounted read-write at /mnt/boot and a second
-# read-only mount of it reads metadata we are still changing; and under
-# --dry-run it was never formatted, so esp_probe would report it unreadable.
-# A neighbour sharing that ESP is reached through NVRAM instead, which is the
-# route that needs no mount at all.
+# <our_efi_path>) for each path given, and never by dropping our ESP's UUID or
+# its device: on a shared ESP the neighbour this exists for has exactly the
+# filesystem uuid we do, and sits on the very partition we just installed to.
+# What our own ESP is spared is the *mount* -- by the time this runs it is
+# mounted read-write under /mnt, and esp_probe's second read-only mount would
+# read metadata still in flux -- so it is walked at that mountpoint instead,
+# through esp_mountpoint. Under --dry-run it was never formatted or mounted, so
+# that walk finds nothing and this route contributes nothing, which is correct
+# for a rehearsal.
 #
 # Fails rather than returning fewer rows when either route's tool fails -- the
 # rule this file's inventory banner states, and it matters here because "no
@@ -1511,7 +1604,7 @@ neighbour_loaders() {
     shift 2
     local -A seen=()
     local -a rows=()
-    local raw line num partuuid path label uuid dev size probe key p
+    local raw line num partuuid path label uuid dev size probe key p mnt found
 
     for p in "$@"; do
         seen["${our_uuid,,}"$'\t'"${p,,}"]=1
@@ -1551,32 +1644,49 @@ neighbour_loaders() {
         # shellcheck disable=SC2034  # size is read for field symmetry with esp_list
         read -r dev uuid size <<< "$line"
         [[ -n "$dev" ]] || continue
-        [[ "$dev" == "$our_dev" ]] && continue
         # parse_esp_list emits a literal "-" for an ESP that has never been
         # formatted. It is not a uuid, and an unformatted ESP has nothing on it
         # to chainload.
         [[ "$uuid" == "-" ]] && continue
-        probe=$(esp_probe "$dev") || {
-            error "neighbour_loaders: could not probe ${dev}; skipping it"
-            continue
-        }
-        path=$(sed -n 's|^efipath ||p' <<< "$probe")
-        [[ -n "$path" ]] || continue
-        # esp_vendor_efi_path does not validate what it returns, and a vendor
-        # directory called "My Vendor" is legal on FAT. Emitted as-is it puts a
-        # space in the middle of a record whose LAST field is the only one
-        # allowed to hold one, so every consumer reads the path as "/EFI/My" --
-        # which chain_entry accepts and which chainloads nothing.
-        # efi_path_to_slashes applies chain_entry's own rule and says so on
-        # stderr, so the refusal happens here rather than at the boot menu.
-        path=$(efi_path_to_slashes "$path") || continue
-        key="${uuid,,}"$'\t'"${path,,}"
-        [[ -n "${seen[$key]:-}" ]] && continue
-        seen[$key]=1
-        # The label names the filesystem uuid rather than the device: this
-        # string becomes a permanent menu row, and a device name is not the
-        # same partition on the next boot. The NVRAM route above is where the
-        # readable names come from.
-        printf '%s %s Existing bootloader on %s\n' "$uuid" "$path" "$uuid"
+        if [[ "$dev" == "$our_dev" ]]; then
+            # Our own ESP is walked where it is already mounted and is never
+            # handed to esp_probe: that partition is mounted read-write under
+            # /mnt by now, and a second read-only mount reads metadata we are
+            # still changing. Not mounted -- which is every --dry-run -- means
+            # no rows from here, exactly as before.
+            mnt=$(esp_mountpoint "$dev") || continue
+            found=$(esp_loader_paths "$mnt") || continue
+        else
+            probe=$(esp_probe "$dev") || {
+                error "neighbour_loaders: could not probe ${dev}; skipping it"
+                continue
+            }
+            found=$(sed -n 's|^efipath ||p' <<< "$probe")
+        fi
+        [[ -n "$found" ]] || continue
+        # Every loader on the ESP, not just the first: on a shared ESP the
+        # first can be our own \EFI\<ID>\grubx64.efi -- which vendor
+        # directory wins is collation order -- and when it is, the seen-set
+        # drops it as ours and the neighbour behind it is never offered.
+        while IFS= read -r path; do
+            [[ -n "$path" ]] || continue
+            # esp_loader_paths does not validate what it returns, and a vendor
+            # directory called "My Vendor" is legal on FAT. Emitted as-is it
+            # puts a space in the middle of a record whose LAST field is the
+            # only one allowed to hold one, so every consumer reads the path as
+            # "/EFI/My" -- which chain_entry accepts and which chainloads
+            # nothing. efi_path_to_slashes applies chain_entry's own rule and
+            # says so on stderr, so the refusal happens here rather than at the
+            # boot menu.
+            path=$(efi_path_to_slashes "$path") || continue
+            key="${uuid,,}"$'\t'"${path,,}"
+            [[ -n "${seen[$key]:-}" ]] && continue
+            seen[$key]=1
+            # The label names the filesystem uuid rather than the device: this
+            # string becomes a permanent menu row, and a device name is not the
+            # same partition on the next boot. The NVRAM route above is where
+            # the readable names come from.
+            printf '%s %s Existing bootloader on %s\n' "$uuid" "$path" "$uuid"
+        done <<< "$found"
     done
 }
