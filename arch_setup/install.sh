@@ -550,10 +550,102 @@ phase_disk() {
     phase_disk_finish
 }
 
+# esp_bootloader_reason <esp_partition> -> a phrase naming what is on it, and
+# status 0, when this ESP cannot be shown to be free of a bootloader.
+#
+# A predicate with a reason attached, like esp_probe: it is called in a
+# conditional and its stdout is the operator-facing half of the refusal.
+#
+# The unformatted case is separated out FIRST, and by filesystem signature, for
+# a reason esp_probe cannot help with: it reports both "never formatted" and
+# "formatted but I could not mount it" as `kind unreadable`, and only the
+# second one leaves a bootloader unaccounted for. Refusing both would make a
+# disk this installer itself half-carved impossible to reuse; accepting both is
+# the exact fail-open found on the removable-policy path, one keystroke from
+# destroying another operating system's boot partition.
+esp_bootloader_reason() {
+    local dev=$1 fstype probe
+    fstype=$(lsblk -dno FSTYPE -- "$dev" 2>/dev/null) || fstype=""
+    fstype=${fstype//[[:space:]]/}
+    # Nothing has ever been written to it, so nothing can be booting from it.
+    [[ -n "$fstype" ]] || return 1
+    if ! probe=$(esp_probe "$dev"); then
+        printf 'could not be probed at all\n'
+        return 0
+    fi
+    # Read positively throughout. `fallback unknown` is esp_probe's answer for
+    # an ESP it could not read, and `grep -q 'fallback yes'` would collapse it
+    # into "no".
+    case $'\n'"$probe"$'\n' in
+        *$'\n'"kind unreadable"$'\n'*)
+            printf 'holds a %s filesystem this installer could not read\n' "$fstype"; return 0 ;;
+        *$'\n'"fallback yes"$'\n'*)
+            printf 'carries the removable fallback loader \\EFI\\BOOT\\BOOTX64.EFI\n'; return 0 ;;
+        *$'\n'"owngrub yes"$'\n'*)
+            printf 'carries a GRUB installation\n'; return 0 ;;
+        *$'\n'"efipath "*)
+            printf 'carries a vendor bootloader directory\n'; return 0 ;;
+    esac
+    return 1
+}
+
+# whole_disk_refusals <disk> -- die() rather than warn on the two conditions
+# that make wiping a partition table something other than a judgement call: a
+# partition on it is in use by a running system, or one of them is an EFI
+# System Partition some other operating system boots from. Neither is a
+# trade-off the operator should be invited to weigh at a confirmation prompt.
+#
+# The inventories both checks read are also die-on-failure here, unlike the
+# same calls in custom mode: there they inform a choice among partitions, and
+# here they are the only thing standing between a typed YES and --zap-all.
+#
+# Runs before the Type-YES gate and before any inventory is printed, so a
+# refused disk is refused without the operator being walked through a screen
+# describing a wipe that is not going to happen.
+whole_disk_refusals() {
+    local disk=$1 raw dev kind reason
+    # part_in_use is a predicate: a bare call under `set -e` aborts on its
+    # ordinary "not in use" result, which is every partition on a disk that is
+    # fine to wipe. The disk node itself is checked too -- a filesystem can be
+    # mounted straight off it.
+    if part_in_use "$disk"; then
+        die "${disk} is in use by this running system -- refusing to wipe it"
+    fi
+    raw=$(lsblk -pnro PATH,TYPE -- "$disk") \
+        || die "cannot read the partitions on ${disk} -- refusing to wipe a disk whose contents are unknown"
+    while read -r dev kind; do
+        [[ "$kind" == "part" ]] || continue
+        if part_in_use "$dev"; then
+            die "${dev} is in use -- mounted, in use as swap, or an open device-mapper member. Refusing to wipe ${disk}."
+        fi
+    done <<< "$raw"
+
+    # esp_list covers the whole machine; only the ones on this disk are being
+    # destroyed. Checked in a conditional because it returns non-zero when
+    # lsblk fails, which under `set -e` would abort the installer.
+    if ! raw=$(esp_list); then
+        die "cannot enumerate this machine's EFI System Partitions -- refusing to wipe ${disk} without knowing which of them are on it"
+    fi
+    while read -r dev _ _; do
+        [[ -n "$dev" ]] || continue
+        # Which disk an ESP is on comes from lsblk's PKNAME, not from the
+        # shape of its name: /dev/nvme0n1p1 and /dev/sda1 separate the number
+        # from the disk differently, and the same prefix test that gets
+        # /dev/sda1 right pairs /dev/nvme0n1p1 with a disk called /dev/nvme0n1p
+        # -- so every ESP on an NVMe target would be skipped, and this check
+        # with it. nvram_register_removable reads PKNAME for the same reason.
+        [[ "$(lsblk -pnro PKNAME -- "$dev" 2>/dev/null)" == "$disk" ]] || continue
+        if reason=$(esp_bootloader_reason "$dev"); then
+            die "${dev} is an EFI System Partition that ${reason} -- refusing to wipe another operating system's boot partition. Use custom mode to install alongside it."
+        fi
+    done <<< "$raw"
+}
+
 # Whole-disk mode: the one path that destroys a partition table.
 phase_disk_whole() {
     info "Available disks:"
-    local disks disk esp_size confirm
+    local disks disk esp_size confirm untouched_raw ledger_raw ledger_dev ledger_kind
+    local -a ledger_fmt=() ledger_pres=() ledger_untouched=() fmt_devs=()
     # -e 7,11 excludes loop and optical devices by major number, which is what
     # was actually meant. Filtering the formatted line through `grep -v` instead
     # matched the MODEL column too, so a disk whose model contained "rom"
@@ -571,6 +663,24 @@ phase_disk_whole() {
         valid_whole_disk "$disk" && break
         disk_prompt_complaint "$disk"
     done
+
+    whole_disk_refusals "$disk"
+
+    # The target's real contents. `lsblk -dpno NAME,SIZE,MODEL` above lists
+    # disks only -- no partitions, no filesystems, no labels, no mountpoints --
+    # and that one line used to be the entire inventory in front of a
+    # Type-YES gate that destroys everything on the disk. Custom mode, which
+    # destroys far less, shows all of this and more.
+    echo ""
+    info "Contents of ${disk} -- all of this is destroyed:"
+    lsblk -pno NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT -- "$disk"
+    echo ""
+    info "Firmware boot entries already registered:"
+    # Shown, never acted on, which is why this is allowed to fail: a machine
+    # where efibootmgr cannot run is still one this can install onto.
+    nvram_entries | sed 's/^/    /' || true
+    echo ""
+
     while true; do
         esp_size=$(ask "EFI partition size" "$DEFAULT_ESP_SIZE")
         valid_esp_size "$esp_size" && break
@@ -601,6 +711,31 @@ phase_disk_whole() {
     plan_validate || die "refusing to act on a plan that cannot be executed safely"
     info "Partition plan:"
     plan_render
+
+    # The same three-way ledger custom mode shows, so the two modes' Type-YES
+    # gates are read against the same evidence. Nothing on this path is
+    # preserved: --zap-all destroys the table, so every partition on the target
+    # is in the formatted column and the preserved column is empty by
+    # construction, not by omission.
+    ledger_fmt=("${disk} (entire disk -- the partition table is destroyed)")
+    # Captured and its status checked, not read from `<<< "$(lsblk ...)"`: a
+    # command substitution inside a here-string swallows the producer's
+    # failure, and an empty formatted column is exactly the wrong thing to
+    # print on the screen whose job is to say what is destroyed.
+    ledger_raw=$(lsblk -pnro PATH,TYPE -- "$disk") \
+        || die "cannot read the partitions on ${disk} -- refusing to describe a wipe from an inventory that failed"
+    while read -r ledger_dev ledger_kind; do
+        [[ "$ledger_kind" == "part" ]] || continue
+        ledger_fmt+=("$ledger_dev")
+        fmt_devs+=("$ledger_dev")
+    done <<< "$ledger_raw"
+    # fmt_devs, not ledger_fmt: untouched_devices matches by whole word and
+    # ledger_fmt's first entry is prose that names the disk.
+    untouched_raw=$(untouched_devices fmt_devs ledger_pres) \
+        || die "cannot list the partitions this plan leaves alone"
+    # shellcheck disable=SC2034  # passed to format_ledger by name, not by value
+    if [[ -n "$untouched_raw" ]]; then mapfile -t ledger_untouched <<< "$untouched_raw"; fi
+    format_ledger ledger_fmt ledger_pres ledger_untouched
     echo ""
     # A bare `read`, not ask_yes_no: this is the gate in front of sgdisk
     # --zap-all, and a bare read fails closed on EOF, leaving `confirm` empty

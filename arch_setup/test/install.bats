@@ -1882,3 +1882,158 @@ run_locale() {
     [[ "$output" != *"NVRAM_READ"* ]]
     [[ "$output" == *"dry-run"* ]]
 }
+
+# --- phase 3 whole-disk mode ------------------------------------------------
+#
+# The same harness shape as the custom-mode cases above: DRY_RUN=true, every
+# host probe a function, and the devices named do not exist. What these cases
+# are about is what the operator is shown, and what the mode refuses outright,
+# BEFORE the Type-YES gate in front of `sgdisk --zap-all`.
+
+whole_stubs() {
+    custom_stubs
+cat <<'STUBS'
+        # Narrower than custom_stubs' lsblk: whole-disk mode asks for one
+        # disk's partitions, and the shared stub answers every PATH,TYPE query
+        # with the whole machine -- which would put another disk's partitions
+        # in this disk's "will be formatted" list.
+        __esp_unformatted=""
+        __lsblk_all() { printf '/dev/sdz disk\n/dev/sdz1 part\n/dev/sdz2 part\n/dev/sdy disk\n/dev/sdy1 part\n/dev/sdy2 part\n/dev/sdy3 part\n'; }
+        lsblk() {
+            case "$*" in
+                *PATH,TYPE*/dev/sdz) printf '/dev/sdz disk\n/dev/sdz1 part\n/dev/sdz2 part\n' ;;
+                *PATH,TYPE*)         __lsblk_all ;;
+                # Per device, not one fixed answer: whole-disk mode asks
+                # which disk each ESP is on, and a stub that says /dev/sdy for
+                # everything would put every ESP on the other disk.
+                *PKNAME*)
+                    case "${*: -1}" in
+                        /dev/sdz1|/dev/sdz2) printf '/dev/sdz\n' ;;
+                        *)                   printf '/dev/sdy\n' ;;
+                    esac ;;
+                *"-dno FSTYPE"*)
+                    # A device named in __esp_unformatted reports the empty
+                    # FSTYPE real lsblk gives a partition that was carved and
+                    # never formatted. A case sets it to reach that branch.
+                    case " ${__esp_unformatted} " in
+                        *" ${*: -1} "*) printf '\n'; return 0 ;;
+                    esac
+                    case "${*: -1}" in
+                        /dev/sdz1) printf 'vfat\n' ;;
+                        *)         printf 'ext4\n' ;;
+                    esac ;;
+                *"-dno TYPE"*)
+                    case "${*: -1}" in
+                        /dev/sdz|/dev/sdy) printf 'disk\n' ;;
+                        /dev/sdz1|/dev/sdz2|/dev/sdy1|/dev/sdy2|/dev/sdy3) printf 'part\n' ;;
+                        *) return 32 ;;
+                    esac ;;
+                *NAME,SIZE,FSTYPE*)  printf '/dev/sdz    100G\n/dev/sdz1   100M vfat  ESP    /boot\n/dev/sdz2  99.9G ext4  root   /\n' ;;
+                *)                   printf '/dev/sdz 100G fake\n' ;;
+            esac
+        }
+STUBS
+}
+
+run_whole() {
+    local answers=$1 extra=${2:-}
+    run timeout 20 env DRY_RUN=true bash -c "
+        source '${INSTALL_SH}'
+$(whole_stubs)
+${extra}
+        phase_disk_whole
+    " <<< "$answers"
+}
+
+# The control the three cases below depend on: the same harness, a disk nothing
+# objects to, and the mode gets all the way to the one command that destroys a
+# partition table. Without it a harness that had stopped running at all would
+# report every refusal as a pass.
+@test "whole-disk mode still wipes a disk that is genuinely free" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+}
+
+# The live root's disk. Whole-disk mode used to show one line --
+# "/dev/sdz 100G <model>" -- and then take YES for it.
+@test "whole-disk mode refuses a disk carrying a mounted partition" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')" '
+        part_in_use() { [[ "$1" == /dev/sdz2 ]]; }'
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"/dev/sdz2 is in use"* ]]
+    [[ "$output" != *"sgdisk --zap-all"* ]]
+}
+
+@test "whole-disk mode refuses a disk whose ESP carries a bootloader" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')" '
+        esp_list()  { printf "/dev/sdz1 AAAA-BBBB 104857600\n"; }
+        esp_probe() { printf "fallback yes\nkind grub\nowngrub no\n"; }'
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"/dev/sdz1"*"boot partition"* ]]
+    [[ "$output" != *"sgdisk --zap-all"* ]]
+}
+
+# An ESP with a GRUB directory but no fallback binary is still another system's
+# boot partition.
+@test "whole-disk mode refuses an ESP carrying a vendor bootloader directory" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')" '
+        esp_list()  { printf "/dev/sdz1 AAAA-BBBB 104857600\n"; }
+        esp_probe() { printf "fallback no\nkind none\nowngrub no\nefipath /EFI/Microsoft/Boot/bootmgfw.efi\n"; }'
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"/dev/sdz1"*"boot partition"* ]]
+    [[ "$output" != *"sgdisk --zap-all"* ]]
+}
+
+# An ESP that is formatted but could not be read cannot rule a bootloader out,
+# and this is the gate in front of --zap-all. esp_probe reports that as
+# "kind unreadable"; collapsing it into "nothing there" is the exact fail-open
+# that was found and fixed on the removable-policy path.
+@test "whole-disk mode refuses an ESP it could not read" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')" '
+        esp_list()  { printf "/dev/sdz1 AAAA-BBBB 104857600\n"; }
+        esp_probe() { printf "fallback unknown\nkind unreadable\n"; }'
+    [ "$status" -ne 0 ]
+    [ "$status" -ne 124 ]
+    [[ "$output" == *"/dev/sdz1"* ]]
+    [[ "$output" != *"sgdisk --zap-all"* ]]
+}
+
+# A partition carrying the ESP type GUID that was never formatted holds no
+# bootloader, and refusing it would leave an operator with no way to reuse a
+# disk this installer itself half-carved.
+@test "whole-disk mode does not refuse an ESP-typed partition that was never formatted" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')" '
+        __esp_unformatted=/dev/sdz1
+        esp_list()  { printf "/dev/sdz1 - 104857600\n"; }
+        esp_probe() { echo "ESP_PROBE_RAN"; printf "fallback unknown\nkind unreadable\n"; }'
+    [ "$status" -eq 0 ]
+    # Not probed at all: the filesystem signature is empty, so there is nothing
+    # to mount and nothing a probe could have found.
+    [[ "$output" != *"ESP_PROBE_RAN"* ]]
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+}
+
+# Custom mode shows the partition inventory, the firmware's boot entries and a
+# three-way ledger before its identical gate. Whole-disk mode is the one that
+# destroys a partition table, and it showed none of it.
+@test "whole-disk mode shows the disk's contents and a ledger before the gate" {
+    run_whole "$(printf '/dev/sdz\n2G\nYES\n')"
+    [ "$status" -eq 0 ]
+    # The target's real contents, not just NAME/SIZE/MODEL.
+    [[ "$output" == *"/dev/sdz2  99.9G ext4  root   /"* ]]
+    [[ "$output" == *"0001 Windows Boot Manager"* ]]
+    [[ "$output" == *"WILL BE FORMATTED"* ]]
+    [[ "$output" == *"NOT TOUCHED"* ]]
+    # Every partition on the target is destroyed; the other disk's are not.
+    [[ "$output" == *"/dev/sdz1"* ]]
+    [[ "$output" == *"/dev/sdy3"* ]]
+    # ...and all of it before the one command that destroys the table.
+    local before after
+    before=$(printf '%s\n' "$output" | grep -n 'WILL BE FORMATTED' | head -1 | cut -d: -f1)
+    after=$(printf '%s\n' "$output" | grep -n 'zap-all' | head -1 | cut -d: -f1)
+    [ -n "$before" ] && [ -n "$after" ] && [ "$before" -lt "$after" ]
+}
