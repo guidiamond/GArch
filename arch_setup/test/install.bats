@@ -691,9 +691,10 @@ cat <<'STUBS'
         # `sgdisk -p` is next_part_number reading the table and is the one
         # sgdisk that is not a write; it is failed silently rather than
         # announced. next_part_number suppresses stderr and cannot tell an
-        # unreadable disk from an empty one, so it answers 1 -- which is why
-        # every carve assertion below reads "sgdisk -n 1:", on a device that
-        # does not exist. Any OTHER sgdisk here is a write reaching a tool.
+        # unreadable disk from an empty one, so it answers 1 for the first
+        # carve entry on this nonexistent device -- and 2 for the second, from
+        # plan_execute's dry-run reservation list. Any OTHER sgdisk here is a
+        # write reaching a tool.
         sgdisk() { [[ "$1" == "-p" ]] && return 1; printf 'DESTRUCTIVE_TOOL_RAN sgdisk %s\n' "$*"; return 1; }
         partprobe()   { printf 'DESTRUCTIVE_TOOL_RAN partprobe %s\n' "$*"; return 1; }
         mount()       { printf 'DESTRUCTIVE_TOOL_RAN mount %s\n' "$*"; return 1; }
@@ -740,7 +741,9 @@ ${extra}
     # The carved sectors, resolved before anything is written: 2G from the
     # gap's aligned start, then the rest.
     [[ "$output" == *"sgdisk -n 1:2048:4196351"* ]]
-    [[ "$output" == *"sgdisk -n 1:4196352:20973567"* ]]
+    # 2, not 1: under --dry-run nothing is created, so the number for the
+    # second carve comes from the reservation list plan_execute keeps.
+    [[ "$output" == *"sgdisk -n 2:4196352:20973567"* ]]
     [[ "$output" == *"STATE wipe=false format_esp=true removable=false id=ARCH_WORK uuid=0000-0000 reuse=none"* ]]
 }
 

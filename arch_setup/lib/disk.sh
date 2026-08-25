@@ -252,7 +252,12 @@ lowest_free_number() {
     done
 }
 
-# next_part_number <disk> -- lowest_free_number against a real partition table.
+# next_part_number <disk> [reserved]... -- lowest_free_number against a real
+# partition table, plus any numbers the caller already knows are spoken for.
+#
+# The reserved list exists for plan_execute's --dry-run path, where no sgdisk
+# ever runs and the table therefore never grows; see the comment there. With no
+# reserved arguments this is exactly what it always was.
 #
 # Stderr is suppressed the same way disk_free_gaps suppresses parted's, so
 # this function cannot tell "disk has no partitions" from "could not read the
@@ -265,9 +270,10 @@ lowest_free_number() {
 # trust a returned "1" to mean an empty table.
 next_part_number() {
     local disk=$1
+    shift
     local -a used=()
     mapfile -t used < <(sgdisk -p "$disk" 2>/dev/null | parse_part_numbers)
-    lowest_free_number "${used[@]}"
+    lowest_free_number ${used[@]+"${used[@]}"} "$@"
 }
 
 # True when the partition is mounted, in use as swap, or open as a device
@@ -648,10 +654,13 @@ plan_render() {
 plan_execute() {
     local disk entry e_disk e_role e_type e_label e_size e_src e_start e_end
     local seq_n part_n partdev size_flag touched
+    local -a dry_reserved=()
     plan_validate || return 1
     while read -r disk; do
         [[ -z "$disk" ]] && continue
         touched=false
+        # Per disk, never across the plan: partition numbers are per table.
+        dry_reserved=()
         # Counts the sequential entries only, and is never seeded from
         # next_part_number. One counter shared with the carve branch below let
         # the sequential branch resume from a table-derived number, so a mixed
@@ -678,13 +687,21 @@ plan_execute() {
                 # it -- GRUB finds the ESP by contents, not by type code.
                 partdev=$e_src
             elif [[ -n "$e_start" ]]; then
-                # Under --dry-run nothing is created, so a second carve entry on
-                # the same disk prints the same partition number as the first.
-                # Not a bug to fix by faking a counter: the sectors are what the
-                # rehearsal is for, and a faked number would be wrong on any
-                # disk with a hole in its numbering. On a real run sgdisk has
-                # already written the GPT, so the next call reads the new one.
-                part_n=$(next_part_number "$disk") || return 1
+                # On a real run sgdisk has already written the GPT by the time
+                # the next entry asks, so the live table alone answers and
+                # dry_reserved is empty -- it is appended to nowhere else, and
+                # only under --dry-run. Anything else here would double-count:
+                # the table would already hold the number the list also names,
+                # and the second carve would skip to 5 where a real run uses 4.
+                #
+                # Under --dry-run nothing is created and the table never grows,
+                # so without the list every carve entry on a disk got the same
+                # number -- the rehearsal printed `sgdisk -n 3:` twice, then
+                # mkfs.fat and cryptsetup luksFormat both on /dev/nvme0n1p3.
+                # The numbers still come from the live table; the list only
+                # stands in for the writes a rehearsal withholds.
+                part_n=$(next_part_number "$disk" ${dry_reserved[@]+"${dry_reserved[@]}"}) || return 1
+                [[ "$DRY_RUN" == true ]] && dry_reserved+=("$part_n")
                 run_cmd sgdisk -n "${part_n}:${e_start}:${e_end}" -t "${part_n}:${e_type}" -c "${part_n}:${e_label}" "$disk" || return 1
                 partdev=$(part_device "$disk" "$part_n")
                 touched=true

@@ -823,3 +823,138 @@ MOUNT
     [[ "$output" == *"/dev/nvme0n1p2"* ]]
     [[ "$output" == *"WILL BE WIPED"* ]]
 }
+
+# --- carve numbering ---------------------------------------------------------
+#
+# Under --dry-run nothing is created, so next_part_number read the same live
+# table for every carve entry on a disk and answered the same number twice: the
+# rehearsal printed `sgdisk -n 3:...` for both the ESP and the root, and then
+# mkfs.fat and cryptsetup luksFormat both against /dev/nvme0n1p3. Correct on a
+# real run, but it makes a rehearsal transcript useless for checking device
+# names.
+#
+# The whole hazard of fixing it is double-counting on a REAL run, where sgdisk
+# has already written each partition and the live table therefore already
+# reflects it. The two cases below are a matched pair: same plan, same
+# assertions about which numbers come out, one with a table that grows as
+# partitions are created and one with a table that never does.
+
+# sgdisk_table_stub <dir> <initial numbers...>
+#
+# A stub sgdisk that keeps a partition table in a file: `-p` prints it in the
+# shape parse_part_numbers reads, and `-n N:start:end` appends N to it, which
+# is what the real tool's effect on the table amounts to here. Anything not
+# naming /dev/sdz exits 99, so a stub that stopped covering a call site cannot
+# quietly reach the real tool.
+sgdisk_table_stub() {
+    local dir=$1; shift
+    SGDISK_TABLE="${BATS_TEST_TMPDIR}/table"
+    mkdir -p "$dir"
+    printf '%s\n' "$@" > "$SGDISK_TABLE"
+    cat > "${dir}/sgdisk" <<SG
+#!/bin/bash
+[[ "\$*" == *"/dev/sdz"* ]] || { echo "sgdisk stub: refusing \$*" >&2; exit 99; }
+if [[ "\$1" == "-p" ]]; then
+    echo "Number  Start (sector)    End (sector)  Size       Code  Name"
+    while read -r n; do
+        [[ -n "\$n" ]] && echo "   \$n            2048            4096   1.0 MiB     8300  x"
+    done < '${SGDISK_TABLE}'
+    exit 0
+fi
+[[ "\$1" == "-n" ]] && echo "\${2%%:*}" >> '${SGDISK_TABLE}'
+exit 0
+SG
+    printf '#!/bin/bash\nexit 0\n' > "${dir}/partprobe"
+    chmod +x "${dir}/sgdisk" "${dir}/partprobe"
+}
+
+@test "next_part_number skips the numbers its caller has reserved" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    local PATH="${stub}:${PATH}"
+    [ "$(next_part_number /dev/sdz)" = "3" ]
+    [ "$(next_part_number /dev/sdz 3)" = "4" ]
+    [ "$(next_part_number /dev/sdz 3 4)" = "5" ]
+    # A reserved number the table already holds changes nothing.
+    [ "$(next_part_number /dev/sdz 1)" = "3" ]
+}
+
+@test "plan_execute numbers each carved partition once on a real run" {
+    # DRY_RUN=false on purpose, which is why every tool this reaches is stubbed
+    # and the stub refuses any device but /dev/sdz -- which does not exist.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    DRY_RUN=false
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G   new 2048 2099199
+    plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+    local PATH="${stub}:${PATH}"
+    plan_execute
+    # 3 then 4, from the table alone: the reservation list must be empty here,
+    # or the second entry would come out 5 and the real run would leave a hole.
+    [ "$(tr '\n' ' ' < "$SGDISK_TABLE")" = "1 2 3 4 " ]
+    [ "$PART_EFI" = "/dev/sdz3" ]
+    [ "$PART_ROOT_RAW" = "/dev/sdz4" ]
+}
+
+@test "plan_execute numbers a dry run the way that real run would" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz efi  ef00 EFI  1G   new 2048 2099199
+    plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+    local PATH="${stub}:${PATH}"
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sgdisk -n 3:2048:2099199"* ]]
+    [[ "$output" == *"sgdisk -n 4:2099200:9999999"* ]]
+    # Nothing was created, and the table proves it: the numbers above came from
+    # the reservation list, not from a write that leaked through run_cmd.
+    [ "$(tr '\n' ' ' < "$SGDISK_TABLE")" = "1 2 " ]
+}
+
+@test "plan_execute counts reservations per disk, not across the whole plan" {
+    # The reservation list is reset for each disk. Shared across disks, the
+    # first carve on the second disk would be numbered as though the first
+    # disk's partitions were on it.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    # The stub answers for both disks; only /dev/sdz is refused-proofed, so
+    # /dev/sdzz is used as the second disk to stay inside that guard.
+    DRY_RUN=true
+    PLAN_WIPE_DISKS=false
+    plan_add /dev/sdz  efi  ef00 EFI  1G   new 2048 2099199
+    plan_add /dev/sdz  root 8300 Root rest new 2099200 9999999
+    plan_add /dev/sdzz root 8300 Data rest new 2048 9999999
+    local PATH="${stub}:${PATH}"
+    run plan_execute
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sgdisk -n 3:2048:2099199 "* ]]
+    [[ "$output" == *"sgdisk -n 4:2099200:9999999"* ]]
+    # Third partition, first on its own disk: 3 again, not 5.
+    [[ "$output" == *"sgdisk -n 3:2048:9999999"* ]]
+}
+
+# The reservation is appended by `[[ "$DRY_RUN" == true ]] && dry_reserved+=(…)`,
+# and a failing left-hand side of an AND-list is the classic way a line that is
+# green in bats -- which runs with errexit off -- aborts the installer, which
+# does not. The real-run path is the one where that test is false on every
+# entry.
+@test "plan_execute's carve path survives install.sh's set -euo pipefail" {
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    run env "PATH=${stub}:${PATH}" bash -c "set -euo pipefail
+source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+source '${BATS_TEST_DIRNAME}/../lib/disk.sh'
+plan_reset
+PLAN_WIPE_DISKS=false
+DRY_RUN=false
+plan_add /dev/sdz efi  ef00 EFI  1G   new 2048 2099199
+plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
+plan_execute
+echo SURVIVED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *SURVIVED* ]]
+    [ "$(tr '\n' ' ' < "$SGDISK_TABLE")" = "1 2 3 4 " ]
+}
