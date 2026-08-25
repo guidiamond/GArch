@@ -1020,9 +1020,9 @@ linux_installs() {
         # system's own root is the failure mode that rule exists to prevent.
         #
         # --first-only because a btrfs neighbour has one mountpoint per mounted
-        # subvolume. Picking the first has the same limitation as the
-        # ro,nologreplay fallback below: if that mountpoint is not the one
-        # holding the root subvolume, /etc/os-release is absent and the
+        # subvolume. Picking the first carries the same limitation as the bare
+        # ro,nologreplay attempt in try_opts above: if that mountpoint is not
+        # the one holding the root subvolume, /etc/os-release is absent and the
         # candidate is classified as not-Linux rather than as unreadable.
         tmp=""
         existing=$(findmnt --first-only -nro TARGET --source "$dev" 2>/dev/null) || existing=""

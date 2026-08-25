@@ -263,10 +263,11 @@ valid_block_dev() {
 #
 # lsblk -dno TYPE is the distinction: "disk" for a whole disk (nvme namespaces
 # included), "part" for a partition, and "loop"/"crypt"/"raid1"/"lvm" for the
-# rest -- none of which the disk list this prompt follows offers either, since
-# it is built with `lsblk -e 7,11`. Anything but "disk" is refused, and so is a
-# device lsblk could not read: answering "disk" for one would send
-# next_part_number and disk_free_gaps, both of which fail open, at it.
+# rest. Refusing everything but "disk" narrows nothing the operator was offered:
+# both listings these prompts print are `lsblk -e 7,11`, which excludes loop and
+# optical devices already. A device lsblk could not read is refused too --
+# calling it a disk would send next_part_number and disk_free_gaps, both of
+# which fail open, at it.
 valid_whole_disk() {
     local type
     valid_block_dev "$1" || return 1
