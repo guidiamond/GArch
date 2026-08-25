@@ -13,6 +13,11 @@ MISMATCHED_HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard 
 
 setup() {
     source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
+    # lib/disk.sh, in install.sh's own source order, purely for run_cmd: the
+    # host actions below route their writes through it, and an unsourced
+    # run_cmd is not a failure but an unbound command exiting 127 -- which the
+    # status assertions in this file would read as an ordinary refusal.
+    source "${BATS_TEST_DIRNAME}/../lib/disk.sh"
     source "${BATS_TEST_DIRNAME}/../lib/system.sh"
     TMP="$BATS_TEST_TMPDIR"
 }
@@ -547,6 +552,79 @@ stub_pacman() {
 }
 
 @test "rank_mirrors warns instead of failing when reflector is absent" {
+    mkdir -p "$TMP/empty"
+    PATH="$TMP/empty" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not installed"* ]]
+}
+
+# --- refresh_keyring / rank_mirrors under --dry-run -------------------------
+#
+# Both mutate the host: one syncs the pacman database and installs a package,
+# the other overwrites /etc/pacman.d/mirrorlist. On the live ISO those targets
+# are tmpfs; on an installed Arch host -- which is where a rehearsal is run --
+# they change the running system, so `install.sh --dry-run` has to withhold
+# them like every other destructive command.
+#
+# Each of these carries its own control with DRY_RUN off: "the stub recorded
+# nothing" is equally satisfied by a harness that never reached the command at
+# all, so the same call has to produce a record when the gate is open.
+
+@test "refresh_keyring runs no pacman under --dry-run and prints what it would run" {
+    DRY_RUN=true
+    stub_pacman 0 'echo "resolving dependencies..."'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/pacman_args" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"pacman -Sy --noconfirm archlinux-keyring"* ]]
+    # The [dry-run] line is the whole point of the rehearsal, so it must not go
+    # to the temp file the real path redirects pacman into -- nor should that
+    # file be created at all on a path that runs nothing.
+    [ -z "$(find "$TMP" -maxdepth 1 -name 'tmp.*' -print -quit)" ]
+
+    DRY_RUN=false
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    grep -qF -- '-Sy --noconfirm archlinux-keyring' "$TMP/pacman_args"
+}
+
+@test "rank_mirrors runs no reflector under --dry-run and prints what it would run" {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/reflector_args\nexit 0\n' "$TMP" \
+        > "$TMP/bin/reflector"
+    chmod +x "$TMP/bin/reflector"
+
+    DRY_RUN=true
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/reflector_args" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"--save /etc/pacman.d/mirrorlist"* ]]
+
+    DRY_RUN=false
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    grep -qF -- '--save /etc/pacman.d/mirrorlist' "$TMP/reflector_args"
+}
+
+# A rehearsal walks every phase, and phase 1 dies on a non-zero refresh_keyring
+# ("cannot continue -- pacstrap would fail in phase 4"). Nothing was refreshed,
+# but nothing will be pacstrapped either, so the honest answer is success --
+# anything else stops the rehearsal at the first phase it is meant to exercise.
+@test "refresh_keyring under --dry-run succeeds even where pacman would fail" {
+    DRY_RUN=true
+    stub_pacman 1 'echo "error: failed retrieving file from mirror" >&2'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"failed retrieving file"* ]]
+}
+
+# Never fatal and never silent, both still true with the gate closed: a missing
+# reflector under --dry-run is a fact about the host worth reporting, and it is
+# the one case where there is no command to withhold.
+@test "rank_mirrors under --dry-run still reports an absent reflector" {
+    DRY_RUN=true
     mkdir -p "$TMP/empty"
     PATH="$TMP/empty" run rank_mirrors
     [ "$status" -eq 0 ]
