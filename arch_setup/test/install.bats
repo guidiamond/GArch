@@ -1252,6 +1252,26 @@ register_announcer() {
     grep -q 'chainloader /EFI/WORK/grubx64.efi' "${TMP}/neigh/boot/grub/grub.cfg"
 }
 
+# The device name in that summary was the other half of the same problem: the
+# operator reads it after booting the neighbour, and kernel names are assigned
+# in discovery order, so /dev/sdy3 may well be a different disk by then. Every
+# other identifier this branch generates is a UUID for that reason.
+@test "phase 6 names the neighbour by UUID in the restore summary" {
+    mkdir -p "${TMP}/neigh/etc/grub.d" "${TMP}/neigh/boot/grub"
+    printf '#!/bin/sh\n' > "${TMP}/neigh/etc/grub.d/40_custom"
+    printf 'menuentry "debian" {}\n' > "${TMP}/neigh/boot/grub/grub.cfg"
+    run_boot false "$(printf 'y\nn\n')" "
+        mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
+        umount() { rm -f \"\${!#}\"; }"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"on Debian GNU/Linux (UUID=69da13ae-6880-492d-975d-d0227f774650):  cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
+    # ...and no restore line names a device at all. The restore lines are the
+    # four-space-indented ones; the "registered into ... on /dev/sdy3" progress
+    # message above them is live output, not something anyone retypes later.
+    ! printf '%s\n' "$output" | grep -q '^    on /dev/'
+    printf '%s\n' "$output" | grep -q '^    on Debian GNU/Linux (UUID='
+}
+
 # register_into_foreign_grub returns 2 when 40_custom took the block and
 # grub.cfg refused it. The backup is then the only copy of what 40_custom held
 # before, so it has to be reported rather than described as safe to delete.
@@ -1406,6 +1426,13 @@ register_announcer() {
     # Every line naming the generator, minus the comments and the operator
     # messages that quote the command for someone to re-run by hand. What is
     # left has to be one line, and that line has to be the arch-chroot form.
+    #
+    # usage()'s heredoc is cut out first. Its lines carry no leading `warn ` or
+    # `#` to strip, so prose describing the rule scored as a second executable
+    # call -- which cost the operator the sentence that states the rule
+    # plainly, reworded until it stopped matching. The exclusion is the whole
+    # heredoc, from `cat <<'USAGE'` to its terminator, so nothing inside it
+    # ever counts as code again.
     while IFS= read -r line; do
         stripped=${line#"${line%%[![:space:]]*}"}
         case "$stripped" in
@@ -1413,7 +1440,11 @@ register_announcer() {
         esac
         n=$(( n + 1 ))
         [[ "$stripped" == *"arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg"* ]]
-    done < <(grep -F 'grub-mkconfig' "$INSTALL_SH")
+    done < <(awk '
+        /^[[:space:]]*cat <<.USAGE.$/ { in_usage = 1 }
+        in_usage && /^USAGE$/         { in_usage = 0; next }
+        !in_usage
+    ' "$INSTALL_SH" | grep -F 'grub-mkconfig')
     [ "$n" -eq 1 ]
     # And nothing in the library the phase calls into can run one at all.
     # test/boot.bats pins the same fact with its own control; this is a second

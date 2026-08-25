@@ -1762,6 +1762,35 @@ MOUNT
     [[ "$output" == *"grub.cfg.bak.WORK.1"* ]]
 }
 
+# The executable bit is only half of it: grub-mkconfig *runs* each file in
+# /etc/grub.d and appends its stdout to grub.cfg. A file created holding the
+# raw block is executable and still contributes nothing -- the menuentry lines
+# run as commands, the shell prints "command not found" and exits non-zero
+# with an empty stdout. So assert what grub-mkconfig would actually capture.
+@test "a 40_custom created from scratch emits its block when run" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/boot/grub"
+    : > "${root}/boot/grub/grub.cfg"
+    register_into_foreign_grub "$root" WORK "menuentry 'x' {}"
+    run "${root}/etc/grub.d/40_custom"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"BEGIN arch-installer:WORK"* ]]
+    [[ "$output" == *"menuentry 'x' {}"* ]]
+    [[ "$output" == *"END arch-installer:WORK"* ]]
+}
+
+# The preamble must not be left behind when the write is refused: status 1
+# promises the other system is byte-for-byte as it was. The block carries a
+# marker line, which custom_cfg_upsert refuses.
+@test "register_into_foreign_grub removes a 40_custom it created when the write is refused" {
+    local root="${BATS_TEST_TMPDIR}/root"
+    mkdir -p "${root}/boot/grub"
+    : > "${root}/boot/grub/grub.cfg"
+    run register_into_foreign_grub "$root" WORK "# BEGIN arch-installer:OTHER"
+    [ "$status" -eq 1 ]
+    [ ! -e "${root}/etc/grub.d/40_custom" ]
+}
+
 @test "register_into_foreign_grub run twice does not duplicate the entry" {
     local root="${BATS_TEST_TMPDIR}/root"
     mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"

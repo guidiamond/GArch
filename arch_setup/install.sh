@@ -99,10 +99,11 @@ Phase 3 offers two partitioning modes:
               Wipes nothing; only the partitions you select are formatted.
               Use this to install alongside an existing OS.
 
-When another GRUB is already on the machine, phase 6 offers to add a
-chainload entry to its menu, and to add one for it to this install's menu.
-Every edit to another system is a marker-delimited block with a numbered
-backup. It never regenerates that system's own boot menu.
+When other operating systems are already on the machine, phase 6 offers to
+add a chainload entry to any GRUB it finds, and to add their bootloaders --
+including a Windows Boot Manager registered in NVRAM -- to this install's
+menu. Every edit to another system is a marker-delimited block with a
+numbered backup. It never runs the other system's grub-mkconfig.
 
   --dry-run   run the full prompt flow and print destructive commands
               instead of executing them (DRY_RUN=true in the environment
@@ -1212,7 +1213,6 @@ boot_register_forward() {
     if [[ -n "$raw" ]]; then mapfile -t found <<< "$raw"; fi
 
     for line in "${found[@]}"; do
-        # shellcheck disable=SC2034  # uuid is read for field symmetry with linux_installs
         read -r dev uuid has_grub name <<< "$line"
         # Positively "yes". linux_installs emits "unknown" for a candidate it
         # could not read, and mounting one of those read-write to edit a
@@ -1258,7 +1258,14 @@ boot_register_forward() {
                 # `%`, not `%%`: the shortest match strips only the suffix this
                 # backup added, so a root whose own path contains ".bak." keeps
                 # it.
-                __fwd_restore+=("on ${dev}:  cp ${rel} ${rel%.bak.*}")
+                # Named by OS name and filesystem UUID, not by ${dev}: the
+                # operator runs this after booting that system, and kernel
+                # device names are not stable across boots -- the same
+                # instability every UUID in this installer's generated config
+                # exists to avoid. "/dev/sdy3" could be a different disk by
+                # then; the UUID is the same one `blkid` and that system's own
+                # fstab show.
+                __fwd_restore+=("on ${name} (UUID=${uuid}):  cp ${rel} ${rel%.bak.*}")
             done
             umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
         else

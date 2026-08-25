@@ -1263,7 +1263,7 @@ register_into_foreign_grub() {
     local root=$1 id=$2 block=$3 target
     local custom="${root}/etc/grub.d/40_custom"
     local cfg="${root}/boot/grub/grub.cfg"
-    local custom_bak="" cfg_bak=""
+    local custom_bak="" cfg_bak="" custom_created=false
 
     [[ -f "$cfg" ]] || {
         error "register_into_foreign_grub: no ${root}/boot/grub/grub.cfg -- nothing on that root generates a GRUB menu"
@@ -1310,16 +1310,39 @@ register_into_foreign_grub() {
         return 1
     fi
 
-    # 0755 applies only when 40_custom does not exist yet; custom_cfg_upsert
-    # copies the mode of one that does. mktemp creates 0600 whatever the umask,
-    # and grub-mkconfig skips a 40_custom it cannot execute -- a silent no-op
-    # months later, at that system's next kernel update.
-    if ! custom_cfg_upsert "$custom" "$id" "$block" 0755; then
+    # A 40_custom this creates has to be a *script*, not a bare block: files in
+    # /etc/grub.d are executed by grub-mkconfig and it is their stdout that
+    # reaches grub.cfg. Raw menuentry syntax is run as shell commands instead --
+    # measured, `menuentry: command not found` and an empty stdout -- so the
+    # entry silently never arrives in the regenerated menu, months later. The
+    # two lines are the preamble the grub package's own 40_custom carries;
+    # `exec tail -n +3 $0` makes the file print everything after them. 0755
+    # here rather than as custom_cfg_upsert's mode argument because that
+    # argument only applies to a file it creates itself, and by then this one
+    # exists -- upsert copies its mode instead.
+    if [[ ! -e "$custom" ]]; then
+        # shellcheck disable=SC2016  # $0 is the created script's own argument, not ours
+        if ! { printf '%s\n' '#!/bin/sh' 'exec tail -n +3 $0' > "$custom" \
+                && chmod 0755 "$custom"; }; then
+            error "register_into_foreign_grub: could not create $custom"
+            # No custom_bak to remove: it is taken only for a 40_custom that
+            # already existed, and this branch is the one where none did.
+            rm -f -- "$custom" "$cfg_bak"
+            return 1
+        fi
+        custom_created=true
+    fi
+
+    if ! custom_cfg_upsert "$custom" "$id" "$block"; then
         # custom_cfg_upsert is mktemp + mv, so a refusal leaves both targets
         # exactly as they were and the copies just taken have nothing to
         # restore. backup_path never picks a name that already existed, so
-        # these two removals cannot reach a backup an earlier run took.
+        # these two removals cannot reach a backup an earlier run took. The
+        # preamble file is removed with them: status 1 promises the other
+        # system is byte-for-byte as it was, and a stray executable in its
+        # /etc/grub.d is not that.
         if [[ -n "$custom_bak" ]]; then rm -f -- "$custom_bak"; fi
+        if [[ "$custom_created" == true ]]; then rm -f -- "$custom"; fi
         rm -f -- "$cfg_bak"
         return 1
     fi

@@ -406,6 +406,11 @@ cmd_create() {
         # ("retry with a smaller DISK_SIZE") would not apply to a fixture
         # whose size the caller cannot change.
         need qemu-img
+        # seed_coexist_disk shells out to guestfish. Ungated, qemu-img create
+        # succeeds first and guestfish then dies with a bare "command not
+        # found" under set -e, leaving a half-made $DISK that `create` refuses
+        # to overwrite -- so a missing package costs the operator a `reset`.
+        need guestfish
         [[ -f "$OVMF_CODE" ]] \
             || die "no ${OVMF_CODE} -- install edk2-ovmf (sudo pacman -S edk2-ovmf)"
         [[ -f "$OVMF_VARS_SRC" ]] \
@@ -532,6 +537,22 @@ cmd_disk() {
 # The one destructive subcommand, and so the only path allowed to remove an
 # existing image -- see cmd_create.
 cmd_reset() {
+    # Validated here rather than left to cmd_create, because cmd_create only
+    # sees these arguments after the image is already gone: a mistyped
+    # scenario name would destroy a seeded disk and only then say it did not
+    # recognise the name.
+    local -a args=("$@")
+    local i=0
+    while (( i < ${#args[@]} )); do
+        case "${args[i]}" in
+            --scenario) (( i + 1 < ${#args[@]} )) || die "reset: --scenario requires an argument"
+                        [[ "${args[i+1]}" == "coexist" ]] \
+                            || die "reset: unknown scenario '${args[i+1]}' (only 'coexist' is defined)"
+                        i=$(( i + 2 )) ;;
+            *)          die "reset: unknown argument '${args[i]}'" ;;
+        esac
+    done
+
     # Asked before anything is destroyed. The old order removed the image and
     # *then* found out create could not rebuild it, which on a full host --
     # the only kind where the guard fires -- turned a working VM into no VM
@@ -546,7 +567,11 @@ cmd_reset() {
     create_preflight "$(reclaimable_mib)"
     rm -f "$DISK" "$VARS"
     echo "removed the disk image and the OVMF vars (the ISO is kept)"
-    cmd_create
+    # "$@", not a bare call: a reset after `create --scenario coexist` used to
+    # rebuild a blank image and say nothing about it, so the next `boot`
+    # installed onto a disk with no neighbour on it and the scenario silently
+    # tested nothing.
+    cmd_create "$@"
 }
 
 cmd_verify() {
@@ -561,7 +586,7 @@ cmd_verify() {
     [[ -f "$DISK" ]] \
         || die "no disk image -- run './test/vm.sh create --scenario ${scenario:-coexist}' first"
     case "$scenario" in
-        coexist) assert_coexist "$DISK" ;;
+        coexist) need guestfish; assert_coexist "$DISK" ;;
         "")      die "verify: --scenario is required (only 'coexist' is defined)" ;;
         *)       die "verify: unknown scenario '${scenario}' (only 'coexist' is defined)" ;;
     esac
@@ -573,9 +598,9 @@ cmd_verify() {
 # it needs qemu, OVMF, guestfish and an Arch ISO. It is checked in as the
 # specification of what a real run must assert, not as a passing test.
 #
-# A disk that looks like the machine this feature exists for: an NTFS
-# partition, an unencrypted Arch with its own GRUB at the removable fallback
-# path, and a gap at the end big enough for a second install.
+# A disk that looks like the machine this feature exists for: a 2 GiB ESP, an
+# unencrypted ext4 Arch with its own GRUB at the removable fallback path on
+# that ESP, and a gap at the end big enough for a second install.
 #
 # Built with guestfish rather than by booting the installer twice: the point of
 # the fixture is the *starting* state, and generating it by hand keeps the test
@@ -701,11 +726,13 @@ A QEMU + OVMF harness for running install.sh end to end against a fake disk.
   disk     boot the installed disk, to check stage 1 produced a bootable system
   verify   check a scenario's fixture-specific invariants against the disk image
   reset    delete the disk image and the OVMF vars, then create them again
+           (pass the same --scenario to reseed the fixture rather than a
+           blank image)
 
 Scenarios (create --scenario NAME, verify --scenario NAME):
 
-  coexist  seed a disk that already carries an NTFS partition and an
-           unencrypted Arch install with its own GRUB at the removable
+  coexist  seed a disk that already carries a 2 GiB ESP and an unencrypted
+           ext4 Arch install whose own GRUB sits at that ESP's removable
            fallback path, with a gap at the end for the second install --
            the machine this feature exists for. `create --scenario coexist`
            replaces the blank image `create` would otherwise make; `boot` and
@@ -757,7 +784,7 @@ main() {
         boot)       cmd_boot        ;;
         disk)       cmd_disk        ;;
         verify)     cmd_verify "$@" ;;
-        reset)      cmd_reset       ;;
+        reset)      cmd_reset "$@"  ;;
         -h|--help)  usage           ;;
         *)          usage >&2; exit 1 ;;
     esac

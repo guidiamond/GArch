@@ -77,8 +77,9 @@ created.
 
 A partition custom mode cannot positively identify as empty is treated as
 occupied, never as free space -- an unmountable or unrecognised filesystem,
-same as one it lacks a safe read-only mount option for, is left alone rather
-than guessed at.
+same as one it lacks a safe read-only mount option for, is refused as free
+space and formatted only if you say so explicitly: it names what it found and
+asks, defaulting to no.
 
 An encrypted neighbour is invisible to `os-prober`, which cannot open a LUKS
 container to look for a kernel inside it. Phase 6 covers that gap with a
