@@ -116,7 +116,7 @@ ensure_github_auth() {
     netrc_has_github && { success "${HOME}/.netrc already has a github.com entry"; return 0; }
     local user token
     user=$(ask "GitHub username" "guidiamond")
-    read -rsp "$(echo -e "${BOLD}GitHub PAT (repo scope)${RESET}: ")" token; echo ""
+    read -rsp "$(printf '%bGitHub PAT (repo scope)%b: ' "$BOLD" "$RESET")" token; echo ""
     # Without this, pressing Enter at the prompt fires a real request at
     # api.github.com and reports back "GitHub rejected those credentials"
     # -- true, but misleading about what actually happened. netrc_write's

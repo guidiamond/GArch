@@ -7,16 +7,6 @@
 # nvram_register_removable -- and nothing else here -- depends on.
 # shellcheck shell=bash
 
-# _echo_e_literal <string> -- the string with every backslash doubled.
-#
-# lib/ui.sh prints through `echo -e`, which eats backslash escapes. The values
-# these generators refuse are mostly EFI paths as efibootmgr reports them, so
-# the refusal message is exactly where a backslash run shows up: measured,
-# "\EFI\BOOT\BOOTX64.EFI" printed as "^[FI\BOOT\BOOTX64.EFI", telling the
-# operator the path is wrong while showing them a different path. Doubling
-# first means echo -e collapses each pair back to the one backslash.
-_echo_e_literal() { printf '%s' "${1//\\/\\\\}"; }
-
 # --- pure generators -------------------------------------------------------
 
 # bootloader_id_from <name> -> a GRUB --bootloader-id.
@@ -41,7 +31,7 @@ bootloader_id_from() {
     # is what the operator has to recognise in the firmware's own boot menu,
     # which is the only menu left when NVRAM is all that survived.
     [[ "$id" =~ [A-Z0-9] ]] || {
-        error "bootloader_id_from: '$(_echo_e_literal "$name")' leaves nothing usable as an id -- it has no letters or digits"
+        error "bootloader_id_from: '$name' leaves nothing usable as an id -- it has no letters or digits"
         return 1
     }
     echo "$id"
@@ -69,7 +59,7 @@ removable_policy() {
     for arg in "$has_fallback" "$esp_is_new"; do
         case "$arg" in
             yes|no) ;;
-            *) error "removable_policy: expected 'yes' or 'no', got '$(_echo_e_literal "$arg")'"
+            *) error "removable_policy: expected 'yes' or 'no', got '$arg'"
                return 1 ;;
         esac
     done
@@ -104,7 +94,7 @@ efi_path_to_slashes() {
     local path=$1 out
     case "$path" in
         /*|\\*) ;;
-        *) error "efi_path_to_slashes: '$(_echo_e_literal "$path")' is not an absolute EFI path"
+        *) error "efi_path_to_slashes: '$path' is not an absolute EFI path"
            return 1 ;;
     esac
     out=${path//\\//}
@@ -114,7 +104,7 @@ efi_path_to_slashes() {
     # is refused with it: an empty path component reads as valid and resolves
     # to nothing.
     if [[ "$out" == *//* ]] || [[ ! "$out" =~ ^/[A-Za-z0-9_./-]+$ ]]; then
-        error "efi_path_to_slashes: '$(_echo_e_literal "$path")' is not an absolute EFI path"
+        error "efi_path_to_slashes: '$path' is not an absolute EFI path"
         return 1
     fi
     printf '%s\n' "$out"
@@ -142,7 +132,7 @@ chain_entry() {
             error "chain_entry: refusing an empty title -- a menu row nobody can identify"
             return 1 ;;
         *"'"*|*$'\n'*)
-            error "chain_entry: title must not contain a single quote or a newline: '$(_echo_e_literal "$title")'"
+            error "chain_entry: title must not contain a single quote or a newline: '$title'"
             return 1 ;;
         *$'\r'*)
             # A CRLF /etc/os-release reaches this through linux_installs' NAME
@@ -150,7 +140,7 @@ chain_entry() {
             # it corrupts the rendering of the menu row -- which nobody
             # diagnoses, because the file it came from looks correct in an
             # editor.
-            error "chain_entry: title must not contain a carriage return: '$(_echo_e_literal "$title")'"
+            error "chain_entry: title must not contain a carriage return: '$title'"
             return 1 ;;
     esac
     # Shape, not just character set: a bare "-" passed a [A-Za-z0-9-]+ rule and
@@ -159,9 +149,9 @@ chain_entry() {
     # nothing and only says so at the boot menu" failure the path rule avoids.
     # FAT's XXXX-XXXX covers every ESP; 8-4-4-4-12 covers everything else.
     [[ "$uuid" =~ ^([0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}|[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})$ ]] \
-        || { error "chain_entry: '$(_echo_e_literal "$uuid")' is not a filesystem UUID"; return 1; }
+        || { error "chain_entry: '$uuid' is not a filesystem UUID"; return 1; }
     [[ "$efi_path" =~ ^/[A-Za-z0-9_./-]+$ ]] \
-        || { error "chain_entry: '$(_echo_e_literal "$efi_path")' is not an absolute EFI path"; return 1; }
+        || { error "chain_entry: '$efi_path' is not an absolute EFI path"; return 1; }
     # Both partmaps, as grub-mkconfig emits: search needs the module for the
     # label it is enumerating, and the disk this entry names is whatever the
     # inventory found, not necessarily GPT.
@@ -231,7 +221,7 @@ custom_cfg_upsert() {
     # because bats does not run under set -u.
     trap '[[ -z "${_ccu_tmp:-}" ]] || rm -f "$_ccu_tmp"' RETURN
     [[ "$id" =~ ^[A-Za-z0-9_-]+$ ]] \
-        || { error "custom_cfg_upsert: marker id must be [A-Za-z0-9_-], got '$(_echo_e_literal "$id")'"; return 1; }
+        || { error "custom_cfg_upsert: marker id must be [A-Za-z0-9_-], got '$id'"; return 1; }
     begin="# BEGIN arch-installer:${id}"
     end="# END arch-installer:${id}"
 
@@ -242,7 +232,7 @@ custom_cfg_upsert() {
     # line slips past.
     case $'\n'"$block" in
         *$'\n'"# BEGIN arch-installer:"*|*$'\n'"# END arch-installer:"*)
-            error "custom_cfg_upsert: the block carries an arch-installer marker line, which would break the delimiters in $(_echo_e_literal "$file")"
+            error "custom_cfg_upsert: the block carries an arch-installer marker line, which would break the delimiters in $file"
             return 1 ;;
     esac
 
@@ -260,7 +250,7 @@ custom_cfg_upsert() {
         link_target=$(readlink -f -- "$file" 2>/dev/null) \
             || link_target=$(readlink -- "$file" 2>/dev/null) \
             || link_target="(unreadable)"
-        error "custom_cfg_upsert: $(_echo_e_literal "$file") is a symlink to $(_echo_e_literal "$link_target"); point at that path instead"
+        error "custom_cfg_upsert: $file is a symlink to $link_target; point at that path instead"
         return 1
     fi
     # [[ -f ]] is false for a directory, and `mv tmp somedir` moves the temp
@@ -268,7 +258,7 @@ custom_cfg_upsert() {
     # of /etc/grub.d/40_custom used to leave an executable stray file there
     # that grub-mkconfig runs forever and no marker will ever match.
     if [[ -e "$file" && ! -f "$file" ]]; then
-        error "custom_cfg_upsert: $(_echo_e_literal "$file") exists and is not a regular file"
+        error "custom_cfg_upsert: $file exists and is not a regular file"
         return 1
     fi
 
@@ -281,7 +271,7 @@ custom_cfg_upsert() {
         n_begin=$(grep -cFx -- "$begin" "$file" || true)
         n_end=$(grep -cFx -- "$end" "$file" || true)
         if [[ "$n_begin" != "$n_end" ]]; then
-            error "custom_cfg_upsert: the arch-installer:${id} markers in $(_echo_e_literal "$file") are not a matched pair (${n_begin} BEGIN, ${n_end} END); refusing to guess where the block ends"
+            error "custom_cfg_upsert: the arch-installer:${id} markers in $file are not a matched pair (${n_begin} BEGIN, ${n_end} END); refusing to guess where the block ends"
             return 1
         fi
         # Counted separately from the pairing check, which would otherwise
@@ -290,13 +280,13 @@ custom_cfg_upsert() {
         # collapsed them silently, and which one is ours is not knowable.
         # Reachable through the CRLF limitation documented above.
         if (( n_begin > 1 )); then
-            error "custom_cfg_upsert: $(_echo_e_literal "$file") already holds ${n_begin} blocks for arch-installer:${id}, expected at most one; refusing to guess which is ours"
+            error "custom_cfg_upsert: $file already holds ${n_begin} blocks for arch-installer:${id}, expected at most one; refusing to guess which is ours"
             return 1
         fi
     fi
 
     _ccu_tmp=$(mktemp "${file}.XXXXXX") \
-        || { error "custom_cfg_upsert: cannot create a temp file next to $(_echo_e_literal "$file")"; return 1; }
+        || { error "custom_cfg_upsert: cannot create a temp file next to $file"; return 1; }
 
     if [[ -f "$file" ]]; then
         # Exact line comparison, not a regex: the marker id is validated above,
@@ -306,7 +296,7 @@ custom_cfg_upsert() {
             $0 == b { skip = 1; next }
             $0 == e { skip = 0; next }
             !skip   { print }
-        ' "$file" > "$_ccu_tmp" || { rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to read $(_echo_e_literal "$file")"; return 1; }
+        ' "$file" > "$_ccu_tmp" || { rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to read $file"; return 1; }
     fi
 
     # Every *handled* failure below removes the temp file before returning --
@@ -316,7 +306,7 @@ custom_cfg_upsert() {
     # window between the mode being set and the rename leaks it at the
     # target's mode rather than mktemp's 0600.
     if ! { printf '%s\n' "$begin"; printf '%s\n' "$block"; printf '%s\n' "$end"; } >> "$_ccu_tmp"; then
-        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to write $(_echo_e_literal "$file")"; return 1
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to write $file"; return 1
     fi
     # Mode before the rename, not after: between the two there is a moment where
     # a 0600 40_custom is the live one, and a grub-mkconfig landing there skips
@@ -330,13 +320,13 @@ custom_cfg_upsert() {
     # written to the temp file survives.
     if [[ -f "$file" ]]; then
         if ! cp --attributes-only --preserve=mode -- "$file" "$_ccu_tmp"; then
-            rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to copy the mode of $(_echo_e_literal "$file")"; return 1
+            rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to copy the mode of $file"; return 1
         fi
     elif ! chmod "$mode" "$_ccu_tmp"; then
-        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to chmod $(_echo_e_literal "$file")"; return 1
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to chmod $file"; return 1
     fi
     if ! mv "$_ccu_tmp" "$file"; then
-        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to move $(_echo_e_literal "$file") into place"; return 1
+        rm -f "$_ccu_tmp"; error "custom_cfg_upsert: failed to move $file into place"; return 1
     fi
 }
 
@@ -818,7 +808,7 @@ _nvram_read() {
     local who=${FUNCNAME[1]:-_nvram_read}
     err=$(mktemp) || { error "${who}: cannot create a temp file"; return 1; }
     if ! raw=$(efibootmgr -v 2>"$err"); then
-        error "${who}: efibootmgr failed: $(_echo_e_literal "$(tr '\n' ' ' < "$err")")"
+        error "${who}: efibootmgr failed: $(tr '\n' ' ' < "$err")"
         rm -f "$err"
         return 1
     fi
@@ -857,7 +847,7 @@ fs_uuid_for_partuuid() {
     local partuuid_re='^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$'
     [[ -n "$want" ]] || return 1
     raw=$(lsblk -pnro PATH,PARTUUID,UUID) || {
-        error "fs_uuid_for_partuuid: lsblk failed; cannot resolve $(_echo_e_literal "$1")"
+        error "fs_uuid_for_partuuid: lsblk failed; cannot resolve $1"
         return 1
     }
     while read -r path pu uuid; do
@@ -905,7 +895,7 @@ esp_probe() {
             return 0 ;;
     esac
 
-    tmp=$(mktemp -d) || { error "esp_probe: cannot create a mountpoint for $(_echo_e_literal "$dev")"; return 1; }
+    tmp=$(mktemp -d) || { error "esp_probe: cannot create a mountpoint for $dev"; return 1; }
     if mount -o ro "$dev" "$tmp" 2>/dev/null; then
         # Read into locals and unmounted before anything is printed: a mount
         # left behind is picked up by phase 4's genfstab and lands in the new
@@ -1013,7 +1003,7 @@ linux_installs() {
         # reason that has nothing to do with the machine. esp_probe treats the
         # same failure the same way.
         tmp=$(mktemp -d) || {
-            error "linux_installs: cannot create a mountpoint for $(_echo_e_literal "$dev")"
+            error "linux_installs: cannot create a mountpoint for $dev"
             return 1
         }
         mounted=false
@@ -1128,7 +1118,7 @@ nvram_register_removable() {
     # chroot_register_nvram prints it for the operator to run by hand, and a
     # label spelled "--delete-bootnum" is a paste away from being read as one.
     [[ "$label" =~ ^[A-Za-z0-9_][A-Za-z0-9_-]*$ ]] || {
-        error "nvram_register_removable: '$(_echo_e_literal "$label")' is not a bootloader id ([A-Za-z0-9_-], not starting with '-'); refusing to pass it to efibootmgr as a label"
+        error "nvram_register_removable: '$label' is not a bootloader id ([A-Za-z0-9_-], not starting with '-'); refusing to pass it to efibootmgr as a label"
         return 1
     }
 
@@ -1138,7 +1128,7 @@ nvram_register_removable() {
     # failure like every other lsblk reader in this file -- "lsblk broke" must
     # not arrive as "that partition does not exist".
     raw=$(lsblk -pnro PATH,PKNAME,PARTN,PARTUUID) || {
-        error "nvram_register_removable: lsblk failed; cannot locate $(_echo_e_literal "$dev")"
+        error "nvram_register_removable: lsblk failed; cannot locate $dev"
         return 1
     }
     while read -r path pkname partn partuuid; do
@@ -1155,7 +1145,7 @@ nvram_register_removable() {
     # MBR form lsblk reports (12345678-01) is not one -- the same boundary
     # fs_uuid_for_partuuid draws.
     if [[ -z "$disk" ]] || [[ ! "$num" =~ ^[0-9]+$ ]] || [[ ! "$guid" =~ $partuuid_re ]]; then
-        error "nvram_register_removable: lsblk does not list $(_echo_e_literal "$dev") as a GPT partition with a parent disk; refusing to guess where to register the loader"
+        error "nvram_register_removable: lsblk does not list $dev as a GPT partition with a parent disk; refusing to guess where to register the loader"
         return 1
     fi
 
@@ -1180,7 +1170,7 @@ nvram_register_removable() {
         # such an entry is ours. The label is therefore reported rather than
         # corrected -- adding a second entry to get a nicer name is exactly
         # what "do not duplicate on a re-run" rules out.
-        info "The firmware already boots $(_echo_e_literal "$dev") through \\\\EFI\\\\BOOT\\\\BOOTX64.EFI as entry ${enum} ($(_echo_e_literal "$elabel")) -- not adding a second entry."
+        info "The firmware already boots $dev through \\EFI\\BOOT\\BOOTX64.EFI as entry ${enum} ($elabel) -- not adding a second entry."
         return 0
     done <<< "$raw"
 
@@ -1196,7 +1186,7 @@ nvram_register_removable() {
     run_cmd efibootmgr --create \
         --disk "$disk" --part "$num" \
         --loader '\EFI\BOOT\BOOTX64.EFI' --label "$label" || {
-        error "nvram_register_removable: efibootmgr could not create a boot entry for $(_echo_e_literal "$dev")"
+        error "nvram_register_removable: efibootmgr could not create a boot entry for $dev"
         return 1
     }
 }
@@ -1276,7 +1266,7 @@ register_into_foreign_grub() {
     local custom_bak="" cfg_bak=""
 
     [[ -f "$cfg" ]] || {
-        error "register_into_foreign_grub: no $(_echo_e_literal "${root}/boot/grub/grub.cfg") -- nothing on that root generates a GRUB menu"
+        error "register_into_foreign_grub: no ${root}/boot/grub/grub.cfg -- nothing on that root generates a GRUB menu"
         return 1
     }
 
@@ -1292,30 +1282,30 @@ register_into_foreign_grub() {
     # an ordinary thing to find on a machine somebody dual-boots.
     for target in "$custom" "$cfg"; do
         if [[ -L "$target" ]]; then
-            error "register_into_foreign_grub: $(_echo_e_literal "$target") is a symlink; not editing it or the file it points at"
+            error "register_into_foreign_grub: $target is a symlink; not editing it or the file it points at"
             return 1
         fi
         if [[ -e "$target" && ! -f "$target" ]]; then
-            error "register_into_foreign_grub: $(_echo_e_literal "$target") exists and is not a regular file"
+            error "register_into_foreign_grub: $target exists and is not a regular file"
             return 1
         fi
     done
 
     mkdir -p "${root}/etc/grub.d" || {
-        error "register_into_foreign_grub: cannot create $(_echo_e_literal "${root}/etc/grub.d")"
+        error "register_into_foreign_grub: cannot create ${root}/etc/grub.d"
         return 1
     }
 
     if [[ -f "$custom" ]]; then
         custom_bak=$(backup_path "$custom" "$id")
         cp -a -- "$custom" "$custom_bak" || {
-            error "register_into_foreign_grub: could not back up $(_echo_e_literal "$custom")"
+            error "register_into_foreign_grub: could not back up $custom"
             return 1
         }
     fi
     cfg_bak=$(backup_path "$cfg" "$id")
     if ! cp -a -- "$cfg" "$cfg_bak"; then
-        error "register_into_foreign_grub: could not back up $(_echo_e_literal "$cfg")"
+        error "register_into_foreign_grub: could not back up $cfg"
         if [[ -n "$custom_bak" ]]; then rm -f -- "$custom_bak"; fi
         return 1
     fi

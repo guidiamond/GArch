@@ -545,7 +545,7 @@ phase_disk_whole() {
     # A bare `read`, not ask_yes_no: this is the gate in front of sgdisk
     # --zap-all, and a bare read fails closed on EOF, leaving `confirm` empty
     # and taking the `die` branch.
-    read -rp "$(echo -e "${RED}${BOLD}Type YES to wipe ${disk}${RESET}: ")" confirm || confirm=""
+    read -rp "$(printf '%b%bType YES to wipe %s%b: ' "$RED" "$BOLD" "$disk" "$RESET")" confirm || confirm=""
     [[ "$confirm" == "YES" ]] || die "aborted"
 
     plan_execute
@@ -811,7 +811,7 @@ phase_disk_custom() {
     # A bare `read`, not ask_yes_no, for the reason the whole-disk gate is one:
     # ask_yes_no answers with its default at EOF, and this is the last thing
     # between a closed stdin and plan_execute.
-    read -rp "$(echo -e "${RED}${BOLD}Type YES to proceed${RESET}: ")" confirm || confirm=""
+    read -rp "$(printf '%b%bType YES to proceed%b: ' "$RED" "$BOLD" "$RESET")" confirm || confirm=""
     [[ "$confirm" == "YES" ]] || die "aborted"
 
     plan_execute
@@ -881,18 +881,14 @@ phase_disk_finish() {
         || die "cannot decide the --removable policy for ${PART_EFI}"
     case "$policy" in
         forbid)
-            # Quadrupled backslashes: warn prints through `echo -e`, which
-            # expands \E to an ESC character -- "\\EFI" renders as <ESC>FI and
-            # eats the rest of the line. Measured, on the single most
-            # safety-critical message in this installer.
-            warn "${PART_EFI} already holds \\\\EFI\\\\BOOT\\\\BOOTX64.EFI ($(sed -n 's/^kind //p' <<< "$probe"))."
+            warn "${PART_EFI} already holds \\EFI\\BOOT\\BOOTX64.EFI ($(sed -n 's/^kind //p' <<< "$probe"))."
             warn "Not installing to the removable fallback path -- that binary belongs to another system."
             GRUB_REMOVABLE=false ;;
         offer-default-yes)
-            if ask_yes_no "Also install to the removable fallback path (\\\\EFI\\\\BOOT\\\\BOOTX64.EFI)?" "y"; then
+            if ask_yes_no "Also install to the removable fallback path (\\EFI\\BOOT\\BOOTX64.EFI)?" "y"; then
                 GRUB_REMOVABLE=true; else GRUB_REMOVABLE=false; fi ;;
         offer-default-no)
-            if ask_yes_no "Also install to the removable fallback path (\\\\EFI\\\\BOOT\\\\BOOTX64.EFI)?" "n"; then
+            if ask_yes_no "Also install to the removable fallback path (\\EFI\\BOOT\\BOOTX64.EFI)?" "n"; then
                 GRUB_REMOVABLE=true; else GRUB_REMOVABLE=false; fi ;;
         # GRUB_REMOVABLE keeps its conservative default here, but silence is
         # not the point: a policy nobody recognises means the inventory and
@@ -940,7 +936,7 @@ phase_disk_finish() {
         install_name=$(ask "Name for this install in the boot menu" "$DEFAULT_INSTALL_NAME")
         candidate=$(bootloader_id_from "$install_name") || continue
         if bootloader_id_taken "$candidate" "$esp_mnt" "$probe"; then
-            warn "\\\\EFI\\\\${candidate} is already used by another bootloader on this ESP -- pick another name"
+            warn "\\EFI\\${candidate} is already used by another bootloader on this ESP -- pick another name"
             continue
         fi
         BOOTLOADER_ID="$candidate"
@@ -1083,7 +1079,7 @@ chroot_register_nvram() {
     [[ "$GRUB_REMOVABLE" == true ]] || return 0
     nvram_register_removable "$PART_EFI" "$BOOTLOADER_ID" || {
         warn "${BOOTLOADER_ID} has no firmware boot entry of its own -- it is reachable only from another system's boot menu."
-        warn "To add one by hand: efibootmgr --create --disk <disk> --part <n> --loader '\\\\EFI\\\\BOOT\\\\BOOTX64.EFI' --label ${BOOTLOADER_ID}"
+        warn "To add one by hand: efibootmgr --create --disk <disk> --part <n> --loader '\\EFI\\BOOT\\BOOTX64.EFI' --label ${BOOTLOADER_ID}"
     }
 }
 
@@ -1223,10 +1219,7 @@ boot_register_forward() {
         # /boot/grub nobody has seen is not the direction to fail in.
         [[ "$has_grub" == "yes" ]] || continue
         echo ""
-        # Through _echo_e_literal because info prints via `echo -e`: a NAME=
-        # from a neighbour's /etc/os-release is not ours, and a backslash in it
-        # would eat the rest of the line.
-        info "Found $(_echo_e_literal "$name") on ${dev}, with a GRUB of its own."
+        info "Found $name on ${dev}, with a GRUB of its own."
         ask_yes_no "Add an entry for this install to its boot menu?" "y" || continue
 
         if [[ "$DRY_RUN" == true ]]; then
@@ -1255,10 +1248,10 @@ boot_register_forward() {
             made=()
             if [[ -n "$out" ]]; then mapfile -t made <<< "$out"; fi
             case "$rc" in
-                0)  success "registered into $(_echo_e_literal "$name") on ${dev}" ;;
+                0)  success "registered into $name on ${dev}" ;;
                 2)  warn "only half of ${dev} was updated: /etc/grub.d/40_custom carries the entry and /boot/grub/grub.cfg does not."
                     warn "That system picks it up at its next 'grub-mkconfig -o /boot/grub/grub.cfg'; until then the row is not in its menu." ;;
-                *)  warn "could not register into $(_echo_e_literal "$name") on ${dev} -- both of its files are unchanged" ;;
+                *)  warn "could not register into $name on ${dev} -- both of its files are unchanged" ;;
             esac
             for p in "${made[@]}"; do
                 rel=${p#"$tmp"}
@@ -1311,7 +1304,7 @@ boot_register_reverse() {
         read -r other_uuid other_path other_label <<< "$line"
         [[ -n "$other_uuid" && -n "$other_path" ]] || continue
         echo ""
-        info "Found a bootloader on ${other_uuid}: ${other_path} ($(_echo_e_literal "$other_label"))"
+        info "Found a bootloader on ${other_uuid}: ${other_path} ($other_label)"
         ask_yes_no "Add it to this install's boot menu?" "y" || continue
         # chain_entry refuses an apostrophe, a newline or a carriage return in
         # the title, and this title is a firmware label we did not write. One
@@ -1378,8 +1371,8 @@ phase_boot_integration() {
         echo ""
         info "To undo the edits made to other systems, boot each one and run:"
         for line in "${restore[@]}"; do
-            # printf, not info: these lines carry paths from a filesystem that
-            # is not ours, and info prints through `echo -e`.
+            # printf, not info: these are commands to be retyped, and info's
+            # "[*] " prefix would be retyped along with them.
             printf '    %s\n' "$line"
         done
         info "Each edit sits between '# BEGIN arch-installer:${BOOTLOADER_ID}' and its END line, so it can be deleted by hand too."

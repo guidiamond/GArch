@@ -188,3 +188,98 @@ setup() {
     [ "$status" -ne 124 ]
     [[ "$output" == *"at least one option"* ]]
 }
+
+# --- message payloads ------------------------------------------------------
+#
+# These four printed through `echo -e`, which expands \E: the removable-
+# fallback refusal reached the operator as "<ESC>FI\BOOT\BOOTX64.EFI", telling
+# them a path was in use while showing them a different path. Every call site
+# carrying an EFI path had to double its backslashes to compensate, and
+# lib/boot.sh carried a helper that did the doubling for caller-supplied
+# values. The payload now goes through printf's %s, which interprets nothing.
+#
+# Each case asserts the whole rendered line, so it is also the control for
+# "no escape was interpreted": the colour codes still arrive as real ESC
+# sequences, which is what proves the harness would have shown one in the
+# payload had printf expanded it there.
+
+@test "info prints an EFI path with its backslashes intact" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; info 'holds \EFI\BOOT\BOOTX64.EFI'"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'\033[0;34m[*]\033[0m holds \\EFI\\BOOT\\BOOTX64.EFI' ]
+}
+
+@test "warn prints an EFI path with its backslashes intact" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; warn 'holds \EFI\BOOT\BOOTX64.EFI'"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'\033[1;33m[!]\033[0m holds \\EFI\\BOOT\\BOOTX64.EFI' ]
+}
+
+@test "error prints an EFI path with its backslashes intact" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; error 'holds \EFI\BOOT\BOOTX64.EFI' 2>&1 >/dev/null"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'\033[0;31m[ERROR]\033[0m holds \\EFI\\BOOT\\BOOTX64.EFI' ]
+}
+
+@test "success prints an EFI path with its backslashes intact" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; success 'holds \EFI\BOOT\BOOTX64.EFI'"
+    [ "$status" -eq 0 ]
+    [ "$output" = $'\033[0;32m[OK]\033[0m holds \\EFI\\BOOT\\BOOTX64.EFI' ]
+}
+
+# A tab or a newline in a message is data too -- an efibootmgr label and an
+# /etc/os-release NAME both reach these functions unfiltered.
+@test "a message keeps a literal backslash-n instead of breaking the line" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'; info 'a\nb' 2>/dev/null"
+    [ "${#lines[@]}" -eq 1 ]
+    [[ "$output" == *'a\nb'* ]]
+}
+
+# lib/boot.sh's inventory functions emit their records on stdout and their
+# complaints through warn/info. A warn on stderr would be invisible to a
+# caller reading the records; an info on stderr would leave `2>&1` corrupting
+# them. Pinned because the split is not obvious from the call sites.
+@test "info, warn and success write to stdout and only error writes to stderr" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+                 { info i; warn w; success s; error e; } 2>/dev/null"
+    [[ "$output" == *" i"* ]]
+    [[ "$output" == *" w"* ]]
+    [[ "$output" == *" s"* ]]
+    [[ "$output" != *" e"* ]]
+
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+                 { info i; warn w; success s; error e; } 2>&1 >/dev/null"
+    [[ "$output" == *" e"* ]]
+    [[ "$output" != *" i"* ]]
+    [[ "$output" != *" w"* ]]
+    [[ "$output" != *" s"* ]]
+}
+
+# ask_yes_no's prompt is caller text too, and on this branch it carries the
+# path that is about to be overwritten. `read -rp` prints its prompt only to a
+# terminal, so this runs under a pty -- a piped stdin shows no prompt at all
+# and the assertion below would be vacuous. Requires util-linux's `script`.
+@test "ask_yes_no shows a backslash EFI path in its prompt" {
+    local runner="${BATS_TEST_TMPDIR}/prompt.sh"
+    {
+        echo "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'"
+        printf '%s\n' 'ask_yes_no "overwrite \\EFI\\BOOT\\BOOTX64.EFI?" n'
+    } > "$runner"
+    run script -qec "bash '$runner'" /dev/null <<< 'n'
+    # Control: the prompt was reached, so a missing path below means the path
+    # was mangled rather than the harness never getting that far.
+    [[ "$output" == *"[y/N]"* ]]
+    [[ "$output" == *'overwrite \EFI\BOOT\BOOTX64.EFI?'* ]]
+}
+
+# ask_choice's prompt was the one place left where caller text sat in a %b.
+# It is the disk-mode menu, so the text is a fixed string today -- this pins
+# the mechanism before something with a path in it is passed to it.
+@test "ask_choice prints its prompt without interpreting it" {
+    run bash -c "source '${BATS_TEST_DIRNAME}/../lib/ui.sh'
+                 echo 1 | ask_choice 'pick \EFI\BOOT' 'alpha' 2>&1 >/dev/null"
+    [[ "$output" == *'pick \EFI\BOOT'* ]]
+    # Control: the option list is reached, so a missing prompt above would be
+    # a mangled prompt and not a menu that never printed.
+    [[ "$output" == *"1) alpha"* ]]
+}

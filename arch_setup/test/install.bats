@@ -997,9 +997,10 @@ ${extra}
     [[ "$output" != *"PROMPT[Also install to the removable fallback path"* ]]
     [[ "$output" == *"removable=false"* ]]
     [[ "$output" == *"id=Y"* ]]
-    # Landmine: lib/ui.sh prints through `echo -e`, which turns \E into an ESC
-    # character. The most safety-critical message in the installer has to
-    # survive it.
+    # The refusal names the path it will not touch, and lib/ui.sh's warn puts
+    # the message in printf's %s so the backslashes arrive as written. This
+    # used to print "<ESC>FI\BOOT\BOOTX64.EFI" -- a different path from the
+    # one in use -- on the most safety-critical message in the installer.
     [[ "$output" == *'\EFI\BOOT\BOOTX64.EFI'* ]]
     [[ "$output" == *"belongs to another system"* ]]
 }
@@ -1008,6 +1009,11 @@ ${extra}
     run_custom "$(printf '2\ny\n/dev/sdy1\n/dev/sdz\ny\n1\nYES\nn\ny\nArch Work\n')"
     [ "$status" -eq 0 ]
     [[ "$output" == *"PROMPT[Also install to the removable fallback path"* ]]
+    # The consent question names the path in full. The stub logs $1 through
+    # printf %s and ask_yes_no now builds its prompt the same way, so this is
+    # what the operator is asked. Through `echo -e` they were asked about
+    # "<ESC>FI\BOOT\BOOTX64.EFI".
+    [[ "$output" == *'PROMPT[Also install to the removable fallback path (\EFI\BOOT\BOOTX64.EFI)?]'* ]]
     [[ "$output" == *"removable=true"* ]]
     [[ "$output" == *"id=ARCH_WORK"* ]]
 
@@ -1084,6 +1090,8 @@ ${extra}
         "esp_probe() { printf 'vendor Fedora\nfallback no\nkind none\nowngrub no\n'; }"
     [ "$status" -eq 0 ]
     [[ "$output" == *"already used by another bootloader"* ]]
+    # Named as the directory it will be on the ESP, backslashes intact.
+    [[ "$output" == *'\EFI\FEDORA is already used by another bootloader'* ]]
     [[ "$output" == *"id=ARCH_WORK"* ]]
 }
 
@@ -1507,6 +1515,9 @@ register_announcer() {
         echo REACHED"
     [ "$status" -eq 0 ]
     [[ "$output" == *"no firmware boot entry of its own"* ]]
+    # The hint is a command line the operator is meant to retype, so the
+    # --loader argument has to survive printing character for character.
+    [[ "$output" == *"--loader '\EFI\BOOT\BOOTX64.EFI' --label ARCH_WORK"* ]]
     [[ "$output" == *"REACHED"* ]]
 }
 

@@ -174,9 +174,9 @@ setup() {
 }
 
 @test "chain_entry names a rejected backslash path without eating the backslashes" {
-    # lib/ui.sh prints through `echo -e`, so an unescaped \E in the message
-    # becomes an ESC character: the operator is told the path is wrong while
-    # being shown a different path. Measured before the fix:
+    # The refused value is quoted back verbatim. When lib/ui.sh printed through
+    # `echo -e` it was not: the operator was told the path was wrong while
+    # being shown a different one, measured as
     # "^[FI\MICROSOFT\BOOT\BOOTMGFW.EFI".
     run chain_entry "Windows" "38BD-4D38" '\EFI\MICROSOFT\BOOT\BOOTMGFW.EFI'
     [ "$status" -ne 0 ]
@@ -735,9 +735,9 @@ setup() {
 }
 
 @test "efi_path_to_slashes names a rejected path without eating its backslashes" {
-    # lib/ui.sh prints through `echo -e`, so a bare \E in the message becomes an
-    # ESC character and the operator is shown a path other than the one that
-    # was refused. This function's entire input domain is backslash paths.
+    # This function's entire input domain is backslash paths, so the refusal
+    # message is exactly where lib/ui.sh's old `echo -e` showed the operator a
+    # path other than the one that was refused.
     run efi_path_to_slashes '\EFI\MICRO SOFT\BOOTMGFW.EFI'
     [ "$status" -ne 0 ]
     [[ "$output" == *'\EFI\MICRO SOFT\BOOTMGFW.EFI'* ]]
@@ -2275,6 +2275,9 @@ run_register() {
     # under whatever label it already carries.
     [[ "$output" == *"0005"* ]]
     [[ "$output" == *"UEFI OS"* ]]
+    # And naming the path in the form efibootmgr reports it: info puts the
+    # message in printf's %s, so \E stays two characters.
+    [[ "$output" == *'\EFI\BOOT\BOOTX64.EFI'* ]]
 }
 
 # The dedupe key is (partition, path), not the path alone: the fallback path

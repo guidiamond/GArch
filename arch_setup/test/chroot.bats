@@ -465,6 +465,23 @@ run_bootloader() {
     [[ "$output" == *"--bootloader-id=ARCH_WORK"* ]]
 }
 
+# The generated script defines its own info/warn/error/success, and every
+# other case in this file exercises the script's message strings against
+# *lib/ui.sh's* definitions -- run_bootloader sources ui.sh. So nothing else
+# can see the two drift apart. This renders a payload through the generated
+# file's own copies: with `echo -e` there, the \EFI\BOOT\BOOTX64.EFI in the
+# bootloader section would lose its \E in the chroot and only in the chroot.
+@test "the generated script's own message helpers print a payload literally" {
+    chroot_write_script "$TMP/root/setup.sh"
+    run bash -c "
+        eval \"\$(sed -n '/^RED=/,/^success()/p' '$TMP/root/setup.sh')\"
+        info 'holds \EFI\BOOT\BOOTX64.EFI'"
+    [ "$status" -eq 0 ]
+    # The whole line, so the colour codes are the control: they still arrive as
+    # real ESC sequences, which is how an ESC in the payload would have shown.
+    [ "$output" = $'\033[0;34m[*]\033[0m holds \\EFI\\BOOT\\BOOTX64.EFI' ]
+}
+
 # The removable half of the same question. --removable writes
 # \EFI\BOOT\BOOTX64.EFI and no vendor directory at all, so a vendor directory
 # on the ESP says nothing about whether this install has a bootloader -- and

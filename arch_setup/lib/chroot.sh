@@ -116,10 +116,15 @@ chroot_write_script() {
 set -Eeuo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; RESET='\033[0m'
-info()    { echo -e "${BLUE}[*]${RESET} $*"; }
-warn()    { echo -e "${YELLOW}[!]${RESET} $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
-success() { echo -e "${GREEN}[OK]${RESET} $*"; }
+# The message in printf's %s and the colours in %b, byte for byte what
+# lib/ui.sh does. The two must not drift: test/chroot.bats runs this script's
+# own message strings against *ui.sh's* definitions, so an `echo -e` left here
+# would eat the \E of the \EFI\BOOT\BOOTX64.EFI below in the chroot, and
+# only in the chroot.
+info()    { printf '%b[*]%b %s\n' "$BLUE" "$RESET" "$*"; }
+warn()    { printf '%b[!]%b %s\n' "$YELLOW" "$RESET" "$*"; }
+error()   { printf '%b[ERROR]%b %s\n' "$RED" "$RESET" "$*" >&2; }
+success() { printf '%b[OK]%b %s\n' "$GREEN" "$RESET" "$*"; }
 
 # A dozen bare commands run under set -e here and most tools say something
 # when they fail -- but the greps that read HOOKS= and MODULES= out of
@@ -396,7 +401,7 @@ elif [[ "${GRUB_REMOVABLE}" == "true" ]]; then
     # Named separately from the branch below because under --removable there is
     # no EFI/${BOOTLOADER_ID} on the ESP to go and look at: the id names the
     # firmware entry phase 5 creates, and nothing else.
-    success "\\\\EFI\\\\BOOT\\\\BOOTX64.EFI is already on the ESP, skipping grub-install"
+    success "\\EFI\\BOOT\\BOOTX64.EFI is already on the ESP, skipping grub-install"
 else
     success "GRUB ${BOOTLOADER_ID} already installed on the ESP, skipping grub-install"
 fi
