@@ -663,6 +663,16 @@ cat <<'STUBS'
             case "$*" in
                 *PKNAME*)    printf '/dev/sdy\n' ;;
                 *PATH,TYPE*) printf '/dev/sdz disk\n/dev/sdz1 part\n/dev/sdz2 part\n/dev/sdy1 part\n/dev/sdy2 part\n/dev/sdy3 part\n' ;;
+                # valid_whole_disk and disk_prompt_complaint ask lsblk for one
+                # device's TYPE. /dev/sdz and /dev/sdy are the disks here;
+                # everything else the cases below type at a disk prompt is a
+                # partition of one of them.
+                *"-dno TYPE"*)
+                    case "${*: -1}" in
+                        /dev/sdz|/dev/sdy)                            printf 'disk\n' ;;
+                        /dev/sdz1|/dev/sdz2|/dev/sdy1|/dev/sdy2|/dev/sdy3) printf 'part\n' ;;
+                        *) return 32 ;;   # real lsblk's status for a path it cannot stat
+                    esac ;;
                 *)           printf '/dev/sdz 10G fake\n' ;;
             esac
         }
@@ -947,6 +957,55 @@ ${extra}
     [[ "$output" == *"'/dev/sdy3' is not a partition of /dev/sdz"* ]]
     [[ "$output" == *"'/dev/sdz' is not a partition of /dev/sdz"* ]]
     [[ "$output" == *"no EFI partition in the plan"* ]]
+}
+
+# --- the disk prompts must be given a disk ---------------------------------
+#
+# valid_block_dev is `[[ -b ]]`, which a partition satisfies exactly as well as
+# a disk does, and nothing downstream catches the difference. Measured on the
+# operator's machine: /dev/nvme1n1p1 was accepted, disk_free_gaps answered
+# empty with status 0 -- not a failure -- so the carve question was skipped
+# without a word, and the reuse loop then required the root partition to match
+# ${disk}$(part_suffix)[0-9]*, i.e. /dev/nvme1n1p1p[0-9]*, which no device can
+# ever be called. Every answer was rejected, forever; Ctrl-C was the only exit.
+#
+# Driving the loop is the only way to see it: both predicates are true for a
+# partition in isolation, which is why 664 unit tests missed it.
+@test "valid_whole_disk accepts a disk, rejects a partition, and fails closed" {
+    # The accepting case is also this test's control: without it a valid_whole_disk
+    # that does not exist would exit 127 and satisfy every -ne 0 below.
+    run in_install 'lsblk() { printf "disk\n"; }; valid_block_dev() { :; }; valid_whole_disk /dev/x'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run in_install 'lsblk() { printf "part\n"; }; valid_block_dev() { :; }; valid_whole_disk /dev/x'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # An lsblk that could not read the device must not read as "disk".
+    run in_install 'lsblk() { return 32; }; valid_block_dev() { :; }; valid_whole_disk /dev/x'
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # -b still comes first: a path that is no block device at all is refused
+    # without lsblk being consulted.
+    run in_install 'lsblk() { printf "disk\n"; }; valid_block_dev() { return 1; }; valid_whole_disk /dev/x'
+    [ "$status" -ne 0 ]
+}
+
+@test "custom mode's disk prompt rejects a partition and re-asks" {
+    run_custom "$(printf '2\nn\n/dev/sdz1\n/dev/sdz\ny\n1\n2G\nYES\nn\nn\nArch Work\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'/dev/sdz1' is a partition"* ]]
+    # The re-ask was answered with the disk, and the carve went ahead on it.
+    [[ "$output" == *"sgdisk -n 1:2048:4196351"* ]]
+    [[ "$output" != *"DESTRUCTIVE_TOOL_RAN"* ]]
+}
+
+@test "whole-disk mode's disk prompt rejects a partition and re-asks" {
+    run_custom "$(printf '1\n/dev/sdz1\n/dev/sdz\n2G\nYES\nn\nn\n\nunused\n')"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"'/dev/sdz1' is a partition"* ]]
+    [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
+    # The whole point: --zap-all never names the partition that was typed.
+    [[ "$output" != *"zap-all /dev/sdz1"* ]]
 }
 
 # plan_render does not validate, so a plan that plan_execute would refuse can

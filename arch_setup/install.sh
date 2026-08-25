@@ -254,6 +254,41 @@ valid_block_dev() {
     [[ -b "$1" ]]
 }
 
+# The answer to "which disk", which -b alone cannot check: a partition is a
+# block device too. Measured on the operator's machine -- /dev/nvme1n1p1 was
+# accepted at the custom-mode prompt, disk_free_gaps returned empty with status
+# 0 rather than failing so the carve question was skipped silently, and the
+# reuse loop then demanded a root matching /dev/nvme1n1p1p[0-9]*, a name no
+# device can have. It re-asked forever; Ctrl-C was the only way out.
+#
+# lsblk -dno TYPE is the distinction: "disk" for a whole disk (nvme namespaces
+# included), "part" for a partition, and "loop"/"crypt"/"raid1"/"lvm" for the
+# rest -- none of which the disk list this prompt follows offers either, since
+# it is built with `lsblk -e 7,11`. Anything but "disk" is refused, and so is a
+# device lsblk could not read: answering "disk" for one would send
+# next_part_number and disk_free_gaps, both of which fail open, at it.
+valid_whole_disk() {
+    local type
+    valid_block_dev "$1" || return 1
+    type=$(lsblk -dno TYPE -- "$1" 2>/dev/null) || return 1
+    [[ "${type//[[:space:]]/}" == "disk" ]]
+}
+
+# The re-ask message for the two whole-disk prompts. "is not a block device"
+# was the only thing either of them said, and it is the wrong sentence for the
+# mistake actually made -- a partition IS a block device, so the operator reads
+# it as the installer being broken rather than as the answer being wrong.
+disk_prompt_complaint() {
+    local dev=$1 type
+    type=$(lsblk -dno TYPE -- "$dev" 2>/dev/null) || type=""
+    type=${type//[[:space:]]/}
+    case "$type" in
+        part) warn "'${dev}' is a partition; give the whole disk it is on, e.g. /dev/nvme0n1" ;;
+        "")   warn "'${dev}' is not a block device this machine can read" ;;
+        *)    warn "'${dev}' is a ${type} device, not a disk; give a whole disk, e.g. /dev/nvme0n1" ;;
+    esac
+}
+
 # ---------------- phase 1: preflight ----------------
 phase_preflight() {
     banner 1 "$TOTAL_PHASES" "Pre-flight"
@@ -532,8 +567,8 @@ phase_disk_whole() {
 
     while true; do
         disk=$(ask "Disk to install to (entire disk will be wiped)")
-        valid_block_dev "$disk" && break
-        warn "'${disk}' is not a block device"
+        valid_whole_disk "$disk" && break
+        disk_prompt_complaint "$disk"
     done
     while true; do
         esp_size=$(ask "EFI partition size" "$DEFAULT_ESP_SIZE")
@@ -690,8 +725,8 @@ phase_disk_custom() {
     # --- root ---
     while true; do
         disk=$(ask "Disk to install onto")
-        valid_block_dev "$disk" && break
-        warn "'${disk}' is not a block device"
+        valid_whole_disk "$disk" && break
+        disk_prompt_complaint "$disk"
     done
 
     # disk_free_gaps cannot tell "no free space" from "could not read the
