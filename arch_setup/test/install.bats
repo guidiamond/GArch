@@ -1241,7 +1241,11 @@ register_announcer() {
     [[ "$output" != *"REGISTER["* ]]
     [[ "$output" != *"UPSERT_MNT["* ]]
     # It still gets far enough to say what it would have done, on both halves.
-    [[ "$output" == *"[dry-run] would back up and edit"* ]]
+    # Both halves name the marker they would have written, so a rehearsal shows
+    # which block a real run would create or replace. On a true --dry-run the
+    # uuid half is phase 3's "0000-0000" placeholder; here the harness supplies
+    # a real-looking one.
+    [[ "$output" == *"[dry-run] would back up and edit"*"adding arch-installer:WORK_AAAA-BBBB"* ]]
     [[ "$output" == *"[dry-run] would add arch-installer:NEIGHBOUR_38BD-4D38"* ]]
 }
 
@@ -1306,8 +1310,12 @@ register_announcer() {
         umount() { rm -f \"\${!#}\"; }"
     [ "$status" -eq 0 ]
     [[ "$output" == *"registered into Debian GNU/Linux on /dev/sdy3"* ]]
-    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
-    [[ "$output" == *"cp /boot/grub/grub.cfg.bak.WORK.1 /boot/grub/grub.cfg"* ]]
+    # .bak.WORK_AAAA-BBBB: the backup is named for the marker id, which since
+    # own_marker_id carries the ESP uuid too -- two installs sharing a default
+    # name must not overwrite each other's backup any more than each other's
+    # block.
+    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK_AAAA-BBBB.1 /etc/grub.d/40_custom"* ]]
+    [[ "$output" == *"cp /boot/grub/grub.cfg.bak.WORK_AAAA-BBBB.1 /boot/grub/grub.cfg"* ]]
     # ...and the entry really landed in both of the neighbour's files.
     grep -q 'Arch Linux (work) \[chainload\]' "${TMP}/neigh/etc/grub.d/40_custom"
     grep -q 'Arch Linux (work) \[chainload\]' "${TMP}/neigh/boot/grub/grub.cfg"
@@ -1327,7 +1335,7 @@ register_announcer() {
         mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
         umount() { rm -f \"\${!#}\"; }"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"on Debian GNU/Linux (UUID=69da13ae-6880-492d-975d-d0227f774650):  cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
+    [[ "$output" == *"on Debian GNU/Linux (UUID=69da13ae-6880-492d-975d-d0227f774650):  cp /etc/grub.d/40_custom.bak.WORK_AAAA-BBBB.1 /etc/grub.d/40_custom"* ]]
     # ...and no restore line names a device at all. The restore lines are the
     # four-space-indented ones; the "registered into ... on /dev/sdy3" progress
     # message above them is live output, not something anyone retypes later.
@@ -1341,15 +1349,18 @@ register_announcer() {
 @test "phase 6 reports the backups of a half-updated neighbour" {
     mkdir -p "${TMP}/neigh/etc/grub.d" "${TMP}/neigh/boot/grub"
     printf '#!/bin/sh\n' > "${TMP}/neigh/etc/grub.d/40_custom"
-    printf '# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n# BEGIN arch-installer:WORK\n# END arch-installer:WORK\n' \
+    # Two blocks for OUR marker -- the id as own_marker_id spells it, uuid and
+    # all -- is custom_cfg_upsert's permanent duplicate refusal, which is what
+    # makes grub.cfg refuse while 40_custom takes the block.
+    printf '# BEGIN arch-installer:WORK_AAAA-BBBB\n# END arch-installer:WORK_AAAA-BBBB\n# BEGIN arch-installer:WORK_AAAA-BBBB\n# END arch-installer:WORK_AAAA-BBBB\n' \
         > "${TMP}/neigh/boot/grub/grub.cfg"
     run_boot false "$(printf 'y\nn\n')" "
         mount()  { local t=\${!#}; rmdir \"\$t\" 2>/dev/null || true; ln -sfn '${TMP}/neigh' \"\$t\"; }
         umount() { rm -f \"\${!#}\"; }"
     [ "$status" -eq 0 ]
     [[ "$output" == *"only half of /dev/sdy3 was updated"* ]]
-    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK.1 /etc/grub.d/40_custom"* ]]
-    [ -f "${TMP}/neigh/etc/grub.d/40_custom.bak.WORK.1" ]
+    [[ "$output" == *"cp /etc/grub.d/40_custom.bak.WORK_AAAA-BBBB.1 /etc/grub.d/40_custom"* ]]
+    [ -f "${TMP}/neigh/etc/grub.d/40_custom.bak.WORK_AAAA-BBBB.1" ]
 }
 
 # Nothing in this phase is fatal: it runs after the new system is installed and
@@ -1737,4 +1748,69 @@ run_locale() {
     run_locale false
     [ "$status" -eq 0 ]
     grep -qF -- 'br-abnt2' "$TMP/loadkeys_args"
+}
+
+# --- phase 6: the forward marker -------------------------------------------
+
+# Measured against a fixture root: with the marker keyed on the bootloader id
+# alone, a second install carving its own ESP found \EFI\GRUB free there, took
+# the same default id, and custom_cfg_upsert -- idempotent by design -- then
+# REPLACED install one's block instead of adding a second. Install one dropped
+# out of that neighbour's menu and survived only through its own NVRAM entry,
+# the fallback this phase exists precisely so as not to rely on.
+@test "a second install on its own ESP does not replace the first in a neighbour's menu" {
+    local root="${TMP}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    printf 'menuentry "existing" {}\n' > "${root}/boot/grub/grub.cfg"
+    run in_install "
+        GRUB_REMOVABLE=false
+        BOOTLOADER_ID=GRUB
+        ESP_FS_UUID=AAAA-1111
+        register_into_foreign_grub '${root}' \"\$(own_marker_id)\" \\
+            \"\$(chain_entry 'Arch one' \"\$ESP_FS_UUID\" \"\$(own_loader_path)\")\" >/dev/null
+        ESP_FS_UUID=BBBB-2222
+        register_into_foreign_grub '${root}' \"\$(own_marker_id)\" \\
+            \"\$(chain_entry 'Arch two' \"\$ESP_FS_UUID\" \"\$(own_loader_path)\")\" >/dev/null
+    "
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^# BEGIN arch-installer:' "${root}/boot/grub/grub.cfg")" -eq 2 ]
+    grep -q 'AAAA-1111' "${root}/boot/grub/grub.cfg"
+    grep -q 'BBBB-2222' "${root}/boot/grub/grub.cfg"
+    grep -q 'existing'  "${root}/boot/grub/grub.cfg"
+}
+
+# The control for the case above: keying the marker on more than the id must
+# not cost custom_cfg_upsert's idempotency. Re-running the same install --
+# same id, same ESP -- still has to update its one block rather than append.
+@test "re-registering the same install rewrites its one block" {
+    local root="${TMP}/root"
+    mkdir -p "${root}/etc/grub.d" "${root}/boot/grub"
+    : > "${root}/etc/grub.d/40_custom"
+    printf 'menuentry "existing" {}\n' > "${root}/boot/grub/grub.cfg"
+    run in_install "
+        GRUB_REMOVABLE=false
+        BOOTLOADER_ID=GRUB
+        ESP_FS_UUID=AAAA-1111
+        register_into_foreign_grub '${root}' \"\$(own_marker_id)\" \\
+            \"\$(chain_entry 'Arch one' \"\$ESP_FS_UUID\" \"\$(own_loader_path)\")\" >/dev/null
+        register_into_foreign_grub '${root}' \"\$(own_marker_id)\" \\
+            \"\$(chain_entry 'Arch one again' \"\$ESP_FS_UUID\" \"\$(own_loader_path)\")\" >/dev/null
+    "
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^# BEGIN arch-installer:' "${root}/boot/grub/grub.cfg")" -eq 1 ]
+    grep -q 'Arch one again' "${root}/boot/grub/grub.cfg"
+    [[ "$(cat "${root}/boot/grub/grub.cfg")" != *"menuentry 'Arch one' "* ]]
+}
+
+# own_marker_id must stay inside custom_cfg_upsert's [A-Za-z0-9_-], or phase 6
+# refuses every foreign config it is handed -- after pacstrap, with the new
+# system already on the disk.
+@test "own_marker_id carries the ESP uuid and stays a legal marker id" {
+    run in_install 'BOOTLOADER_ID=GRUB ESP_FS_UUID=AAAA-1111 own_marker_id'
+    [ "$status" -eq 0 ]
+    [ "$output" = "GRUB_AAAA-1111" ]
+    run in_install 'BOOTLOADER_ID=GRUB ESP_FS_UUID="AA/AA 1111" own_marker_id'
+    [ "$status" -eq 0 ]
+    [ "$output" = "GRUB_AA_AA_1111" ]
 }

@@ -1230,6 +1230,31 @@ phase_chroot() {
 # install writes a dead row into every other system's live menu, and with
 # nothing in NVRAM to fall back to, this install ends up reachable from no menu
 # on the machine.
+# own_marker_id -> the custom_cfg_upsert marker id for THIS install's block in
+# another system's config.
+#
+# Keyed on the ESP's filesystem UUID as well as the bootloader id, for the
+# reason neighbour_marker_id already gives on the reverse half: ids are not
+# unique across the machine. bootloader_id_taken only ever inspects the ESP
+# this install is using, so a second install carving a second ESP finds
+# \EFI\GRUB free there and legitimately takes the same default id. Measured
+# with the id alone as the marker: run two's block REPLACED run one's, because
+# custom_cfg_upsert is idempotent on the marker -- install one silently left
+# every neighbour's menu and was reachable only through its own NVRAM entry.
+#
+# Sanitised the same way and for the same reason: custom_cfg_upsert refuses an
+# id outside [A-Za-z0-9_-], and that refusal would land in phase 6, after
+# pacstrap, on a system already written to disk.
+#
+# Under --dry-run ESP_FS_UUID is the "0000-0000" placeholder phase 3 sets, so a
+# rehearsal prints GRUB_0000-0000. Two rehearsals therefore show the same id --
+# harmless, because the dry-run branch in boot_register_forward writes nothing
+# and there is no block for the second to overwrite.
+own_marker_id() {
+    local id="${BOOTLOADER_ID}_${ESP_FS_UUID}"
+    printf '%s\n' "${id//[^A-Za-z0-9_-]/_}"
+}
+
 own_loader_path() {
     if [[ "$GRUB_REMOVABLE" == true ]]; then
         printf '/EFI/BOOT/BOOTX64.EFI\n'
@@ -1282,7 +1307,7 @@ boot_register_forward() {
         ask_yes_no "Add an entry for this install to its boot menu?" "y" || continue
 
         if [[ "$DRY_RUN" == true ]]; then
-            warn "[dry-run] would back up and edit ${dev}:/etc/grub.d/40_custom and /boot/grub/grub.cfg"
+            warn "[dry-run] would back up and edit ${dev}:/etc/grub.d/40_custom and /boot/grub/grub.cfg, adding arch-installer:$(own_marker_id)"
             continue
         fi
 
@@ -1303,7 +1328,7 @@ boot_register_forward() {
         # the bare mount behind it is the one that runs.
         if mount -o subvol=@ "$dev" "$tmp" 2>/dev/null || mount "$dev" "$tmp" 2>/dev/null; then
             rc=0
-            out=$(register_into_foreign_grub "$tmp" "$BOOTLOADER_ID" "$block") || rc=$?
+            out=$(register_into_foreign_grub "$tmp" "$(own_marker_id)" "$block") || rc=$?
             made=()
             if [[ -n "$out" ]]; then mapfile -t made <<< "$out"; fi
             case "$rc" in
@@ -1441,7 +1466,7 @@ phase_boot_integration() {
             # "[*] " prefix would be retyped along with them.
             printf '    %s\n' "$line"
         done
-        info "Each edit sits between '# BEGIN arch-installer:${BOOTLOADER_ID}' and its END line, so it can be deleted by hand too."
+        info "Each edit sits between '# BEGIN arch-installer:$(own_marker_id)' and its END line, so it can be deleted by hand too."
     fi
     success "boot integration complete"
 }
