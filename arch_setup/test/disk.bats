@@ -506,9 +506,19 @@ MOUNT
     [[ "$output" == *"sgdisk --zap-all /dev/sdz"* ]]
 }
 
+# next_part_number refuses a disk whose partition table it cannot read, so a
+# --dry-run plan_execute case against a device that does not exist has to
+# stand in for that one read. Empty output is an empty table, which is what
+# these cases assumed all along -- they were previously getting that answer
+# from real sgdisk failing on /dev/sdz and next_part_number failing open.
+stub_empty_table() {
+    sgdisk() { [[ "$1" == "-p" ]] && return 0; printf 'sgdisk %s\n' "$*"; }
+}
+
 @test "plan_execute never wipes in carve mode" {
     DRY_RUN=true
     PLAN_WIPE_DISKS=false
+    stub_empty_table
     plan_add /dev/sdz efi  ef00 EFI 1G   new 2048 2099199
     plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
     run plan_execute
@@ -519,6 +529,7 @@ MOUNT
 @test "plan_execute carves at the planned sectors" {
     DRY_RUN=true
     PLAN_WIPE_DISKS=false
+    stub_empty_table
     plan_add /dev/sdz efi ef00 EFI 1G new 2048 2099199
     run plan_execute
     [[ "$output" == *":2048:2099199"* ]]
@@ -675,6 +686,7 @@ MOUNT
     # The counterpart to the case above: refusing the mix must not refuse a
     # plan that is carved throughout, which is what custom mode produces.
     PLAN_WIPE_DISKS=false
+    stub_empty_table
     plan_add /dev/sdz efi  ef00 EFI  1G   new 2048 2099199
     plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
     run plan_execute
@@ -686,6 +698,7 @@ MOUNT
 @test "plan_execute still allows reusing one partition and carving another" {
     # Reuse the ESP, carve the root -- the shape this whole feature exists for.
     PLAN_WIPE_DISKS=false
+    stub_empty_table
     plan_add /dev/sdz efi  ef00 EFI  1G   /dev/sdz5
     plan_add /dev/sdz root 8300 Root rest new 2099200 9999999
     run plan_execute
@@ -957,4 +970,30 @@ echo SURVIVED"
     [ "$status" -eq 0 ]
     [[ "$output" == *SURVIVED* ]]
     [ "$(tr '\n' ' ' < "$SGDISK_TABLE")" = "1 2 3 4 " ]
+}
+
+@test "next_part_number fails when the partition table cannot be read" {
+    # The failure this guards: a process substitution's exit status is not
+    # observable, so a failing `sgdisk -p` used to leave `used` empty and
+    # lowest_free_number answered 1 with success -- and plan_execute would
+    # then run `sgdisk -n 1:...` over whatever already holds number 1.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    mkdir -p "$stub"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/sgdisk"
+    chmod +x "${stub}/sgdisk"
+    PATH="${stub}:${PATH}" run next_part_number /dev/sdz
+    [ "$status" -eq 1 ]
+    # Not just non-zero: 127 from an undefined function satisfies that too.
+    [[ "$output" == *"Could not read the partition table on /dev/sdz"* ]]
+}
+
+@test "next_part_number still answers from a table it could read" {
+    # Control for the refusal above: proves the guard is reading sgdisk's
+    # status and not refusing unconditionally.
+    local stub="${BATS_TEST_TMPDIR}/bin"
+    sgdisk_table_stub "$stub" 1 2
+    local PATH="${stub}:${PATH}"
+    run next_part_number /dev/sdz
+    [ "$status" -eq 0 ]
+    [ "$output" = "3" ]
 }

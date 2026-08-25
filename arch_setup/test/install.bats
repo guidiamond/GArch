@@ -689,13 +689,14 @@ cat <<'STUBS'
         part_in_use() { return 1; }
         part_probe_os() { printf 'empty\n'; }
         # `sgdisk -p` is next_part_number reading the table and is the one
-        # sgdisk that is not a write; it is failed silently rather than
-        # announced. next_part_number suppresses stderr and cannot tell an
-        # unreadable disk from an empty one, so it answers 1 for the first
-        # carve entry on this nonexistent device -- and 2 for the second, from
-        # plan_execute's dry-run reservation list. Any OTHER sgdisk here is a
-        # write reaching a tool.
-        sgdisk() { [[ "$1" == "-p" ]] && return 1; printf 'DESTRUCTIVE_TOOL_RAN sgdisk %s\n' "$*"; return 1; }
+        # sgdisk that is not a write; it succeeds silently, standing in for an
+        # empty table on this nonexistent device. It must not fail:
+        # next_part_number refuses a table it could not read, which would abort
+        # the whole custom-mode run before any of these cases got their
+        # prompts. With an empty table it answers 1 for the first carve entry
+        # and 2 for the second, from plan_execute's dry-run reservation list.
+        # Any OTHER sgdisk here is a write reaching a tool.
+        sgdisk() { [[ "$1" == "-p" ]] && return 0; printf 'DESTRUCTIVE_TOOL_RAN sgdisk %s\n' "$*"; return 1; }
         partprobe()   { printf 'DESTRUCTIVE_TOOL_RAN partprobe %s\n' "$*"; return 1; }
         mount()       { printf 'DESTRUCTIVE_TOOL_RAN mount %s\n' "$*"; return 1; }
         mkfs.fat()    { printf 'DESTRUCTIVE_TOOL_RAN mkfs.fat %s\n' "$*"; return 1; }

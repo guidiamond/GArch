@@ -259,20 +259,29 @@ lowest_free_number() {
 # ever runs and the table therefore never grows; see the comment there. With no
 # reserved arguments this is exactly what it always was.
 #
-# Stderr is suppressed the same way disk_free_gaps suppresses parted's, so
-# this function cannot tell "disk has no partitions" from "could not read the
-# disk" -- a bad device path or a disk that vanished mid-read makes sgdisk -p
-# fail and print nothing, mapfile then populates an empty array without the
-# process substitution's failure ever being observed, and lowest_free_number
-# on an empty set returns 1 with success status. Per lowest_free_number's own
-# comment, sgdisk -n onto number 1 overwrites whatever already holds it, so a
-# caller must validate $disk exists and is readable before calling this, not
-# trust a returned "1" to mean an empty table.
+# sgdisk's own output is captured into a variable first, rather than piped
+# straight into mapfile: a process substitution's exit status is not
+# observable, so a bad device path or a disk that vanished mid-read made
+# sgdisk -p fail and print nothing, mapfile populated an empty array, and
+# lowest_free_number on an empty set returned 1 with *success* status. Per
+# lowest_free_number's own comment, sgdisk -n onto number 1 overwrites
+# whatever already holds it -- an MSR or another OS's ESP on a disk this mode
+# promised only to carve free space from. Refusing here is what makes
+# plan_execute's `|| return 1` at the call site reachable at all.
+#
+# Stderr is still suppressed, the same way disk_free_gaps suppresses parted's;
+# the status, not the noise, is what distinguishes "no partitions" from
+# "could not read the disk".
 next_part_number() {
     local disk=$1
     shift
     local -a used=()
-    mapfile -t used < <(sgdisk -p "$disk" 2>/dev/null | parse_part_numbers)
+    local table
+    if ! table=$(sgdisk -p "$disk" 2>/dev/null); then
+        error "Could not read the partition table on ${disk}"
+        return 1
+    fi
+    mapfile -t used < <(printf '%s\n' "$table" | parse_part_numbers)
     lowest_free_number ${used[@]+"${used[@]}"} "$@"
 }
 
