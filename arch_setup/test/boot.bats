@@ -1369,6 +1369,72 @@ MOUNT
     [[ "$output" == *"could not be read"* ]]
 }
 
+# The rehearsal on the operator's machine reported both /dev/nvme1n1p7 (the
+# live root) and /dev/sdb3 (/home) as "could not be read": a partition already
+# mounted rw cannot be mounted a second time into a temp directory, so phase
+# 6's forward half found no GRUB neighbour at all.
+@test "linux_installs reads an already-mounted candidate through its own mountpoint" {
+    local stub="${BATS_TEST_TMPDIR}/bin" root="${BATS_TEST_TMPDIR}/root"
+    local mlog="${BATS_TEST_TMPDIR}/mount.log" ulog="${BATS_TEST_TMPDIR}/umount.log"
+    mkdir -p "$stub" "${root}/etc" "${root}/boot/grub"
+    printf 'NAME="Arch Linux"\nID=arch\n' > "${root}/etc/os-release"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    printf '#!/bin/bash\necho "%s"\n' "$root" > "${stub}/findmnt"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+echo "\$*" >> "${mlog}"
+exit 1
+MOUNT
+    cat > "${stub}/umount" <<UMOUNT
+#!/bin/bash
+echo "\$*" >> "${ulog}"
+exit 0
+UMOUNT
+    chmod +x "${stub}/lsblk" "${stub}/findmnt" "${stub}/mount" "${stub}/umount"
+    PATH="${stub}:${PATH}" run linux_installs
+    [ "$status" -eq 0 ]
+    [ "$output" = "/dev/sdz1 1b13ff14-95ae-46f1-b975-a4233c5ed17f yes Arch Linux" ]
+    # Neither tool was reached at all: the existing mount is not re-mounted,
+    # and -- the dangerous half -- it is not unmounted either. Unmounting the
+    # running system's root here would take the machine down.
+    [ ! -e "$mlog" ]
+    [ ! -e "$ulog" ]
+}
+
+# The control for the two "not reached" assertions above: identical stubs, with
+# findmnt reporting no mountpoint, and both tools are reached. Without it a
+# harness whose stubs had stopped being found would read as a pass.
+@test "linux_installs still mounts and unmounts its own temp dir when nothing is mounted" {
+    local stub="${BATS_TEST_TMPDIR}/bin" root="${BATS_TEST_TMPDIR}/root" tmp="${BATS_TEST_TMPDIR}/mnt"
+    local mlog="${BATS_TEST_TMPDIR}/mount.log" ulog="${BATS_TEST_TMPDIR}/umount.log"
+    mkdir -p "$stub" "${root}/etc" "${root}/boot/grub" "$tmp"
+    printf 'NAME="Arch Linux"\nID=arch\n' > "${root}/etc/os-release"
+    printf '#!/bin/bash\necho "/dev/sdz1 ext4 1b13ff14-95ae-46f1-b975-a4233c5ed17f"\n' > "${stub}/lsblk"
+    printf '#!/bin/bash\nexit 1\n' > "${stub}/findmnt"
+    cat > "${stub}/mount" <<MOUNT
+#!/bin/bash
+echo "\$*" >> "${mlog}"
+cp -a "${root}/." "\${!#}/"
+exit 0
+MOUNT
+    cat > "${stub}/umount" <<UMOUNT
+#!/bin/bash
+echo "\$*" >> "${ulog}"
+exit 0
+UMOUNT
+    chmod +x "${stub}/lsblk" "${stub}/findmnt" "${stub}/mount" "${stub}/umount"
+    PATH="${stub}:${PATH}" TMPDIR="$tmp" run linux_installs
+    [ "$status" -eq 0 ]
+    [ "$output" = "/dev/sdz1 1b13ff14-95ae-46f1-b975-a4233c5ed17f yes Arch Linux" ]
+    grep -qF -- '-o ro,noload /dev/sdz1' "$mlog"
+    # What was unmounted is the directory mktemp made under TMPDIR, never the
+    # fixture that stood in for a pre-existing mountpoint.
+    local line
+    while read -r line; do
+        [[ "${line##* }" == "$tmp"/* ]]
+    done < "$ulog"
+}
+
 @test "linux_installs fails when it cannot create a mountpoint" {
     local stub="${BATS_TEST_TMPDIR}/bin"
     mkdir -p "$stub"

@@ -332,12 +332,17 @@ custom_cfg_upsert() {
 
 # --- inventory (read-only host probes) --------------------------------------
 #
-# Nothing below writes. Every mount is read-only with the option that stops
-# that filesystem replaying its journal, into a mktemp -d, and is unmounted
-# before the function returns: this runs against filesystems belonging to
-# operating systems that are staying. A plain `mount -o ro` on ext4 replays a
-# dirty journal, which is a write; and a mount left behind is picked up by
-# phase 4's genfstab and lands in the new system's fstab.
+# Nothing below writes. Every mount these functions make is read-only with the
+# option that stops that filesystem replaying its journal, into a mktemp -d,
+# and is unmounted before the function returns: this runs against filesystems
+# belonging to operating systems that are staying. A plain `mount -o ro` on
+# ext4 replays a dirty journal, which is a write; and a mount left behind is
+# picked up by phase 4's genfstab and lands in the new system's fstab.
+#
+# linux_installs additionally reads a candidate that is ALREADY mounted through
+# the mountpoint it has, because a second mount of it would fail. Such a
+# mountpoint is read and never touched: no remount, and no umount -- see the
+# `tmp` guard there.
 #
 # Every probe here either answers or fails. None of them may answer "nothing
 # found" because the tool it shells out to broke: an empty ESP list reads as
@@ -958,7 +963,7 @@ esp_probe() {
 # rather than chase.
 linux_installs() {
     local -a exclude=() rows=() try_opts=()
-    local dev fstype uuid raw row tmp skip ex name has_grub mounted opts
+    local dev fstype uuid raw row tmp skip ex name has_grub mounted opts existing probe
     exclude=("$@")
     local uuid_re='^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$'
 
@@ -998,21 +1003,50 @@ linux_installs() {
         else
             try_opts=("ro,noload")
         fi
-        # Not `|| continue`: mktemp failing is the tool breaking, and silently
-        # dropping the candidate answers "there is no other Linux here" for a
-        # reason that has nothing to do with the machine. esp_probe treats the
-        # same failure the same way.
-        tmp=$(mktemp -d) || {
-            error "linux_installs: cannot create a mountpoint for $dev"
-            return 1
-        }
-        mounted=false
-        for opts in "${try_opts[@]}"; do
-            if mount -o "$opts" "$dev" "$tmp" 2>/dev/null; then
-                mounted=true
-                break
-            fi
-        done
+        # A candidate that is already mounted cannot be mounted a second time
+        # into a temp directory: the kernel refuses, and the candidate was then
+        # reported as "could not be read". Measured on the operator's machine,
+        # where the live root (/dev/nvme1n1p7) and /home (/dev/sdb3) are both
+        # mounted rw -- phase 6's forward half found no GRUB neighbour at all,
+        # on exactly the machine the feature was written for. From a live ISO
+        # nothing is mounted and this does not arise, but mounting a partition
+        # to look at it before installing was enough to blind the phase.
+        #
+        # Read through the mountpoint it already has instead. That mount is
+        # somebody else's and is left exactly as found: nothing here writes,
+        # nothing remounts it, and the teardown below is keyed on `tmp`, which
+        # is assigned only by mktemp -- so umount can never be handed a
+        # mountpoint this function did not make. Unmounting the running
+        # system's own root is the failure mode that rule exists to prevent.
+        #
+        # --first-only because a btrfs neighbour has one mountpoint per mounted
+        # subvolume. Picking the first has the same limitation as the
+        # ro,nologreplay fallback below: if that mountpoint is not the one
+        # holding the root subvolume, /etc/os-release is absent and the
+        # candidate is classified as not-Linux rather than as unreadable.
+        tmp=""
+        existing=$(findmnt --first-only -nro TARGET --source "$dev" 2>/dev/null) || existing=""
+        if [[ -n "$existing" ]]; then
+            probe="$existing"
+            mounted=true
+        else
+            # Not `|| continue`: mktemp failing is the tool breaking, and
+            # silently dropping the candidate answers "there is no other Linux
+            # here" for a reason that has nothing to do with the machine.
+            # esp_probe treats the same failure the same way.
+            tmp=$(mktemp -d) || {
+                error "linux_installs: cannot create a mountpoint for $dev"
+                return 1
+            }
+            probe="$tmp"
+            mounted=false
+            for opts in "${try_opts[@]}"; do
+                if mount -o "$opts" "$dev" "$tmp" 2>/dev/null; then
+                    mounted=true
+                    break
+                fi
+            done
+        fi
         if [[ "$mounted" != true ]]; then
             # A candidate that would not mount is reported, not dropped. It
             # used to vanish with a success status and nothing said, so an ext4
@@ -1021,6 +1055,8 @@ linux_installs() {
             # because "no" is a claim about a filesystem nobody read.
             error "linux_installs: ${dev} (${fstype}) could not be read; it is reported as unknown rather than skipped"
             printf '%s %s unknown (unreadable)\n' "$dev" "$uuid"
+            # Only the mktemp branch can get here -- the already-mounted branch
+            # sets mounted=true -- so this rmdir is always our own directory.
             rmdir "$tmp" 2>/dev/null || true
             continue
         fi
@@ -1029,7 +1065,7 @@ linux_installs() {
         # a failing call here leaks a mount of a neighbour's root into phase
         # 4's genfstab. (The not-mounted branch above `continue`s before
         # reaching here, and has no mount to leak.)
-        if [[ -r "${tmp}/etc/os-release" ]]; then
+        if [[ -r "${probe}/etc/os-release" ]]; then
             # Read with grep+cut rather than sourcing it: /etc/os-release
             # on a partition belonging to someone else is an untrusted
             # file, and sourcing runs it as root.
@@ -1048,11 +1084,11 @@ linux_installs() {
             # the name a human chose, and silently rewriting a neighbour's
             # OS name in the boot menu is worse than saying so. A carriage
             # return is nobody's name.
-            name=$(grep -m1 '^NAME=' "${tmp}/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"\r' || true)
+            name=$(grep -m1 '^NAME=' "${probe}/etc/os-release" 2>/dev/null | cut -d= -f2- | tr -d '"\r' || true)
             has_grub=no
-            [[ -d "${tmp}/boot/grub" ]] && has_grub=yes
+            [[ -d "${probe}/boot/grub" ]] && has_grub=yes
             printf '%s %s %s %s\n' "$dev" "$uuid" "$has_grub" "${name:-unknown}"
-        elif [[ -e "${tmp}/etc/os-release" ]]; then
+        elif [[ -e "${probe}/etc/os-release" ]]; then
             # Present and unreadable is the same shape as a mount that failed --
             # a filesystem nobody could read -- and is reported the same way,
             # rather than dropped. Distinguished from ABSENT deliberately: a
@@ -1063,8 +1099,14 @@ linux_installs() {
             error "linux_installs: ${dev} (${fstype}) has an unreadable /etc/os-release; it is reported as unknown rather than skipped"
             printf '%s %s unknown (unreadable)\n' "$dev" "$uuid"
         fi
-        umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
-        rmdir "$tmp" 2>/dev/null || true
+        # `tmp` is empty exactly when the candidate was read through a
+        # mountpoint that already existed, and non-empty only when mktemp made
+        # one above. Nothing else assigns it, so this is the whole guarantee
+        # that a mount belonging to the running system is never torn down.
+        if [[ -n "$tmp" ]]; then
+            umount "$tmp" 2>/dev/null || umount -l "$tmp" 2>/dev/null || true
+            rmdir "$tmp" 2>/dev/null || true
+        fi
     done
 }
 
