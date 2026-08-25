@@ -1578,3 +1578,100 @@ register_announcer() {
     [ -n "$reg_line" ]
     [ "$chroot_line" -lt "$reg_line" ]
 }
+
+# --- the phase 1 and phase 2 host writes under --dry-run --------------------
+#
+# `timedatectl set-ntp true` turns on time synchronisation on the machine the
+# installer is running on, and it persists across the run; `loadkeys` reloads
+# that machine's virtual console for the rest of the boot. Neither touches the
+# target install, so under --dry-run both are the rehearsal reaching out and
+# changing the operator's own host -- exactly what run_cmd exists to withhold.
+#
+# Each case carries its own DRY_RUN=false control. "The stub recorded nothing"
+# is equally satisfied by a harness that never reached the command at all, so
+# the same call has to produce a record once the gate is open.
+
+# A PATH shim recording every invocation. The args file is created only by an
+# execution, so its absence is the proof that nothing ran.
+stub_tool() {
+    local name=$1
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/%s_args\nexit 0\n' "$TMP" "$name" \
+        > "$TMP/bin/$name"
+    chmod +x "$TMP/bin/$name"
+}
+
+# Drives the real phase_preflight. `die` is neutralised because this suite
+# never runs as root and EUID cannot be assigned, so `(( EUID == 0 )) || die
+# "must run as root"` would end every case several lines before the clock
+# block; with die inert, the archiso and UEFI guards fall through too. The
+# three host actions around the clock are stubbed so that reaching it needs
+# neither the network nor this machine's keyring and mirrorlist.
+run_preflight() {
+    local dry=$1
+    stub_tool timedatectl
+    run timeout 20 env DRY_RUN="$dry" PATH="$TMP/bin:$PATH" bash -c "
+        source '${INSTALL_SH}'
+        banner() { :; }
+        die() { :; }
+        ask_yes_no() { return 0; }
+        net_check() { return 0; }
+        refresh_keyring() { return 0; }
+        rank_mirrors() { :; }
+        phase_preflight
+    "
+}
+
+@test "phase_preflight enables no NTP under --dry-run and prints what it would run" {
+    run_preflight true
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/timedatectl_args" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"timedatectl set-ntp true"* ]]
+
+    run_preflight false
+    [ "$status" -eq 0 ]
+    grep -qF -- 'set-ntp true' "$TMP/timedatectl_args"
+}
+
+# Drives the real phase_locale. Its keymap loop is the first of three, and the
+# two after it are answered rather than skipped because there is no way out of
+# the function before them: `ask` returns its default at EOF and every failed
+# check `continue`s, so an unanswerable prompt spins until the timeout.
+run_locale() {
+    local dry=$1
+    stub_tool loadkeys
+    run timeout 20 env DRY_RUN="$dry" PATH="$TMP/bin:$PATH" bash -c "
+        source '${INSTALL_SH}'
+        banner() { :; }
+        confirm_step() { :; }
+        keymap_listed() { return 0; }
+        locale_listed() { return 0; }
+        # The timezone loop's check is a real -f against /usr/share/zoneinfo,
+        # which no stub here intercepts, so the answer has to be one every
+        # tzdata carries.
+        ask() {
+            case \"\$1\" in
+                'Console keymap') printf 'br-abnt2\n' ;;
+                'System locale')  printf 'en_US.UTF-8\n' ;;
+                *)                printf 'UTC\n' ;;
+            esac
+        }
+        phase_locale
+    "
+}
+
+@test "phase_locale loads no keymap under --dry-run and prints what it would run" {
+    run_locale true
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/loadkeys_args" ]
+    # The real path sends loadkeys' own output to /dev/null. Wrapping run_cmd
+    # in that redirection would send the [dry-run] line there too, leaving the
+    # rehearsal showing nothing where it withheld a command.
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"loadkeys br-abnt2"* ]]
+
+    run_locale false
+    [ "$status" -eq 0 ]
+    grep -qF -- 'br-abnt2' "$TMP/loadkeys_args"
+}

@@ -272,7 +272,14 @@ phase_preflight() {
     # signatures whose creation time is in the future, so a host whose RTC runs
     # ahead fails in phase 4 with signature errors that read like a corrupt
     # mirror. Say it now, in the phase that owns the clock.
-    if ! timedatectl set-ntp true; then
+    #
+    # Routed through run_cmd because enabling NTP is a change to the host the
+    # installer is running on, not to the target install, and it outlives the
+    # run. run_cmd returns 0 under --dry-run, so the warning below is a
+    # real-run-only path: a rehearsal that enabled nothing has no failure to
+    # report. The command is written once, so what --dry-run prints cannot
+    # differ from what a real run issues.
+    if ! run_cmd timedatectl set-ntp true; then
         warn "could not enable NTP -- if this host's clock is wrong, pacman will reject package signatures"
     fi
 
@@ -300,11 +307,27 @@ phase_locale() {
             warn "no such console keymap: ${KEYMAP}"
             continue
         fi
+        # One array for both paths below, so the command --dry-run prints
+        # cannot drift from the one a real run issues.
+        local -a keymap_cmd=(loadkeys "$KEYMAP")
         # Still only a warning: loadkeys fails on a host with no console (a
         # serial or ssh install), and the value has already been checked
         # against the keymap list. /etc/vconsole.conf is what outlives this.
-        loadkeys "$KEYMAP" >/dev/null 2>&1 \
-            || warn "could not load keymap '${KEYMAP}' into this console"
+        #
+        # Withheld under --dry-run all the same: this reloads the console of
+        # the machine the rehearsal is running on for the rest of its boot.
+        # Deliberately not `run_cmd "${keymap_cmd[@]}" >/dev/null 2>&1` -- the
+        # redirection belongs to the real path, and applying it here would
+        # discard run_cmd's [dry-run] line, leaving a rehearsal that shows
+        # nothing where it withheld a command. The warning belongs to the real
+        # branch alone: a rehearsal that loaded no keymap cannot have failed
+        # to load one.
+        if [[ "$DRY_RUN" == true ]]; then
+            run_cmd "${keymap_cmd[@]}"
+        else
+            "${keymap_cmd[@]}" >/dev/null 2>&1 \
+                || warn "could not load keymap '${KEYMAP}' into this console"
+        fi
         break
     done
 
