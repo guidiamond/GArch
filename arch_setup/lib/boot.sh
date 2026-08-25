@@ -1112,6 +1112,16 @@ linux_installs() {
 
 # --- registering this install with the firmware -----------------------------
 
+# `[[ -e ]]` behind a name, for the same reason install.sh's valid_block_dev
+# has one: the suite cannot make a device node without root, so the only way to
+# drive the --dry-run branch below for an ESP that DOES exist -- the reuse path,
+# where the operator adopted somebody else's -- is to replace this in the test
+# shell. Called only under --dry-run; a real run resolves the device through
+# lsblk regardless.
+dev_present() {
+    [[ -e "$1" ]]
+}
+
 # nvram_register_removable <esp_partition> <label>
 #
 # Give this install a firmware boot entry pointing at \EFI\BOOT\BOOTX64.EFI on
@@ -1163,6 +1173,25 @@ nvram_register_removable() {
         error "nvram_register_removable: '$label' is not a bootloader id ([A-Za-z0-9_-], not starting with '-'); refusing to pass it to efibootmgr as a label"
         return 1
     }
+
+    # Under --dry-run the ESP was never created, so lsblk cannot name its
+    # parent disk and the refusal below fires -- which is correct fail-closed
+    # behaviour but reads, in a rehearsal transcript, as a defect: an [ERROR]
+    # plus install.sh's follow-up warning that this install "is reachable only
+    # from another system's boot menu", asserted about a partition that does
+    # not exist. Say what a real run would do instead.
+    #
+    # Deliberately narrower than "suppress the refusal under --dry-run": the
+    # gate is the device being ABSENT, which under --dry-run means nothing
+    # created it. A device that is present and still unresolvable is a fact
+    # about the machine -- an adopted ESP lsblk reports without a parent, say --
+    # and refuses in both modes, as does a real run against an absent device.
+    # The label check above runs first either way.
+    if [[ "${DRY_RUN:-false}" == true ]] && ! dev_present "$dev"; then
+        info "[dry-run] would register ${dev} with the firmware as ${label}, loader \\EFI\\BOOT\\BOOTX64.EFI"
+        info "[dry-run] ${dev} does not exist yet -- a rehearsal partitions nothing, so there is no disk and partition number to resolve. A real run registers the entry here."
+        return 0
+    fi
 
     # PKNAME and PARTN rather than stripping digits off the name: /dev/sda2 and
     # /dev/nvme0n1p5 separate the number from the disk differently, and a

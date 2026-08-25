@@ -2399,6 +2399,12 @@ run_register() {
 
 @test "nvram_register_removable writes no NVRAM under --dry-run" {
     nvram_stub "$(nvram_fixture_windows)"
+    # This case is about the dry-run path for an ESP that is THERE -- the reuse
+    # path, where the operator adopted an existing one -- so the fixture device
+    # is declared present. Left to `[[ -e ]]` it is not, on any machine running
+    # this suite, and the run takes the "nothing created it yet" branch that
+    # prints no command at all.
+    dev_present() { :; }
     DRY_RUN=true
     run_register /dev/nvme0n1p5 ARCH_WORK
     [ "$status" -eq 0 ]
@@ -2449,6 +2455,62 @@ EFIBOOTMGR
     # both satisfies "-ne 0" and contains the function's name.
     [[ "$output" == *"does not list"* ]]
     [[ "$output" == *"/dev/nvme0n1p9"* ]]
+}
+
+# dev_present is a seam the two cases below replace, so what it actually tests
+# has to be pinned somewhere.
+@test "dev_present is an existence test on the path it is given" {
+    run dev_present "${BATS_TEST_TMPDIR}"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run dev_present "${BATS_TEST_TMPDIR}/no-such-thing"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+# The rehearsal's transcript carried an [ERROR] saying lsblk "does not list
+# /dev/nvme0n1p3 as a GPT partition", followed by install.sh warning that the
+# install would be reachable only from another system's boot menu -- both about
+# a partition --dry-run had not created. Correct behaviour, unreadable as a
+# report.
+#
+# The control for "no [ERROR]" here is the DRY_RUN=false case just above, which
+# takes the same device down the same path and does produce the refusal.
+@test "nvram_register_removable explains rather than refuses when --dry-run created no ESP" {
+    nvram_stub "$(nvram_fixture_windows)"
+    # Stated rather than left to the host: this case is exactly "the partition
+    # does not exist", and it must not depend on which devices the machine
+    # running the suite happens to have.
+    dev_present() { return 1; }
+    DRY_RUN=true
+    run_register /dev/nvme0n1p9 ARCH_WORK
+    [ "$status" -eq 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"/dev/nvme0n1p9"* ]]
+    [[ "$output" == *"does not exist yet"* ]]
+    [[ "$output" != *"refusing to guess"* ]]
+
+    # Not a bypass: the label is still checked before any of this.
+    run_register /dev/nvme0n1p9 "--delete-bootnum"
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"is not a bootloader id"* ]]
+}
+
+# The narrow half of the same rule: what is suppressed is the case where the
+# device is absent because nothing created it, not the refusal itself. A device
+# that IS there and still cannot be resolved refuses under --dry-run too.
+@test "nvram_register_removable still refuses an ESP that exists but lsblk cannot resolve" {
+    nvram_stub "$(nvram_fixture_windows)"
+    local present="${BATS_TEST_TMPDIR}/present-but-unresolvable"
+    : > "$present"
+    dev_present() { :; }
+    DRY_RUN=true
+    run_register "$present" ARCH_WORK
+    [ "$status" -ne 0 ]
+    [ ! -s "$NVRAM_WRITE_LOG" ]
+    [[ "$output" == *"refusing to guess"* ]]
 }
 
 # A whole-disk row has no partition number and no partition GUID. Handing
