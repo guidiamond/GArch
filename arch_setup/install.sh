@@ -1123,24 +1123,90 @@ chroot_dry_run() {
     success "[dry-run] chroot config and script generate cleanly"
 }
 
-# Give this install a firmware boot entry when grub-install would not have.
+# nvram_missing_entry_warning -- what the operator has lost, and how to get it
+# back by hand. Shared by both branches below because the loss is the same one:
+# an install reachable only from a neighbour's menu is one a neighbour's
+# upgrade can take away.
 #
-# Only under --removable: without it grub-install registers the entry itself,
-# and doing it here too would leave the firmware with two rows for one install.
-# See nvram_register_removable in lib/boot.sh for why --removable skips it.
+# The efibootmgr line is meant to be retyped, so it names the loader path this
+# install actually wrote -- own_loader_path, not a constant: under --removable
+# that is \EFI\BOOT\BOOTX64.EFI and otherwise the vendor directory.
+nvram_missing_entry_warning() {
+    local loader
+    loader=$(own_loader_path)
+    warn "${BOOTLOADER_ID} has no firmware boot entry of its own -- it is reachable only from another system's boot menu."
+    warn "To add one by hand: efibootmgr --create --disk <disk> --part <n> --loader '${loader//\//\\}' --label ${BOOTLOADER_ID}"
+}
+
+# Confirm the firmware entry grub-install was supposed to create.
+#
+# grub-install registers it itself when --removable is not passed -- but it
+# WARNS AND EXITS 0 when it cannot: no efibootmgr in the chroot, a read-only
+# efivarfs, an NVRAM with no room left. The install is then a loader on the ESP
+# with no firmware entry, and not at the fallback path either, so nothing but a
+# neighbour's menu reaches it. Silence there is the outcome the warning above
+# was written for, on the branch that never used to run it.
+#
+# Confirming, never registering: adding an entry here would give the machine
+# two rows for one install on every run where grub-install did its job.
+nvram_confirm_own_entry() {
+    local want guid raw enum epartuuid epath elabel
+    want=$(own_loader_path)
+    # Called in a conditional, and its output validated as a GPT partition
+    # GUID: lsblk leaves the column empty for a device that is not a GPT
+    # partition, and an empty guid would match an NVRAM row whose own column
+    # was empty.
+    if ! guid=$(lsblk -dnro PARTUUID "$PART_EFI" 2>/dev/null) \
+       || [[ ! "$guid" =~ ^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$ ]]; then
+        warn "could not read ${PART_EFI}'s partition GUID -- unable to confirm ${BOOTLOADER_ID} has a firmware boot entry."
+        return 0
+    fi
+    # Conditional, not a bare call: nvram_loaders returns non-zero when
+    # efibootmgr could not be read, which under `set -euo pipefail` would abort
+    # an install that has already succeeded. "Could not read the firmware" is
+    # also not the same fact as "the entry is missing", and only the second one
+    # justifies the how-to-fix-it warning.
+    if ! raw=$(nvram_loaders); then
+        warn "could not read the firmware's boot entries -- unable to confirm ${BOOTLOADER_ID} has one."
+        return 0
+    fi
+    while read -r enum epartuuid epath elabel; do
+        # Both fields compared case-insensitively: lsblk reports the partition
+        # GUID upper-case where efibootmgr reports it lower-case, and the path
+        # lives on FAT, which has no case at all.
+        [[ "${epartuuid,,}" == "${guid,,}" ]] || continue
+        [[ "${epath^^}" == "${want^^}" ]] || continue
+        info "The firmware boots this install as entry ${enum} (${elabel})."
+        return 0
+    done <<< "$raw"
+    nvram_missing_entry_warning
+}
+
+# Give this install a firmware boot entry, or confirm it already has one.
+#
+# nvram_register_removable runs only under --removable: without it
+# grub-install registers the entry itself, and doing it here too would leave
+# the firmware with two rows for one install. See nvram_register_removable in
+# lib/boot.sh for why --removable skips it. The other branch therefore checks
+# rather than writes.
 #
 # Never fatal. This runs after the chroot has returned, so the system is
 # installed and phase 6 is still to come; under `set -euo pipefail` a bare call
 # would turn a failed efibootmgr into "Installation failed" for an install that
-# succeeded. The warning says what the operator has lost, because an install
-# reachable only from a neighbour's menu is one a neighbour's upgrade can take
-# away.
+# succeeded.
 chroot_register_nvram() {
-    [[ "$GRUB_REMOVABLE" == true ]] || return 0
-    nvram_register_removable "$PART_EFI" "$BOOTLOADER_ID" || {
-        warn "${BOOTLOADER_ID} has no firmware boot entry of its own -- it is reachable only from another system's boot menu."
-        warn "To add one by hand: efibootmgr --create --disk <disk> --part <n> --loader '\\EFI\\BOOT\\BOOTX64.EFI' --label ${BOOTLOADER_ID}"
-    }
+    if [[ "$GRUB_REMOVABLE" == true ]]; then
+        nvram_register_removable "$PART_EFI" "$BOOTLOADER_ID" || nvram_missing_entry_warning
+        return 0
+    fi
+    # A rehearsal never ran grub-install, so there is no entry to find and
+    # "no firmware boot entry" would be a claim about the described install
+    # that a real run would not have produced.
+    if [[ "$DRY_RUN" == true ]]; then
+        info "[dry-run] a real run would confirm the firmware holds an entry for ${PART_EFI}:$(own_loader_path)"
+        return 0
+    fi
+    nvram_confirm_own_entry
 }
 
 phase_chroot() {

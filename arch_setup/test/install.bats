@@ -1814,3 +1814,71 @@ run_locale() {
     [ "$status" -eq 0 ]
     [ "$output" = "GRUB_AA_AA_1111" ]
 }
+
+# --- phase 5: confirming the entry grub-install was supposed to make --------
+#
+# On the non-removable path grub-install registers the entry itself -- but it
+# WARNS AND EXITS 0 when it cannot: no efibootmgr in the chroot, a read-only
+# efivarfs, an NVRAM with no room left. The result is a loader on the ESP with
+# no firmware entry, and not at the fallback path either, reachable only
+# through a neighbour's menu -- with nothing said about it.
+
+@test "phase 5 warns when the firmware has no entry for a non-removable install" {
+    run in_install "
+        DRY_RUN=false; GRUB_REMOVABLE=false; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        lsblk() { echo 1a2b3c4d-0000-0000-0000-000000000001; }
+        nvram_loaders() { printf '0002 9999aaaa-0000-0000-0000-000000000009 /EFI/Microsoft/Boot/bootmgfw.efi Windows\n'; }
+        chroot_register_nvram
+        echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no firmware boot entry of its own"* ]]
+    # A command the operator is meant to retype, so the --loader argument has
+    # to survive printing character for character.
+    [[ "$output" == *"--loader '\EFI\ARCH_WORK\grubx64.efi' --label ARCH_WORK"* ]]
+    # Never fatal: the system is installed and phase 6 is still to come.
+    [[ "$output" == *"REACHED"* ]]
+}
+
+# The control for the case above: with the row present the phase says so and
+# says nothing about a missing entry, which is what makes that "warns"
+# assertion mean anything.
+@test "phase 5 confirms the firmware entry grub-install made" {
+    run in_install "
+        DRY_RUN=false; GRUB_REMOVABLE=false; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        lsblk() { echo 1A2B3C4D-0000-0000-0000-000000000001; }
+        nvram_loaders() { printf '0003 1a2b3c4d-0000-0000-0000-000000000001 /EFI/ARCH_WORK/grubx64.efi Arch work\n'; }
+        chroot_register_nvram"
+    [ "$status" -eq 0 ]
+    # Matched case-insensitively on both fields: lsblk reports the partition
+    # GUID upper-case and efibootmgr lower-case, and FAT has no case either.
+    [[ "$output" == *"entry 0003"* ]]
+    [[ "$output" != *"no firmware boot entry"* ]]
+}
+
+# nvram_loaders returns non-zero when efibootmgr could not be read at all.
+# That is "unable to confirm", not "the entry is missing", and under
+# `set -euo pipefail` a bare call would abort the installer outright.
+@test "phase 5 says it could not confirm when the firmware cannot be read" {
+    run in_install "
+        DRY_RUN=false; GRUB_REMOVABLE=false; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        lsblk() { echo 1a2b3c4d-0000-0000-0000-000000000001; }
+        nvram_loaders() { return 1; }
+        chroot_register_nvram
+        echo REACHED"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"could not"* ]]
+    [[ "$output" == *"REACHED"* ]]
+}
+
+# A rehearsal never ran grub-install, so there is no entry to find and a
+# warning about a missing one would be a lie about the install being described.
+@test "phase 5 does not claim a missing firmware entry under --dry-run" {
+    run in_install "
+        DRY_RUN=true; GRUB_REMOVABLE=false; PART_EFI=/dev/sdz1; BOOTLOADER_ID=ARCH_WORK
+        nvram_loaders() { echo 'NVRAM_READ'; }
+        chroot_register_nvram"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"no firmware boot entry"* ]]
+    [[ "$output" != *"NVRAM_READ"* ]]
+    [[ "$output" == *"dry-run"* ]]
+}
