@@ -10,20 +10,22 @@ BAR_WIDS=""
 
 ensure_wids() {
   [[ -n "$BAR_WIDS" ]] && return
-  BAR_WIDS="$(xdotool search --name "^Eww - " 2>/dev/null)"
+  # timeout guard: this runs inside the `bspc subscribe` loop, and a hung X
+  # round-trip here would stop us draining the pipe -> bspwm freezes.
+  BAR_WIDS="$(timeout 2 xdotool search --name "^Eww - " 2>/dev/null)"
 }
 
 hide_bars() {
   ensure_wids
   for wid in $BAR_WIDS; do
-    xdotool windowunmap "$wid" 2>/dev/null
+    timeout 2 xdotool windowunmap "$wid" 2>/dev/null
   done
 }
 
 show_bars() {
   ensure_wids
   for wid in $BAR_WIDS; do
-    xdotool windowmap "$wid" 2>/dev/null
+    timeout 2 xdotool windowmap "$wid" 2>/dev/null
   done
 }
 

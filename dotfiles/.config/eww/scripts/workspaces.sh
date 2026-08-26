@@ -10,6 +10,7 @@
 # Zero subprocesses per event — awk parses the report line directly from the pipe.
 
 MONITOR="${1:?Usage: workspaces.sh <monitor_name>}"
+RELAY="$(dirname "$(readlink -f "$0")")/eww_relay.py"
 
 AWK_PARSER='
 {
@@ -35,8 +36,17 @@ AWK_PARSER='
   fflush()
 }'
 
-# Initial output
-bspc wm -g | awk -F: -v mon="$MONITOR" "$AWK_PARSER"
+emit_stream() {
+  # Initial output
+  timeout 2 bspc wm -g | awk -F: -v mon="$MONITOR" "$AWK_PARSER"
 
-# Stream updates — awk parses each report line with no subprocess overhead
-bspc subscribe report 2>/dev/null | awk -F: -v mon="$MONITOR" "$AWK_PARSER"
+  # Stream updates — awk parses each report line with no subprocess overhead
+  bspc subscribe report 2>/dev/null | awk -F: -v mon="$MONITOR" "$AWK_PARSER"
+}
+
+# All output goes through the relay, which never blocks on eww's pipe.
+# Writing to eww directly is what froze the WM: eww stalls -> awk blocks in
+# write() -> it stops draining `bspc subscribe` -> bspwm's blocking event
+# write fills up -> bspwm's single-threaded loop stops reading X input and
+# answering queries (dead mouse, dead keybinds). See eww_relay.py.
+emit_stream | exec python3 "$RELAY"
