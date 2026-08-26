@@ -46,6 +46,10 @@ likely to abort a real run late -- after the disk is gone.
 
 ## Custom partitioning and boot integration
 
+For a start-to-finish walkthrough of installing alongside an existing
+system -- backups to take first, what to answer at each prompt, how to
+check it afterwards and how to recover -- see [INSTALL.md](INSTALL.md).
+
 Phase 3 asks for a partitioning mode:
 
 - **Whole disk** -- wipe a disk and lay out ESP + root. The original
