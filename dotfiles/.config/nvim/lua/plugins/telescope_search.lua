@@ -9,6 +9,7 @@ local M = {}
 local state = {
 	regex_enabled = false,
 	filetype_filter = nil,
+	test_filter = nil,
 }
 
 -- rg type aliases that map extensions to rg --type values
@@ -19,16 +20,50 @@ local EXT_TO_RG_TYPE = {
 	html = "html", css = "css", scss = "css", md = "markdown", vim = "vim",
 }
 
--- Reverse map: rg type → glob pattern for spectre
-local RG_TYPE_TO_GLOB = {
-	lua = "*.lua", py = "*.py", js = "*.{js,jsx}", ts = "*.{ts,tsx}",
-	go = "*.go", rust = "*.rs", c = "*.c", cpp = "*.{cpp,cc,cxx,hpp}",
-	java = "*.java", ruby = "*.rb", sh = "*.sh", json = "*.json",
-	yaml = "*.{yaml,yml}", toml = "*.toml", html = "*.html",
-	css = "*.{css,scss}", markdown = "*.md", vim = "*.vim",
+-- Reverse map: rg type → the extensions it covers, for glob-based filters.
+-- Kept in sync with `rg --type-list` so glob filters match --type exactly.
+local RG_TYPE_EXTS = {
+	lua = "lua", py = "py,pyi", js = "js,jsx,cjs,mjs,vue", ts = "ts,tsx,cts,mts",
+	go = "go", rust = "rs", c = "c,h", cpp = "cpp,cc,cxx,hpp,hh,hxx",
+	java = "java,jsp", ruby = "rb,rbw,rake", sh = "sh,bash,zsh,ksh,csh",
+	json = "json", yaml = "yaml,yml", toml = "toml", html = "html,htm,ejs",
+	css = "css,scss", markdown = "md,markdown,mdx", vim = "vim",
 }
 
+--- Glob matching every file of an rg type, e.g. "ts" → "*.{ts,tsx}"
+local function type_glob(rg_type)
+	local exts = RG_TYPE_EXTS[rg_type]
+	return exts and ("*.{" .. exts .. "}") or ("*." .. rg_type)
+end
+
 local PRIORITY_TYPES = { "ts" }
+
+-- Test-file naming conventions, minus the extension (see test_globs)
+local TEST_FILE_PATTERNS = { "*.test", "*.spec", "*_test", "*_spec", "**/test_*" }
+local TEST_DIRS = { "__tests__", "__mocks__", "tests", "test" }
+
+--- Globs matching test files, restricted to `exts` ("ts,tsx") when given.
+--- The extension has to be baked in for the *positive* ("only tests") case:
+--- a positive --glob whitelists a file outright rather than intersecting with
+--- --type, so `--type ts --glob '*.test.*'` would drag in .md, .xlsx, etc.
+--- Negative globs do intersect, so the exclude case can leave `exts` nil.
+local function test_globs(exts)
+	local suffix = exts and ("{" .. exts .. "}") or "*"
+	local globs = {}
+	for _, pattern in ipairs(TEST_FILE_PATTERNS) do
+		table.insert(globs, pattern .. "." .. suffix)
+	end
+	for _, dir in ipairs(TEST_DIRS) do
+		-- unrestricted: prune the whole dir; restricted: only matching files in it
+		table.insert(globs, exts and ("**/" .. dir .. "/**/*." .. suffix) or ("**/" .. dir .. "/**"))
+	end
+	return globs
+end
+
+-- Cycle order for the test-file axis, independent of the filetype axis
+local TEST_FILTERS = { "all", "exclude", "only" }
+
+local TEST_FILTER_LABEL = { exclude = "NoTests", only = "OnlyTests" }
 
 local cached_filetypes = nil
 
@@ -156,10 +191,16 @@ local function make_search_entry(opts)
 end
 
 local function get_prompt_prefix()
-	local mode = state.regex_enabled and " [Regex]" or " [Fuzzy]"
 	local ft_filter = state.filetype_filter
-	local ft = (ft_filter and ft_filter ~= "all") and (" " .. ft_filter) or " All"
-	return mode .. " " .. ft .. "  "
+	local parts = {
+		state.regex_enabled and "[Regex]" or "[Fuzzy]",
+		(ft_filter and ft_filter ~= "all") and ft_filter or "All",
+	}
+	local test_label = TEST_FILTER_LABEL[state.test_filter]
+	if test_label then
+		table.insert(parts, test_label)
+	end
+	return " " .. table.concat(parts, "  ") .. "  "
 end
 
 local function build_args()
@@ -167,28 +208,50 @@ local function build_args()
 	if not state.regex_enabled then
 		table.insert(args, "--fixed-strings")
 	end
-	if state.filetype_filter and state.filetype_filter ~= "all" then
-		table.insert(args, "--type")
-		table.insert(args, state.filetype_filter)
+	local ft = state.filetype_filter
+	if ft == "all" then
+		ft = nil
+	end
+
+	if state.test_filter == "only" then
+		-- Positive globs bypass --type, so they carry the filetype axis themselves
+		for _, glob in ipairs(test_globs(ft and RG_TYPE_EXTS[ft])) do
+			table.insert(args, "--glob=" .. glob)
+		end
+	else
+		if ft then
+			table.insert(args, "--type")
+			table.insert(args, ft)
+		end
+		if state.test_filter == "exclude" then
+			for _, glob in ipairs(test_globs(nil)) do
+				table.insert(args, "--glob=!" .. glob)
+			end
+		end
 	end
 	return args
 end
 
-local function cycle_filetype(direction)
-	local ft_list = get_project_filetypes()
-	local current_idx = 1
-	for i, ft in ipairs(ft_list) do
-		if ft == (state.filetype_filter or "all") then
-			current_idx = i
+local function cycle_value(list, current, direction)
+	local idx = 1
+	for i, value in ipairs(list) do
+		if value == current then
+			idx = i
 			break
 		end
 	end
 	if direction > 0 then
-		current_idx = current_idx % #ft_list + 1
-	else
-		current_idx = (current_idx - 2) % #ft_list + 1
+		return list[idx % #list + 1]
 	end
-	state.filetype_filter = ft_list[current_idx]
+	return list[(idx - 2) % #list + 1]
+end
+
+local function cycle_filetype(direction)
+	state.filetype_filter = cycle_value(get_project_filetypes(), state.filetype_filter or "all", direction)
+end
+
+local function cycle_test_filter(direction)
+	state.test_filter = cycle_value(TEST_FILTERS, state.test_filter or "all", direction)
 end
 
 local function launch(initial_query)
@@ -229,6 +292,14 @@ local function launch(initial_query)
 				cycle_filetype(-1)
 			end))
 
+			map("i", "<C-e>", relaunch_with(function()
+				cycle_test_filter(1)
+			end))
+
+			map("i", "<C-S-e>", relaunch_with(function()
+				cycle_test_filter(-1)
+			end))
+
 			-- Copy relative path of selected entry
 			map("i", "<C-y>", function()
 				local entry = action_state.get_selected_entry()
@@ -264,8 +335,26 @@ local function launch(initial_query)
 				actions.close(prompt_bufnr)
 				vim.schedule(function()
 					local spectre_opts = { search_text = query, is_insert_mode = true }
-					if state.filetype_filter and state.filetype_filter ~= "all" then
-						spectre_opts.path = RG_TYPE_TO_GLOB[state.filetype_filter] or ("*." .. state.filetype_filter)
+					-- Spectre turns each whitespace-separated token into `rg -g <token>`
+					local ft = state.filetype_filter
+					if ft == "all" then
+						ft = nil
+					end
+					local globs = {}
+					if state.test_filter == "only" then
+						globs = test_globs(ft and RG_TYPE_EXTS[ft])
+					else
+						if ft then
+							table.insert(globs, type_glob(ft))
+						end
+						if state.test_filter == "exclude" then
+							for _, glob in ipairs(test_globs(nil)) do
+								table.insert(globs, "!" .. glob)
+							end
+						end
+					end
+					if #globs > 0 then
+						spectre_opts.path = table.concat(globs, " ")
 					end
 					require("spectre").open(spectre_opts)
 				end)
@@ -279,6 +368,7 @@ end
 function M.advanced_search()
 	state.regex_enabled = false
 	state.filetype_filter = "all"
+	state.test_filter = "all"
 	cached_filetypes = nil -- re-scan project filetypes
 	launch()
 end
