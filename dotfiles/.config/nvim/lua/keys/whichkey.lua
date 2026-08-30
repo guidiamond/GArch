@@ -979,7 +979,7 @@ local mappings = {
 		{
 			"<space>ff",
 			function() require("plugins.telescope_search").advanced_search() end,
-			desc = "Advanced search (C-r: regex, C-t: filetype)",
+			desc = "Advanced search (C-r: regex, C-t: filetype, C-e: tests)",
 			nowait = true,
 			remap = false,
 		},

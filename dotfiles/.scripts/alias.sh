@@ -141,3 +141,5 @@ alias ndbuild="find . \( -name "dist" -o -name ".next" -o -name ".turbo" \) -typ
 alias ndnm="find . \( -o -name "node_modules" \) -type d -prune -exec rm -rf '{}' +" 
 
 alias claude="claude --dangerously-skip-permissions"
+
+alias denoise="ffmpeg -i "$1" -af "afftdn=nr=20" -c:v copy output.mp4"
