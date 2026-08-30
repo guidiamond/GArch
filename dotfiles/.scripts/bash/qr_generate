@@ -1,6 +1,7 @@
 #!/bin/bash
 
 pic_dir=$HOME/Pictures/qrcodes
+mkdir -p "$pic_dir"
 clipboard_value=`xclip -o`
-qrencode -o ${pic_dir}/temp_qr.png "$clipboard_value" 
-mimeopen ${pic_dir}/temp_qr.png
+qrencode -s 16 -m 2 -o "${pic_dir}/temp_qr.png" "$clipboard_value"
+feh --title "qr_generate" --geometry 900x900 --auto-zoom "${pic_dir}/temp_qr.png"
