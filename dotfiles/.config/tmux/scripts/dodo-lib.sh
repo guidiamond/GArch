@@ -3,7 +3,7 @@
 # SOURCE ONLY. Do not set -e here; do not run top-level logic.
 
 # --- Constants ---
-DODO_DIR="${DODO_DIR:-$HOME/dodo/master}"
+DODO_DIR="${DODO_DIR:-$HOME/Repos/master}"
 WORKTREES_DIR="${WORKTREES_DIR:-$DODO_DIR/.worktrees}"
 GW="${GW:-$HOME/.scripts/bash/gw}"
 DODO_OWNER="Dodo-Inc"

@@ -10,7 +10,7 @@ set -euo pipefail
 
 WORKFLOW_DIR="$HOME/.local/share/tmux-workflows"
 WORKFLOW_LOG="$WORKFLOW_DIR/workflows.jsonl"
-DODO_DIR="$HOME/dodo/master"
+DODO_DIR="$HOME/Repos/master"
 WORKTREES_DIR="$DODO_DIR/.worktrees"
 GW="$HOME/.scripts/bash/gw"
 LAST_OPENED_DIR="$WORKFLOW_DIR/last-opened"

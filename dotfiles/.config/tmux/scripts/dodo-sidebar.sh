@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dodo-sidebar.sh — Conductor-style agent sidebar for ~/dodo/master.
+# dodo-sidebar.sh — Conductor-style agent sidebar for ~/Repos/master.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"

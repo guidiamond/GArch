@@ -1,6 +1,6 @@
 # Dodo Agent Sidebar
 
-Conductor-style tmux sidebar for managing Claude agents across `~/dodo/master` worktrees.
+Conductor-style tmux sidebar for managing Claude agents across `~/Repos/master` worktrees.
 
 ## Model
 The sidebar is a **persistent left pane pinned to each agent's `claude` window**
