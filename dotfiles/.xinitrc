@@ -1,31 +1,33 @@
 #!/bin/sh
+# Autostart for the X session.
+#
+# Only startx/xinit read this file directly. LightDM logins reach it through
+# ~/.xprofile, which sources it. Keep every command here idempotent: the file
+# gets re-sourced by hand often enough that blind re-launches stack duplicates.
 #xinput set-prop 'Logitech Gaming Mouse G502' 'libinput Accel Speed' 1
 
-USERNAME=$(echo $USER)
-# xmonad
-CONFIG_FOLDER="/home/${USERNAME}/.config"
-#xrandr --setprovideroutputsource modesetting NVIDIA-0
-xrandr --auto
+CONFIG_FOLDER="${XDG_CONFIG_HOME:-$HOME/.config}"
 
-# Configure monitor
-. "${CONFIG_FOLDER}/screenlayout/home-monitor.sh" &
+# Synchronous, and first: feh picks a wallpaper per monitor and bspwm assigns
+# desktops per monitor, so both need the layout already settled.
+"${CONFIG_FOLDER}/screenlayout/home-monitor.sh"
 
 # Configure background
-feh --bg-scale --randomize ~/Pictures/Backgrounds &
+feh --bg-scale --randomize "$HOME/Pictures/Backgrounds" &
 
 # Start polybar
 # "${CONFIG_FOLDER}/polybar_ex/launch.sh" &
 
 # Configure picom
-picom --config "${CONFIG_FOLDER}/picom/picom.conf" &
+pgrep -x picom >/dev/null || picom --config "${CONFIG_FOLDER}/picom/picom.conf" &
 #xmobar -x 0 "${CONFIG_FOLDER}/xmobar/xmobarrc" &
 #xmobar -x 1 "${CONFIG_FOLDER}/xmobar/xmobarrc" &
 
 
 # Start Gestures
-touchegg &
+#touchegg &
 
 # Start applets
-nm-applet &
+pgrep -x nm-applet >/dev/null || nm-applet &
 
-blueman-applet &
+pgrep -x blueman-applet >/dev/null || blueman-applet &

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Sourced by LightDM via /etc/lightdm/Xsession. ~/.xinitrc is only read by
+# startx, so without this hand-off a display-manager login gets no wallpaper,
+# no compositor and no applets.
+[ -f "$HOME/.xinitrc" ] && . "$HOME/.xinitrc"
