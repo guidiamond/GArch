@@ -310,3 +310,10 @@ cython_debug/
 # to win (gitignore uses last-match-wins ordering).
 !arch_setup/lib/
 !arch_setup/lib/**
+
+# credentials — never commit
+dotfiles/.config/gh/
+dotfiles/.config/gcloud/
+
+# JetBrains IDE per-machine state (DataGrip settings, caches, plugin data)
+dotfiles/.config/JetBrains/

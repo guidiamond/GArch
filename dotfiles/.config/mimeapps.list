@@ -9,3 +9,8 @@ text/html=brave-browser.desktop;
 x-scheme-handler/jetbrains=jetbrainsd.desktop
 x-scheme-handler/msteams=teams.desktop
 application/pdf=brave-browser.desktop;
+x-scheme-handler/auth-drata-agent=drata-agent.desktop
+x-scheme-handler/mailto=brave-browser.desktop
+
+[Added Associations]
+image/jpeg=brave-browser.desktop;

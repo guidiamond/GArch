@@ -11,7 +11,8 @@ config.default_cursor_style = "SteadyBar" -- SteadyBlock, BlinkingBlock, SteadyU
 -- config.color_scheme = "Catppuccin Mocha"
 -- config.color_scheme = "Kanagawa (Gogh)"
 -- config.color_scheme = "OneHalfDark"
-config.color_scheme = "Dracula"
+-- config.color_scheme = "Dracula"
+config.color_scheme = "Tokyo Night (Gogh)"
 config.font = wezterm.font({ family = "SauceCodePro Nerd Font", weight = 500 })
 
 config.window_close_confirmation = "NeverPrompt" -- NeverPrompt, AlwaysPrompt
@@ -20,7 +21,7 @@ config.max_fps = 75
 config.enable_tab_bar = false
 config.font_size = 12
 config.term = "wezterm"
-config.window_background_opacity = 0.8
+config.window_background_opacity = 0.94
 
 config.scrollback_lines = 50000
 
@@ -31,6 +32,20 @@ config.mouse_bindings = {
 		event = { Up = { streak = 1, button = "Left" } },
 		mods = "NONE",
 		action = wezterm.action.CompleteSelectionOrOpenLinkAtMouseCursor("ClipboardAndPrimarySelection"),
+	},
+	-- Apps that capture the mouse (herdr, tmux) swallow the plain click above.
+	-- SHIFT is wezterm's bypass_mouse_reporting_modifiers default; CTRL keeps this
+	-- off bare Shift+click, which extends the selection.
+	{
+		event = { Up = { streak = 1, button = "Left" } },
+		mods = "CTRL|SHIFT",
+		action = wezterm.action.OpenLinkAtMouseCursor,
+	},
+	-- Swallow the matching press so the captured app never sees a stray click.
+	{
+		event = { Down = { streak = 1, button = "Left" } },
+		mods = "CTRL|SHIFT",
+		action = wezterm.action.Nop,
 	},
 }
 
