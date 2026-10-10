@@ -27,7 +27,7 @@ zinit snippet 'https://github.com/junegunn/fzf/blob/master/shell/completion.zsh'
 
 #zinit ice svn 
 #zinit snippet 'https://github.com/ohmyzsh/ohmyzsh/tree/master/plugins/z/z.plugin.zsh'
-zinit snippet OMZ::plugins/z/z.plugin.zsh
+#zinit snippet OMZ::plugins/z/z.plugin.zsh
 # zinit snippet OMZ::plugins/z
 
 zmodload zsh/complist

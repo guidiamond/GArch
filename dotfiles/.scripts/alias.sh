@@ -141,3 +141,13 @@ alias ndbuild="find . \( -name "dist" -o -name ".next" -o -name ".turbo" \) -typ
 alias ndnm="find . \( -o -name "node_modules" \) -type d -prune -exec rm -rf '{}' +" 
 
 alias claude="claude --dangerously-skip-permissions"
+
+
+# Disposable agent: normal session, never entered into the tracker index.
+dagent() { command claude --dangerously-skip-permissions "$@"; }
+
+# Persistent agent: tracked by ~/.claude/hooks/agent-tracker.sh, shows up in /agent-status.
+pagent() { CLAUDE_AGENT_TRACK=1 command claude --dangerously-skip-permissions "$@"; }
+
+
+alias mount_windows="sudo ntfs-3g /dev/nvme1n1p3 /mnt"

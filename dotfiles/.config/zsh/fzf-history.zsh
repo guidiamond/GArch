@@ -100,14 +100,76 @@ fzf-history-widget() {
   local tmp_session="${TMPDIR:-/tmp}/fzf-hist-session.$$"
   local tmp_toggle="${TMPDIR:-/tmp}/fzf-hist-toggle.$$"
 
-  fc -lt '%Y-%m-%d %H:%M  ' -1 0 2>/dev/null | sed 's/^ *//' > "$tmp_global"
+  # fc -l escapes newlines as a literal \n, so it only supplies the event number and
+  # timestamp. The raw command comes from $history, NUL-separated so fzf --read0 keeps
+  # multi-line commands as one entry.
+  zmodload zsh/parameter
+  local -a entries
+  local line num rest
+  for line in "${(@f)$(fc -lt '%Y-%m-%d %H:%M' -1 0 2>/dev/null)}"; do
+    line=${line##[[:space:]]#}
+    num=${line%% *}
+    rest=${line#*  }
+    entries+=("$num  ${rest[1,16]}  ${history[$num]}")
+  done
+  print -rN -- "${entries[@]}" > "$tmp_global"
 
   # Write session history in reverse (newest first) with a line number prefix
   local i
-  : > "$tmp_session"
+  entries=()
   for (( i=${#_FZF_SESSION_HISTORY[@]}; i>=1; i-- )); do
-    echo "$i  ${_FZF_SESSION_HISTORY[$i]}" >> "$tmp_session"
+    entries+=("$i  ${_FZF_SESSION_HISTORY[$i]}")
   done
+  # print -rN with no args still writes one empty record, which fzf would list
+  : > "$tmp_session"
+  (( ${#entries} )) && print -rN -- "${entries[@]}" > "$tmp_session"
+
+  # fzf has no "exact matches first" mode, and its fuzzy score can rank a scattered
+  # match above a literal one. So on every query change this reorders the list into
+  # tiers (each newest first) and fzf runs with --no-sort to keep that order while
+  # still doing the fuzzy filtering. A plain substring check isn't enough: "cd" would
+  # rank a hash like "...8039ecd" next to real "cd" commands.
+  local tmp_sort="${TMPDIR:-/tmp}/fzf-hist-sort.$$"
+  cat > "$tmp_sort" <<'SORT_EOF'
+#!/bin/sh
+# Usage: <mode_file> <global_file> <session_file>, query read from $FZF_QUERY
+if [ "$(cat "$1")" = "session" ]; then file="$3"; else file="$2"; fi
+QUERY="$FZF_QUERY" exec awk '
+  # 1: command starts with query, 2: query starts a word, 3: query mid-word, 4: no literal match
+  function tier(cmd,   pos, offset) {
+    if (q == "") return 4
+    pos = index(cmd, q)
+    if (!pos) return 4
+    if (pos == 1) return 1
+    offset = 0
+    while (pos) {
+      if (substr(cmd, offset + pos - 1, 1) !~ /[[:alnum:]_]/) return 2
+      offset += pos
+      pos = index(substr(cmd, offset + 1), q)
+    }
+    return 3
+  }
+  BEGIN {
+    RS = ORS = "\0"
+    q = ENVIRON["QUERY"]
+    # Smart case like fzf: an uppercase letter makes the match case-sensitive
+    is_case_insensitive = (q == tolower(q))
+  }
+  {
+    cmd = $0
+    sub(/^[0-9]+  [0-9-]+ [0-9:]+  /, "", cmd)
+    if (is_case_insensitive) cmd = tolower(cmd)
+    t = tier(cmd)
+    entries[t, ++count[t]] = $0
+  }
+  END {
+    for (t = 1; t <= 4; t++)
+      for (i = 1; i <= count[t]; i++) print entries[t, i]
+  }
+' "$file"
+SORT_EOF
+  chmod +x "$tmp_sort"
+  local sort_cmd="$tmp_sort ${tmp_toggle}.state $tmp_global $tmp_session"
 
   # Helper: extract command text and show saved output (or re-run)
   local tmp_runner="${TMPDIR:-/tmp}/fzf-hist-runner.$$"
@@ -135,10 +197,10 @@ RUNNER_EOF
 MODE_FILE="${tmp_toggle}.state"
 if [ ! -f "\$MODE_FILE" ] || [ "\$(cat "\$MODE_FILE")" = "global" ]; then
   echo "session" > "\$MODE_FILE"
-  printf 'reload(cat %s)+change-header(  \033[1;32m● SESSION\033[0;90m  This terminal  │  ctrl-r: toggle  │  ctrl-o: output\033[0m)' '$tmp_session'
+  printf 'reload-sync(%s)+change-header(  \033[1;32m● SESSION\033[0;90m  This terminal  │  ctrl-r: toggle  │  ctrl-o: output\033[0m)' '$sort_cmd'
 else
   echo "global" > "\$MODE_FILE"
-  printf 'reload(cat %s)+change-header(  \033[1;34m● GLOBAL\033[0;90m  All sessions  │  ctrl-r: toggle  │  ctrl-o: output\033[0m)' '$tmp_global'
+  printf 'reload-sync(%s)+change-header(  \033[1;34m● GLOBAL\033[0;90m  All sessions  │  ctrl-r: toggle  │  ctrl-o: output\033[0m)' '$sort_cmd'
 fi
 TOGGLE_EOF
   chmod +x "$tmp_toggle"
@@ -146,9 +208,10 @@ TOGGLE_EOF
 
   local selected
   selected="$(
-    cat "$tmp_global" |
+    FZF_QUERY="$LBUFFER" "$tmp_sort" "${tmp_toggle}.state" "$tmp_global" "$tmp_session" |
     FZF_DEFAULT_OPTS_FILE='' \
     fzf \
+      --read0 \
       --ansi \
       --scheme=history \
       --header $'  \x1b[1;34m● GLOBAL\x1b[0;90m  All sessions  │  ctrl-r: toggle  │  ctrl-o: output\x1b[0m' \
@@ -162,6 +225,7 @@ TOGGLE_EOF
       --height '40%' \
       --min-height 20 \
       --bind "ctrl-z:ignore" \
+      --bind "change:reload-sync($sort_cmd)" \
       --bind "ctrl-r:transform:$tmp_toggle" \
       --bind "ctrl-o:execute($tmp_runner {} | less -R)" \
       --bind "alt-r:toggle-raw" \
@@ -171,7 +235,7 @@ TOGGLE_EOF
   )"
 
   local ret=$?
-  command rm -f "$tmp_global" "$tmp_session" "$tmp_toggle" "${tmp_toggle}.state" "$tmp_runner"
+  command rm -f "$tmp_global" "$tmp_session" "$tmp_toggle" "${tmp_toggle}.state" "$tmp_runner" "$tmp_sort"
 
   if [[ -n "$selected" ]]; then
     local cmd
