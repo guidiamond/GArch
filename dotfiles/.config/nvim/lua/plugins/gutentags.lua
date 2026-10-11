@@ -12,6 +12,10 @@ local gutentags_cache_dir = "~/.cache/vim/ctags/"
 
 set.gutentags_cache_dir = fn.expand(gutentags_cache_dir)
 
+-- gutentags only mkdir's its cache dir when the plugin file is sourced, which
+-- happens before this config runs, so create it here or every write errors out.
+fn.mkdir(set.gutentags_cache_dir, "p")
+
 -- Gutentags should generate new tags if you just finished writing a new file which you're going to include and use in another file. When you write it, you can immediately jump to its definitions.
 set.gutentags_generate_on_write = 1
 

@@ -13,6 +13,11 @@ MISMATCHED_HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard 
 
 setup() {
     source "${BATS_TEST_DIRNAME}/../lib/ui.sh"
+    # lib/disk.sh, in install.sh's own source order, purely for run_cmd: the
+    # host actions below route their writes through it, and an unsourced
+    # run_cmd is not a failure but an unbound command exiting 127 -- which the
+    # status assertions in this file would read as an ordinary refusal.
+    source "${BATS_TEST_DIRNAME}/../lib/disk.sh"
     source "${BATS_TEST_DIRNAME}/../lib/system.sh"
     TMP="$BATS_TEST_TMPDIR"
 }
@@ -398,6 +403,83 @@ stub_net() {
     [ "$status" -eq 1 ]
 }
 
+@test "needs_grub_install is false when the given id is already installed" {
+    mkdir -p "$TMP/esp/EFI/ARCH_WORK"
+    touch "$TMP/esp/EFI/ARCH_WORK/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK
+    [ "$status" -eq 1 ]
+}
+
+# The one that matters for a second install on a shared ESP: somebody else's
+# GRUB sitting in EFI/GRUB must not be mistaken for ours, or phase 5 skips
+# grub-install and then writes a grub.cfg their binary loads.
+@test "needs_grub_install is true when only a different id is installed" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK
+    [ "$status" -eq 0 ]
+}
+
+@test "needs_grub_install defaults to the GRUB id" {
+    mkdir -p "$TMP/esp/EFI/GRUB"
+    touch "$TMP/esp/EFI/GRUB/grubx64.efi"
+    run needs_grub_install "$TMP/esp"
+    [ "$status" -eq 1 ]
+}
+
+# --- needs_grub_install under --removable -----------------------------------
+#
+# grub-install --removable overrides --bootloader-id: upstream forces the EFI
+# distributor to "BOOT" and writes \EFI\BOOT\BOOTX64.EFI, so no EFI/<id>
+# directory is ever created. Asking after the vendor path in that mode answers
+# a question about a file the mode does not write.
+
+@test "needs_grub_install is true in removable mode when the fallback binary is absent" {
+    mkdir -p "$TMP/esp"
+    run needs_grub_install "$TMP/esp" ARCH_WORK true
+    [ "$status" -eq 0 ]
+}
+
+@test "needs_grub_install is false in removable mode when the fallback binary is there" {
+    mkdir -p "$TMP/esp/EFI/BOOT"
+    touch "$TMP/esp/EFI/BOOT/BOOTX64.EFI"
+    run needs_grub_install "$TMP/esp" ARCH_WORK true
+    [ "$status" -eq 1 ]
+}
+
+# The bug this parameter exists for: in removable mode an EFI/<id>/grubx64.efi
+# is not something this install can have written, so reading it as "already
+# installed" skips grub-install and leaves the fallback path -- the only path
+# a removable install boots from -- empty.
+@test "needs_grub_install ignores the vendor directory in removable mode" {
+    mkdir -p "$TMP/esp/EFI/ARCH_WORK"
+    touch "$TMP/esp/EFI/ARCH_WORK/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK true
+    [ "$status" -eq 0 ]
+}
+
+# And the mirror image: outside removable mode the fallback binary belongs to
+# whoever owns it, commonly another operating system. Reading it as ours would
+# skip grub-install for an install that has no bootloader of its own.
+@test "needs_grub_install ignores the fallback binary outside removable mode" {
+    mkdir -p "$TMP/esp/EFI/BOOT"
+    touch "$TMP/esp/EFI/BOOT/BOOTX64.EFI"
+    run needs_grub_install "$TMP/esp" ARCH_WORK false
+    [ "$status" -eq 0 ]
+    run needs_grub_install "$TMP/esp" ARCH_WORK
+    [ "$status" -eq 0 ]
+}
+
+# Anything that is not the literal "true" means non-removable, matching how
+# lib/chroot.sh's preflight and its bootloader block read GRUB_REMOVABLE. A
+# third argument that arrived misspelled must not silently switch modes.
+@test "needs_grub_install treats a non-true removable argument as non-removable" {
+    mkdir -p "$TMP/esp/EFI/BOOT" "$TMP/esp/EFI/ARCH_WORK"
+    touch "$TMP/esp/EFI/BOOT/BOOTX64.EFI" "$TMP/esp/EFI/ARCH_WORK/grubx64.efi"
+    run needs_grub_install "$TMP/esp" ARCH_WORK yes
+    [ "$status" -eq 1 ]
+}
+
 # --- refresh_keyring / rank_mirrors ----------------------------------------
 #
 # Extracted from install.sh's phase_preflight, which left the path its own
@@ -470,6 +552,79 @@ stub_pacman() {
 }
 
 @test "rank_mirrors warns instead of failing when reflector is absent" {
+    mkdir -p "$TMP/empty"
+    PATH="$TMP/empty" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"not installed"* ]]
+}
+
+# --- refresh_keyring / rank_mirrors under --dry-run -------------------------
+#
+# Both mutate the host: one syncs the pacman database and installs a package,
+# the other overwrites /etc/pacman.d/mirrorlist. On the live ISO those targets
+# are tmpfs; on an installed Arch host -- which is where a rehearsal is run --
+# they change the running system, so `install.sh --dry-run` has to withhold
+# them like every other destructive command.
+#
+# Each of these carries its own control with DRY_RUN off: "the stub recorded
+# nothing" is equally satisfied by a harness that never reached the command at
+# all, so the same call has to produce a record when the gate is open.
+
+@test "refresh_keyring runs no pacman under --dry-run and prints what it would run" {
+    DRY_RUN=true
+    stub_pacman 0 'echo "resolving dependencies..."'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/pacman_args" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"pacman -Sy --noconfirm archlinux-keyring"* ]]
+    # The [dry-run] line is the whole point of the rehearsal, so it must not go
+    # to the temp file the real path redirects pacman into -- nor should that
+    # file be created at all on a path that runs nothing.
+    [ -z "$(find "$TMP" -maxdepth 1 -name 'tmp.*' -print -quit)" ]
+
+    DRY_RUN=false
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    grep -qF -- '-Sy --noconfirm archlinux-keyring' "$TMP/pacman_args"
+}
+
+@test "rank_mirrors runs no reflector under --dry-run and prints what it would run" {
+    mkdir -p "$TMP/bin"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/reflector_args\nexit 0\n' "$TMP" \
+        > "$TMP/bin/reflector"
+    chmod +x "$TMP/bin/reflector"
+
+    DRY_RUN=true
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    [ ! -e "$TMP/reflector_args" ]
+    [[ "$output" == *"[dry-run]"* ]]
+    [[ "$output" == *"--save /etc/pacman.d/mirrorlist"* ]]
+
+    DRY_RUN=false
+    PATH="$TMP/bin:$PATH" run rank_mirrors
+    [ "$status" -eq 0 ]
+    grep -qF -- '--save /etc/pacman.d/mirrorlist' "$TMP/reflector_args"
+}
+
+# A rehearsal walks every phase, and phase 1 dies on a non-zero refresh_keyring
+# ("cannot continue -- pacstrap would fail in phase 4"). Nothing was refreshed,
+# but nothing will be pacstrapped either, so the honest answer is success --
+# anything else stops the rehearsal at the first phase it is meant to exercise.
+@test "refresh_keyring under --dry-run succeeds even where pacman would fail" {
+    DRY_RUN=true
+    stub_pacman 1 'echo "error: failed retrieving file from mirror" >&2'
+    PATH="$TMP/bin:$PATH" TMPDIR="$TMP" run refresh_keyring
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"failed retrieving file"* ]]
+}
+
+# Never fatal and never silent, both still true with the gate closed: a missing
+# reflector under --dry-run is a fact about the host worth reporting, and it is
+# the one case where there is no command to withhold.
+@test "rank_mirrors under --dry-run still reports an absent reflector" {
+    DRY_RUN=true
     mkdir -p "$TMP/empty"
     PATH="$TMP/empty" run rank_mirrors
     [ "$status" -eq 0 ]

@@ -10,10 +10,21 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-info()    { echo -e "${BLUE}[*]${RESET} $*"; }
-warn()    { echo -e "${YELLOW}[!]${RESET} $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
-success() { echo -e "${GREEN}[OK]${RESET} $*"; }
+# The message goes in printf's %s and the colours in %b: %s interprets no
+# escape at all, so a message carrying an EFI path prints the path it was
+# given. Through `echo -e` it did not -- "\EFI\BOOT\BOOTX64.EFI" reached the
+# operator as "<ESC>FI\BOOT\BOOTX64.EFI", naming a path other than the one
+# being refused, on the removable-fallback warning among others. Call sites
+# write single backslashes; nothing needs doubling.
+#
+# info, warn and success write to STDOUT and only error to stderr. That split
+# is load-bearing: lib/boot.sh's inventory functions emit records on stdout,
+# so a warn moved to stderr becomes invisible to the caller reading them, and
+# an info moved there makes any `2>&1` on those functions corrupt the records.
+info()    { printf '%b[*]%b %s\n' "$BLUE" "$RESET" "$*"; }
+warn()    { printf '%b[!]%b %s\n' "$YELLOW" "$RESET" "$*"; }
+error()   { printf '%b[ERROR]%b %s\n' "$RED" "$RESET" "$*" >&2; }
+success() { printf '%b[OK]%b %s\n' "$GREEN" "$RESET" "$*"; }
 die()     { error "$*"; exit 1; }
 
 banner() {
@@ -55,16 +66,22 @@ _ask_read() {
 
 # Prompts on stderr so the answer is the only thing on stdout and
 # `x=$(ask ...)` captures cleanly.
+#
+# Every prompt below puts the caller's text in a %s, for the reason
+# info/warn/error/success do: `echo -e` turned the \E of an EFI path into an
+# ESC character. ask_yes_no is where that mattered most -- it asks consent to
+# overwrite a path, and a question naming a path other than the one at stake
+# is consent the operator did not give.
 ask() {
     local prompt=$1 default=${2:-} input
     if [[ -n "$default" ]]; then
-        if ! _ask_read input "$(echo -e "${BOLD}${prompt}${RESET} [${default}]: ")"; then
+        if ! _ask_read input "$(printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default")"; then
             error "ask: end of input while reading '${prompt}'"
             return 1
         fi
         echo "${input:-$default}"
     else
-        if ! _ask_read input "$(echo -e "${BOLD}${prompt}${RESET}: ")"; then
+        if ! _ask_read input "$(printf '%b%s%b: ' "$BOLD" "$prompt" "$RESET")"; then
             error "ask: end of input while reading '${prompt}'"
             return 1
         fi
@@ -94,13 +111,57 @@ ask_yes_no() {
     esac
     [[ "$default" == "y" ]] && hint="[Y/n]" || hint="[y/N]"
     while true; do
-        read -rp "$(echo -e "${BOLD}${prompt}${RESET} ${hint}: ")" input
+        read -rp "$(printf '%b%s%b %s: ' "$BOLD" "$prompt" "$RESET" "$hint")" input
         input="${input:-$default}"
         case "${input,,}" in
             y|yes) return 0 ;;
             n|no)  return 1 ;;
             *)     warn "Please answer y or n." ;;
         esac
+    done
+}
+
+# ask_choice <prompt> <option>... -> the chosen option, verbatim, on stdout.
+#
+# Returns the full option string rather than an index so the caller's case
+# statement reads as the options do; an index means every call site carries a
+# mapping that drifts the moment an option is inserted.
+#
+# Everything except the answer goes to stderr. install.sh calls this as
+# `mode=$(ask_choice ...)`, so a single mistyped digit whose retry message
+# reached stdout would end up in $mode, match no case arm, and abort phase 3 --
+# and lib/ui.sh's warn has no >&2 of its own (only error does).
+ask_choice() {
+    if (( $# < 2 )); then
+        error "ask_choice: want a prompt and at least one option"
+        return 1
+    fi
+    local prompt=$1; shift
+    local -a options=("$@")
+    local i reply
+    while true; do
+        printf '%b[?]%b %s\n' "$BLUE" "$RESET" "$prompt" >&2
+        for i in "${!options[@]}"; do
+            printf '    %d) %s\n' "$(( i + 1 ))" "${options[$i]}" >&2
+        done
+        # A bare read, failing closed on EOF, for the same reason phase_disk's
+        # confirmation gate uses one: this runs in front of the disk prompts,
+        # and a piped-in stdin must not silently select option 1 -- which is
+        # the whole-disk wipe.
+        if ! read -rp "$(printf '%b[?]%b choice [1-%d]: ' "$BLUE" "$RESET" "${#options[@]}")" reply; then
+            error "ask_choice: end of input while reading a choice"
+            return 1
+        fi
+        # Three digits at most, and read in base 10. Bash arithmetic reads a
+        # leading-zero numeral as octal, so "08" aborts the (( )) outright
+        # ("value too great for base") instead of selecting anything; and an
+        # unbounded digit run wraps at 64 bits, so 18446744073709551617
+        # evaluates to 1 and would quietly pick the first option.
+        if [[ "$reply" =~ ^[0-9]{1,3}$ ]] && (( 10#$reply >= 1 && 10#$reply <= ${#options[@]} )); then
+            printf '%s\n' "${options[$(( 10#$reply - 1 ))]}"
+            return 0
+        fi
+        warn "enter a number between 1 and ${#options[@]}" >&2
     done
 }
 
@@ -125,13 +186,13 @@ ask_password() {
         # no default to fall back on, so a closed stdin used to spin forever
         # re-prompting for a password (verified: `ask_password OUT </dev/null`
         # under `timeout 5` exited 124). install.sh calls this three times.
-        if ! _ask_read _ap_pass1 "$(echo -e "${BOLD}${_ap_prompt}${RESET}: ")" --silent; then
+        if ! _ask_read _ap_pass1 "$(printf '%b%s%b: ' "$BOLD" "$_ap_prompt" "$RESET")" --silent; then
             echo ""
             error "ask_password: end of input while reading '${_ap_prompt}'"
             return 1
         fi
         echo ""
-        if ! _ask_read _ap_pass2 "$(echo -e "${BOLD}Confirm ${_ap_prompt}${RESET}: ")" --silent; then
+        if ! _ask_read _ap_pass2 "$(printf '%bConfirm %s%b: ' "$BOLD" "$_ap_prompt" "$RESET")" --silent; then
             echo ""
             error "ask_password: end of input while reading '${_ap_prompt}'"
             return 1

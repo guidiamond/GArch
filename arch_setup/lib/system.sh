@@ -1,6 +1,9 @@
 #!/bin/bash
 # Shared transforms, host probes and host actions. Both stages source this.
-# Requires lib/ui.sh.
+# Requires lib/ui.sh. The two host actions at the bottom additionally require
+# lib/disk.sh's run_cmd, which install.sh sources before this file; stage 2
+# (provision.sh) sources neither disk.sh nor those two, and a call added there
+# would find run_cmd undefined and exit 127.
 #
 # The sudo-requiring, stage-2-only setup_* family used to sit at the bottom of
 # this file and now lives in lib/setup.sh, because it violates every rule the
@@ -10,9 +13,11 @@
 # COUPLING: everything in this file -- hooks_line,
 # modules_line, gpu_packages, require_vars, grub_cmdline_add,
 # locale_gen_uncomment, locale_listed, link_timezone, detect_ucode, detect_gpu,
-# needs_grub_install, list_keymaps, net_check, refresh_keyring, rank_mirrors
+# needs_grub_install, list_keymaps, net_check
 # -- is a candidate for injection into the generated chroot
-# script, and lib/chroot.sh's CHROOT_INJECTED currently takes seven of them
+# script. Everything, that is, except the two host actions at the bottom, which
+# the section header there explains are excluded. lib/chroot.sh's
+# CHROOT_INJECTED currently takes seven of the candidates
 # verbatim via `declare -f`. Anything injected runs under `set -Eeuo pipefail`
 # in a shell that defines only RED GREEN YELLOW BLUE RESET and
 # info/warn/error/success. So: no CYAN, no BOLD, no ARCH_SETUP_DIR, no sudo,
@@ -355,10 +360,49 @@ detect_gpu() {
     esac
 }
 
-# True (0) when GRUB still needs installing. Takes the ESP mountpoint.
+# True (0) when GRUB still needs installing. Takes the ESP mountpoint, the
+# bootloader id and whether the install is a --removable one, defaulting to
+# /boot, GRUB and false.
+#
+# The id is a parameter because a second install on a shared ESP uses its own
+# vendor directory. Hardcoding GRUB meant the check was satisfied by *any*
+# GRUB on the ESP -- so a second install skipped grub-install entirely and then
+# wrote a grub.cfg the first install's binary would load, quietly replacing its
+# menu.
+#
+# This is only half the fix. Parameterising the id stops a *different* id from
+# being mistaken for ours; it does nothing about our id already being taken by
+# somebody else, which is what bootloader_id_free is for -- phase 3 must call
+# that before phase 5 relies on this.
+#
+# The removable flag is the third parameter because --removable overrides
+# --bootloader-id: upstream's util/grub-install.c sets the EFI distributor to
+# "BOOT" when it is given, so the install writes \EFI\BOOT\BOOTX64.EFI and
+# creates no vendor directory at all. Asking after EFI/<id>/grubx64.efi in
+# that mode answers a question about a file the mode never writes -- it says
+# "needs install" on every run, or worse matches an EFI/<id> that belongs to
+# somebody else and skips the grub-install this install depends on.
+#
+# The two paths are deliberately not both checked in either mode. Outside
+# removable mode the fallback binary is commonly another operating system's
+# only bootloader, and reading it as ours skips grub-install for an install
+# that then has none; inside removable mode the vendor directory cannot be
+# ours. Only the literal "true" is removable, matching how lib/chroot.sh's
+# preflight and its bootloader block read GRUB_REMOVABLE.
+#
+# In removable mode this is a weaker test than the vendor-directory one: the
+# fallback path is a single well-known name and nothing on the ESP says who
+# wrote it. It is safe here only because GRUB_REMOVABLE is true solely on the
+# then-branch of an ask_yes_no over an `offer-*` verdict, and removable_policy
+# returns `forbid` whenever a fallback binary already exists -- so a fallback
+# binary seen from this function was written by this install.
 needs_grub_install() {
-    local esp=${1:-/boot}
-    [[ -f "${esp}/EFI/GRUB/grubx64.efi" ]] && return 1
+    local esp=${1:-/boot} id=${2:-GRUB} removable=${3:-false}
+    if [[ "$removable" == "true" ]]; then
+        [[ -f "${esp}/EFI/BOOT/BOOTX64.EFI" ]] && return 1
+        return 0
+    fi
+    [[ -f "${esp}/EFI/${id}/grubx64.efi" ]] && return 1
     return 0
 }
 
@@ -369,6 +413,15 @@ needs_grub_install() {
 # out of "host probes" above so that scanning the section tells you which it
 # is. Distinct from "subsystem setup" below too: that runs in stage 2 through
 # sudo, these run in stage 1 as root on the live ISO, where there is no sudo.
+#
+# Being the only writers here, they are also the only two functions in this
+# file that call run_cmd and read DRY_RUN, so they are the two the COUPLING
+# block above no longer lists as injectable: the generated chroot script
+# defines neither name and runs under `set -u`. That gate is not optional. On
+# the ISO these targets are tmpfs, but a rehearsal is run on an installed Arch
+# host, where ungated they would re-sync that host's keyring and overwrite its
+# /etc/pacman.d/mirrorlist -- a --dry-run that changes the machine it is
+# rehearsing on.
 
 # Refresh the package-signing keyring before anything is installed from a
 # mirror. Fatal for the caller: this fails often enough to matter on an ISO a
@@ -379,14 +432,30 @@ needs_grub_install() {
 # it to /dev/null -- which is what this did before -- leaves the operator an
 # exit code and nothing to read; letting it through buries the caller's phase
 # banner under progress bars.
+#
+# Under --dry-run it returns 0 despite refreshing nothing, and that is not the
+# fatality above going soft: what makes a failure fatal is the pacstrap several
+# phases later, and a rehearsal performs none. Failing here would stop the
+# rehearsal at the first phase it exists to exercise.
 refresh_keyring() {
+    # One array for both paths so the command printed under --dry-run cannot
+    # drift from the one a real run issues.
+    local -a cmd=(pacman -Sy --noconfirm archlinux-keyring)
     local log rc=0
     info "Refreshing the keyring..."
+    if [[ "$DRY_RUN" == true ]]; then
+        # Not `run_cmd "${cmd[@]}" >"$log"`: the redirection below is the real
+        # path's, and applying it here would send run_cmd's own [dry-run] line
+        # into a temp file that is printed only on a failure that cannot
+        # happen, i.e. nowhere. No temp file is created on this path either.
+        run_cmd "${cmd[@]}"
+        return 0
+    fi
     log=$(mktemp) || {
         error "refresh_keyring: cannot create a temp file for pacman's output"
         return 1
     }
-    pacman -Sy --noconfirm archlinux-keyring >"$log" 2>&1 || rc=$?
+    "${cmd[@]}" >"$log" 2>&1 || rc=$?
     if (( rc != 0 )); then
         error "refreshing archlinux-keyring failed:"
         cat "$log" >&2
@@ -401,13 +470,24 @@ refresh_keyring() {
 #
 # It does have to be *said*, though. Both of those used to be silent, and
 # pacstrapping from an unranked mirrorlist looks exactly like a hung phase.
+# Which is why the absent-reflector warning below still fires under --dry-run:
+# it is a fact about the host, and the one case with no command to withhold.
 rank_mirrors() {
+    # As in refresh_keyring: one array, so --dry-run cannot print a command a
+    # real run would not issue.
+    local -a cmd=(reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist)
     if ! command -v reflector >/dev/null 2>&1; then
         warn "reflector is not installed; keeping the ISO's mirrorlist"
         return 0
     fi
     info "Ranking mirrors with reflector..."
-    if ! reflector --latest 10 --sort rate --save /etc/pacman.d/mirrorlist >/dev/null 2>&1; then
+    if [[ "$DRY_RUN" == true ]]; then
+        # Again not `run_cmd ... >/dev/null 2>&1`, which would discard the
+        # [dry-run] line the rehearsal exists to show. Still never fatal.
+        run_cmd "${cmd[@]}"
+        return 0
+    fi
+    if ! "${cmd[@]}" >/dev/null 2>&1; then
         warn "reflector failed; keeping the ISO's mirrorlist"
     fi
 }

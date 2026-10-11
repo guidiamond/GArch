@@ -302,6 +302,22 @@ lazy.setup({
 		"OXY2DEV/markview.nvim",
 		lazy = false,
 	},
+  {
+    "pwntester/octo.nvim",
+    cmd = "Octo",
+		config = load_config("octo"),
+    opts = {
+      -- or "fzf-lua" or "snacks" or "default"
+      picker = "telescope",
+      -- bare Octo command opens picker of commands
+      enable_builtin = true,
+    },
+    dependencies = {
+      "nvim-lua/plenary.nvim",
+      "nvim-telescope/telescope.nvim",
+      "nvim-tree/nvim-web-devicons", -- optional if file_panel.icons is a function
+    },
+  }
 
 	-- Plug 'KabbAmine/vCoolor.vim'
 	-- Plug 'iamcco/markdown-preview.nvim', { 'do': 'cd app & yarn install'  } " Preview Markdown in real-time with a web browser
