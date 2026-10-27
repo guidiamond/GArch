@@ -16,7 +16,6 @@ export PYTHON_ENV="$HOME/.virtualenv/nvim"
 # export ZSH="$HOME/.local/share/zinit/zinit.git"
 export EDITOR="nvim"
 export UPDATE_ZSH_DAYS=7 # Auto update weekly
-export GOOGLE_APPLICATION_CREDENTIALS="$HOME/.config/gcloud/keys/gui-service-account.json"
 
 
 
