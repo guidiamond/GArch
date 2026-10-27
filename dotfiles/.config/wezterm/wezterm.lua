@@ -34,17 +34,20 @@ config.mouse_bindings = {
 		action = wezterm.action.CompleteSelectionOrOpenLinkAtMouseCursor("ClipboardAndPrimarySelection"),
 	},
 	-- Apps that capture the mouse (herdr, tmux) swallow the plain click above.
-	-- SHIFT is wezterm's bypass_mouse_reporting_modifiers default; CTRL keeps this
-	-- off bare Shift+click, which extends the selection.
+	-- mouse_reporting = true makes Ctrl+click open links even while the app
+	-- owns the mouse (Shift-bypass doesn't work for this: wezterm strips SHIFT
+	-- before matching, so a CTRL|SHIFT binding never fires).
 	{
 		event = { Up = { streak = 1, button = "Left" } },
-		mods = "CTRL|SHIFT",
+		mods = "CTRL",
+		mouse_reporting = true,
 		action = wezterm.action.OpenLinkAtMouseCursor,
 	},
 	-- Swallow the matching press so the captured app never sees a stray click.
 	{
 		event = { Down = { streak = 1, button = "Left" } },
-		mods = "CTRL|SHIFT",
+		mods = "CTRL",
+		mouse_reporting = true,
 		action = wezterm.action.Nop,
 	},
 }
